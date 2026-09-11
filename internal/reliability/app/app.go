@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
-	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	"github.com/MycelDB/mycel-lab/internal/reliability/runner"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
 
@@ -266,7 +266,7 @@ func runDelete(args []string, stdout, stderr io.Writer) int {
 
 func runRun(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite> <name-or-path> [flags]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [flags]")
 		return 0
 	}
 	if len(nonFlagArgs(args)) < 2 {
@@ -276,24 +276,43 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	positional := nonFlagArgs(args)
 	switch positional[0] {
 	case "scenario-file":
-		if hasFlag(args, "--dry-run") {
-			resolved, err := catalog.ResolveScenarioFile(positional[1], catalog.ResolveOptions{ProfileDirs: flagValues(args, "--profile-dir")})
+		resolved, err := catalog.ResolveScenarioFile(positional[1], catalog.ResolveOptions{ProfileDirs: flagValues(args, "--profile-dir")})
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve scenario-file: %v\n", err)
+			return 1
+		}
+		result, err := runner.RunScenario(context.Background(), resolved, runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
+		if err != nil {
+			fmt.Fprintf(stderr, "run scenario-file: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "run %s %s: %s\nartifacts: %s\n", positional[0], positional[1], result.Status, result.ArtifactRoot)
+		return 0
+	case "suite-file":
+		result, err := runner.RunSuiteFile(context.Background(), positional[1], runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
+		if err != nil {
+			fmt.Fprintf(stderr, "run suite-file: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "suite %s: %d scenario(s)\n", result.SuiteName, len(result.Results))
+		for _, scenario := range result.Results {
+			fmt.Fprintf(stdout, "- %s: %s artifacts=%s\n", scenario.ScenarioName, scenario.Status, scenario.ArtifactRoot)
+		}
+		return 0
+	case "suite":
+		if strings.HasSuffix(positional[1], ".yaml") || strings.HasSuffix(positional[1], ".yml") || strings.Contains(positional[1], "/") {
+			result, err := runner.RunSuiteFile(context.Background(), positional[1], runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
 			if err != nil {
-				fmt.Fprintf(stderr, "resolve scenario-file: %v\n", err)
+				fmt.Fprintf(stderr, "run suite: %v\n", err)
 				return 1
 			}
-			data, err := spec.MarshalYAML(resolved)
-			if err != nil {
-				fmt.Fprintf(stderr, "marshal resolved scenario: %v\n", err)
-				return 1
-			}
-			fmt.Fprint(stdout, string(data))
+			fmt.Fprintf(stdout, "suite %s: %d scenario(s)\n", result.SuiteName, len(result.Results))
 			return 0
 		}
-		fmt.Fprintf(stdout, "run scenario-file %s: execution not implemented yet (planned in RH4+)\n", positional[1])
+		fmt.Fprintf(stdout, "run suite %s: catalog execution not implemented yet (planned after RH4 DB run wiring)\n", positional[1])
 		return 0
-	case "scenario", "suite":
-		fmt.Fprintf(stdout, "run %s %s: not implemented yet (planned in RH4+)\n", positional[0], positional[1])
+	case "scenario":
+		fmt.Fprintf(stdout, "run scenario %s: catalog execution not implemented yet (planned after RH4 DB run wiring)\n", positional[1])
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown run target %q\n", positional[0])

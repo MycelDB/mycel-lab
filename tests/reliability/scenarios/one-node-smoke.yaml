@@ -1,0 +1,32 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: one-node-smoke
+  description: One-node no-op smoke scenario for local deployment plumbing.
+seed: 13579
+environment:
+  driver: k3d
+  namespace: mycel-lab
+clusterRef: raft-3-node
+clusterOverrides:
+  nodes: 1
+  raft:
+    nodeCount: 1
+    partitionCount: 8
+    replicaFactor: 1
+actorGroups:
+  - name: noop-users
+    profileRef: noop
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 1
+phases:
+  - name: smoke
+    duration: 1s
+assertions:
+  final:
+    requireHealthyCluster: false
+artifacts:
+  collectScenarioSpec: true
+  collectKubernetesState: true

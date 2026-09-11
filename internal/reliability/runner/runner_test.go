@@ -1,0 +1,107 @@
+package runner
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/MycelDB/mycel-lab/internal/reliability/actors"
+	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
+	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
+	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	"github.com/MycelDB/mycel-lab/internal/reliability/store"
+)
+
+func TestPhaseTransitionsAreValid(t *testing.T) {
+	phase := PhaseState{Name: "warmup", Status: PhasePending}
+	if err := Transition(&phase, PhasePassed, phase.StartedAt); err == nil {
+		t.Fatal("Transition(pending->passed) error=nil, want invalid transition")
+	}
+	if err := Transition(&phase, PhaseRunning, phase.StartedAt); err != nil {
+		t.Fatalf("Transition(pending->running) error=%v", err)
+	}
+	if err := Transition(&phase, PhasePassed, phase.StartedAt); err != nil {
+		t.Fatalf("Transition(running->passed) error=%v", err)
+	}
+	if err := Transition(&phase, PhaseFailed, phase.StartedAt); err == nil {
+		t.Fatal("Transition(terminal->failed) error=nil, want invalid transition")
+	}
+}
+
+func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), Store: store.NewMemoryStore()})
+	if err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	if result.Status != RunPassed {
+		t.Fatalf("status=%s, want passed", result.Status)
+	}
+	for _, name := range []string{"resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json")} {
+		if _, err := os.Stat(filepath.Join(result.ArtifactRoot, name)); err != nil {
+			t.Fatalf("artifact %s missing: %v", name, err)
+		}
+	}
+}
+
+func TestRunSuiteFileExecutesSequentialScenarios(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "raft-baseline.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile() error=%v", err)
+	}
+	if result.SuiteName != "raft-baseline" || len(result.Results) != 1 {
+		t.Fatalf("suite result=%+v", result)
+	}
+	if result.Results[0].Status != RunPassed {
+		t.Fatalf("scenario status=%s", result.Results[0].Status)
+	}
+}
+
+func TestCleanupInvokedOnFailure(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	driver := &recordingDriver{}
+	_, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver, ActorFactory: func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) actors.Actor {
+		return failingActor{}
+	}})
+	if err == nil {
+		t.Fatal("RunScenario() error=nil, want actor failure")
+	}
+	if !driver.deleted {
+		t.Fatal("environment cleanup was not invoked")
+	}
+}
+
+func resolveFixtureScenario(t *testing.T, name string) spec.ResolvedScenario {
+	t.Helper()
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", name)
+	scenario, err := catalog.ResolveScenarioFile(path, catalog.ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveScenarioFile() error=%v", err)
+	}
+	return scenario
+}
+
+type failingActor struct{}
+
+func (failingActor) Start(context.Context) error                     { return errors.New("boom") }
+func (failingActor) UpdateRate(context.Context, spec.RateSpec) error { return nil }
+func (failingActor) Stop(context.Context) error                      { return nil }
+
+type recordingDriver struct{ deleted bool }
+
+func (d *recordingDriver) Preflight(context.Context) error { return nil }
+func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenario) (env.Environment, error) {
+	return env.Environment{Name: scenario.Metadata.Name, Driver: "test", Namespace: "test"}, nil
+}
+func (d *recordingDriver) Delete(context.Context, env.Environment) error {
+	d.deleted = true
+	return nil
+}
+func (d *recordingDriver) CaptureState(_ context.Context, environment env.Environment, sink *artifacts.Sink) error {
+	_, err := sink.WriteJSON("environment/state.json", environment)
+	return err
+}

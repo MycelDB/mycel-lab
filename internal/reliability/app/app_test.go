@@ -35,6 +35,7 @@ func TestRunUnknownCommand(t *testing.T) {
 func TestSubcommandSkeletons(t *testing.T) {
 	fixtureRoot := filepath.Join("..", "..", "..", "tests", "reliability")
 	scenarioPath := filepath.Join(fixtureRoot, "scenarios", "raft-3-node-short-outage.yaml")
+	artifactRoot := t.TempDir()
 	tests := [][]string{
 		{"db", "--help"},
 		{"import", "--dry-run", fixtureRoot},
@@ -42,7 +43,7 @@ func TestSubcommandSkeletons(t *testing.T) {
 		{"list", "--help"},
 		{"show", "--help"},
 		{"delete", "--help"},
-		{"run", "scenario-file", scenarioPath, "--dry-run"},
+		{"run", "scenario-file", scenarioPath, "--dry-run", "--artifact-root", artifactRoot},
 		{"version"},
 	}
 	for _, args := range tests {

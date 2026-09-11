@@ -1,0 +1,7 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: noop
+  description: No-op actor used to validate scheduling and phase rate changes.
+behavior:
+  type: noop

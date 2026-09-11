@@ -16,6 +16,8 @@ make build-mycel-lab
 
 mycel-lab import --dry-run tests/reliability/
 mycel-lab run scenario-file tests/reliability/scenarios/example.yaml --dry-run
+mycel-lab run suite-file tests/reliability/suites/raft-baseline.yaml --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/actor-noop.yaml --confirm-destructive
 ```
 
 Catalog commands require Postgres via `--database-url`, `MYCEL_LAB_DATABASE_URL`,
