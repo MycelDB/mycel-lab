@@ -1,0 +1,13 @@
+# Runtime artifacts
+artifacts/
+results/
+
+# Local configuration/secrets
+.env
+.env.*
+*.local
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
