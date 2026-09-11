@@ -275,7 +275,11 @@ func finalize(ctx context.Context, st store.Store, sink *artifacts.Sink, result 
 	}
 	summary := report.RunSummary{RunID: result.RunID, ScenarioName: result.ScenarioName, Status: string(result.Status), StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, DryRun: result.DryRun, Artifacts: artifactPaths}
 	for _, phase := range result.Phases {
-		summary.Phases = append(summary.Phases, report.PhaseSummary{Name: phase.Name, Status: string(phase.Status), Duration: phase.Duration})
+		actualDuration := time.Duration(0)
+		if !phase.StartedAt.IsZero() && !phase.FinishedAt.IsZero() {
+			actualDuration = phase.FinishedAt.Sub(phase.StartedAt).Round(time.Millisecond)
+		}
+		summary.Phases = append(summary.Phases, report.PhaseSummary{Name: phase.Name, Status: string(phase.Status), PlannedDuration: phase.Duration, ActualDuration: actualDuration})
 	}
 	if path, err := sink.WriteText("summary.md", report.Markdown(summary)); err == nil {
 		artifactPaths = append(artifactPaths, path)

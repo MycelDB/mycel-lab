@@ -7,9 +7,10 @@ import (
 )
 
 type PhaseSummary struct {
-	Name     string        `json:"name"`
-	Status   string        `json:"status"`
-	Duration time.Duration `json:"duration"`
+	Name            string        `json:"name"`
+	Status          string        `json:"status"`
+	PlannedDuration time.Duration `json:"plannedDuration"`
+	ActualDuration  time.Duration `json:"actualDuration"`
 }
 
 type RunSummary struct {
@@ -31,11 +32,14 @@ func Markdown(summary RunSummary) string {
 	fmt.Fprintf(&b, "- Dry run: `%t`\n", summary.DryRun)
 	fmt.Fprintf(&b, "- Started: `%s`\n", summary.StartedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "- Finished: `%s`\n\n", summary.FinishedAt.Format(time.RFC3339))
-	b.WriteString("## Phases\n\n")
-	b.WriteString("| Phase | Status | Planned duration |\n")
-	b.WriteString("| --- | --- | --- |\n")
+	if summary.DryRun {
+		b.WriteString("\n> Dry run: phase waits and destructive environment operations were skipped. Planned durations are validation inputs, not elapsed runtime.\n")
+	}
+	b.WriteString("\n## Phases\n\n")
+	b.WriteString("| Phase | Status | Planned duration | Actual duration |\n")
+	b.WriteString("| --- | --- | --- | --- |\n")
 	for _, phase := range summary.Phases {
-		fmt.Fprintf(&b, "| %s | %s | %s |\n", phase.Name, phase.Status, phase.Duration)
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", phase.Name, phase.Status, phase.PlannedDuration, phase.ActualDuration)
 	}
 	if len(summary.Artifacts) > 0 {
 		b.WriteString("\n## Artifacts\n\n")
