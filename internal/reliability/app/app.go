@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
+	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
 	"github.com/MycelDB/mycel-lab/internal/reliability/runner"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
@@ -37,6 +39,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runDelete(args[1:], stdout, stderr)
 	case "run":
 		return runRun(args[1:], stdout, stderr)
+	case "runs":
+		return runRuns(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, "mycel-lab development")
 		return 0
@@ -300,22 +304,111 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "suite":
-		if strings.HasSuffix(positional[1], ".yaml") || strings.HasSuffix(positional[1], ".yml") || strings.Contains(positional[1], "/") {
-			result, err := runner.RunSuiteFile(context.Background(), positional[1], runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
-			if err != nil {
-				fmt.Fprintf(stderr, "run suite: %v\n", err)
-				return 1
-			}
-			fmt.Fprintf(stdout, "suite %s: %d scenario(s)\n", result.SuiteName, len(result.Results))
-			return 0
+		suitePath := positional[1]
+		if !looksLikePath(suitePath) {
+			suitePath = filepath.Join("tests", "reliability", "suites", suitePath+".yaml")
 		}
-		fmt.Fprintf(stdout, "run suite %s: catalog execution not implemented yet (planned after RH4 DB run wiring)\n", positional[1])
+		result, err := runner.RunSuiteFile(context.Background(), suitePath, runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
+		if err != nil {
+			fmt.Fprintf(stderr, "run suite: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "suite %s: %d scenario(s)\n", result.SuiteName, len(result.Results))
+		for _, scenario := range result.Results {
+			fmt.Fprintf(stdout, "- %s: %s artifacts=%s\n", scenario.ScenarioName, scenario.Status, scenario.ArtifactRoot)
+		}
 		return 0
 	case "scenario":
-		fmt.Fprintf(stdout, "run scenario %s: catalog execution not implemented yet (planned after RH4 DB run wiring)\n", positional[1])
+		scenarioPath := positional[1]
+		if !looksLikePath(scenarioPath) {
+			scenarioPath = filepath.Join("tests", "reliability", "scenarios", scenarioPath+".yaml")
+		}
+		resolved, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProfileDirs: flagValues(args, "--profile-dir")})
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve scenario: %v\n", err)
+			return 1
+		}
+		result, err := runner.RunScenario(context.Background(), resolved, runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
+		if err != nil {
+			fmt.Fprintf(stderr, "run scenario: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "run scenario %s: %s\nartifacts: %s\n", positional[1], result.Status, result.ArtifactRoot)
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown run target %q\n", positional[0])
+		return 2
+	}
+}
+
+func runRuns(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprintln(stdout, "Usage: mycel-lab runs <list|show|compare> [arguments]")
+		return 0
+	}
+	ctx := context.Background()
+	st, ok := openPostgresFromArgs(ctx, args, stderr)
+	if !ok {
+		return 2
+	}
+	defer st.Close()
+	switch args[0] {
+	case "list":
+		runs, err := st.ListRuns(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "runs list: %v\n", err)
+			return 1
+		}
+		for _, run := range runs {
+			finished := ""
+			if run.FinishedAt != nil {
+				finished = run.FinishedAt.Format("2006-01-02T15:04:05Z07:00")
+			}
+			fmt.Fprintf(stdout, "%s\t%s\tv%d\t%s\tstarted=%s\tfinished=%s\n", run.ID, run.ScenarioName, run.ScenarioVersion, run.Status, run.StartedAt.Format("2006-01-02T15:04:05Z07:00"), finished)
+		}
+		return 0
+	case "show":
+		positional := nonFlagArgs(args)
+		if len(positional) < 2 {
+			fmt.Fprintln(stderr, "runs show requires a run id")
+			return 2
+		}
+		details, err := st.GetRun(ctx, positional[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "runs show: %v\n", err)
+			return 1
+		}
+		summary := metrics.FromRunDetails(details)
+		fmt.Fprintf(stdout, "run: %s\nscenario: %s v%d\nstatus: %s\nstarted: %s\n", details.Run.ID, details.Run.ScenarioName, details.Run.ScenarioVersion, details.Run.Status, details.Run.StartedAt.Format("2006-01-02T15:04:05Z07:00"))
+		if details.Run.FinishedAt != nil {
+			fmt.Fprintf(stdout, "finished: %s\n", details.Run.FinishedAt.Format("2006-01-02T15:04:05Z07:00"))
+		}
+		fmt.Fprintf(stdout, "events: %d\nmetrics: %d\nartifacts: %d\ncommits/sec: %.3f\ntransient errors: %d\npermanent errors: %d\n", len(details.Events), len(details.Metrics), len(details.Artifacts), summary.CommitsPerSecond, summary.TransientErrors, summary.PermanentErrors)
+		for _, artifact := range details.Artifacts {
+			fmt.Fprintf(stdout, "artifact: %s\t%s\n", artifact.Type, artifact.Path)
+		}
+		return 0
+	case "compare":
+		positional := nonFlagArgs(args)
+		if len(positional) < 3 {
+			fmt.Fprintln(stderr, "runs compare requires two run ids")
+			return 2
+		}
+		left, err := st.GetRun(ctx, positional[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "runs compare: %v\n", err)
+			return 1
+		}
+		right, err := st.GetRun(ctx, positional[2])
+		if err != nil {
+			fmt.Fprintf(stderr, "runs compare: %v\n", err)
+			return 1
+		}
+		cmp := metrics.Compare(metrics.FromRunDetails(left), metrics.FromRunDetails(right))
+		fmt.Fprintf(stdout, "compare: %s -> %s\ncommits/sec delta: %.3f\ntransient error delta: %d\npermanent error delta: %d\n", positional[1], positional[2], cmp.Delta.CommitsPerSecond, cmp.Delta.TransientErrors, cmp.Delta.PermanentErrors)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown runs command %q\n", args[0])
 		return 2
 	}
 }
@@ -334,6 +427,7 @@ Commands:
   show     Show one catalog definition as YAML
   delete   Delete one unused catalog definition version
   run      Run scenarios or suites
+  runs     List, show, and compare persisted runs
   version  Print version information
 
 Use "mycel-lab <command> --help" for command-specific help.
@@ -381,6 +475,10 @@ func hasFlag(args []string, name string) bool {
 		}
 	}
 	return false
+}
+
+func looksLikePath(value string) bool {
+	return strings.HasSuffix(value, ".yaml") || strings.HasSuffix(value, ".yml") || strings.Contains(value, string(os.PathSeparator))
 }
 
 func openPostgresFromArgs(ctx context.Context, args []string, stderr io.Writer) (*store.PostgresStore, bool) {

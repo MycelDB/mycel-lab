@@ -11,6 +11,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
@@ -44,6 +45,26 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(result.ArtifactRoot, name)); err != nil {
 			t.Fatalf("artifact %s missing: %v", name, err)
 		}
+	}
+}
+
+func TestRunScenarioGraphMetricsAggregate(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "graph-actor-smoke.yaml")
+	st := store.NewMemoryStore()
+	result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), Store: st, ConfirmDestructive: true})
+	if err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	details, err := st.GetRun(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error=%v", err)
+	}
+	summary := metrics.FromRunDetails(details)
+	if summary.CommitsPerSecond <= 0 {
+		t.Fatalf("summary has no commit rate: %+v", summary)
+	}
+	if details.Run.Status != string(RunPassed) || details.Run.FinishedAt == nil {
+		t.Fatalf("run did not finish cleanly in store: %+v", details.Run)
 	}
 }
 

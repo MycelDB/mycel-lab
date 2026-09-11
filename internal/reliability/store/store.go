@@ -92,6 +92,13 @@ type RunArtifact struct {
 	Metadata  []byte
 }
 
+type RunDetails struct {
+	Run       Run
+	Events    []RunEvent
+	Metrics   []RunMetric
+	Artifacts []RunArtifact
+}
+
 type Store interface {
 	UpsertDefinition(ctx context.Context, def Definition) (UpsertResult, error)
 	ListDefinitions(ctx context.Context, kind DefinitionKind) ([]Definition, error)
@@ -100,6 +107,9 @@ type Store interface {
 	DeleteDefinition(ctx context.Context, kind DefinitionKind, name string, version int) error
 	MarkDefinitionUsed(ctx context.Context, kind DefinitionKind, name string, version int) error
 	CreateRun(ctx context.Context, run Run, actors []RunActorProfile, phases []RunPhase) error
+	FinishRun(ctx context.Context, runID string, status string) error
+	ListRuns(ctx context.Context) ([]Run, error)
+	GetRun(ctx context.Context, runID string) (RunDetails, error)
 	AppendEvent(ctx context.Context, event RunEvent) error
 	AppendMetric(ctx context.Context, metric RunMetric) error
 	AppendArtifact(ctx context.Context, artifact RunArtifact) error

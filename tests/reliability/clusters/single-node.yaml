@@ -1,0 +1,32 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ClusterProfile
+metadata:
+  name: single-node
+  description: Single-node cluster profile for graph smoke scenarios.
+cluster:
+  nodes: 1
+  image: myceldb/mycel:latest
+  raft:
+    nodeCount: 1
+    partitionCount: 8
+    replicaFactor: 1
+    localNodeIDMode: ordinal
+    electionTick: 25
+    heartbeatTick: 1
+    sendTimeout: 500ms
+    compaction:
+      mode: off
+      snapshotEntries: 0
+      snapshotInterval: 0
+      snapshotMaxLogBytes: 0
+      snapshotMinRetainEntries: 0
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  storage:
+    size: "10Gi"
+    className: local-path

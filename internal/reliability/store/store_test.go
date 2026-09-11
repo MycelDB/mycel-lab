@@ -49,6 +49,41 @@ func TestMemoryDefinitionLifecycle(t *testing.T) {
 	}
 }
 
+func TestMemoryRunDetailsLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryStore()
+	run := Run{ID: "run-1", ScenarioName: "example", ScenarioVersion: 1, Status: "running", Seed: 1, ResolvedJSON: []byte(`{"kind":"ResolvedScenario"}`)}
+	if err := st.CreateRun(ctx, run, nil, nil); err != nil {
+		t.Fatalf("CreateRun() error=%v", err)
+	}
+	if err := st.AppendEvent(ctx, RunEvent{RunID: run.ID, EventType: "phase-started", Payload: []byte(`{}`)}); err != nil {
+		t.Fatalf("AppendEvent() error=%v", err)
+	}
+	if err := st.AppendMetric(ctx, RunMetric{RunID: run.ID, Name: "commits", Value: 3, Labels: []byte(`{}`)}); err != nil {
+		t.Fatalf("AppendMetric() error=%v", err)
+	}
+	if err := st.AppendArtifact(ctx, RunArtifact{RunID: run.ID, Type: "file", Path: "result.json", Metadata: []byte(`{}`)}); err != nil {
+		t.Fatalf("AppendArtifact() error=%v", err)
+	}
+	if err := st.FinishRun(ctx, run.ID, "passed"); err != nil {
+		t.Fatalf("FinishRun() error=%v", err)
+	}
+	runs, err := st.ListRuns(ctx)
+	if err != nil {
+		t.Fatalf("ListRuns() error=%v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != "passed" || runs[0].FinishedAt == nil {
+		t.Fatalf("runs=%+v, want one finished passed run", runs)
+	}
+	details, err := st.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error=%v", err)
+	}
+	if len(details.Events) != 1 || len(details.Metrics) != 1 || len(details.Artifacts) != 1 {
+		t.Fatalf("details=%+v", details)
+	}
+}
+
 func TestIntegrationPostgresMigrateDefinitionsAndRunRows(t *testing.T) {
 	databaseURL := os.Getenv("MYCEL_RELIABILITY_TEST_DATABASE_URL")
 	if databaseURL == "" {

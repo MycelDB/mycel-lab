@@ -281,6 +281,7 @@ func finalize(ctx context.Context, st store.Store, sink *artifacts.Sink, result 
 		artifactPaths = append(artifactPaths, path)
 	}
 	if st != nil {
+		_ = st.FinishRun(ctx, result.RunID, string(result.Status))
 		for _, artifactPath := range artifactPaths {
 			_ = st.AppendArtifact(ctx, store.RunArtifact{RunID: result.RunID, Type: "file", Path: artifactPath, Metadata: []byte(`{}`)})
 		}
@@ -298,11 +299,39 @@ type runRecorder struct {
 }
 
 func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEvent) error {
-	return appendEvent(ctx, r.store, r.sink, r.runID, artifacts.EventNow(event.Type, "", event.ActorID, event))
+	if err := appendEvent(ctx, r.store, r.sink, r.runID, artifacts.EventNow(event.Type, "", event.ActorID, event)); err != nil {
+		return err
+	}
+	if event.Type == "graph-transaction-acknowledged" {
+		_ = appendMetric(ctx, r.store, r.sink, r.runID, "commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName})
+		_ = appendMetric(ctx, r.store, r.sink, r.runID, "transaction_latency_ms", 0, map[string]any{"actorId": event.ActorID})
+	}
+	return nil
 }
 
 func (r *runRecorder) RecordRuntimeEvent(ctx context.Context, record events.Record) error {
-	return appendEvent(ctx, r.store, r.sink, r.runID, events.ArtifactEvent(record))
+	if err := appendEvent(ctx, r.store, r.sink, r.runID, events.ArtifactEvent(record)); err != nil {
+		return err
+	}
+	if record.Type == "event-started" && (record.EventType == "pod-restart" || record.EventType == "rolling-restart") {
+		_ = appendMetric(ctx, r.store, r.sink, r.runID, "pod_restarts", 1, map[string]any{"phase": record.PhaseName, "eventType": record.EventType})
+	}
+	return nil
+}
+
+func appendMetric(ctx context.Context, st store.Store, sink *artifacts.Sink, runID, name string, value float64, labels map[string]any) error {
+	if labels == nil {
+		labels = map[string]any{}
+	}
+	labelJSON, _ := json.Marshal(labels)
+	record := map[string]any{"runId": runID, "name": name, "value": value, "labels": labels, "time": time.Now().UTC()}
+	if _, err := sink.AppendJSONL("metrics.jsonl", record); err != nil {
+		return err
+	}
+	if st != nil {
+		return st.AppendMetric(ctx, store.RunMetric{RunID: runID, Name: name, Value: value, Labels: labelJSON})
+	}
+	return nil
 }
 
 func appendEvent(ctx context.Context, st store.Store, sink *artifacts.Sink, runID string, event artifacts.Event) error {

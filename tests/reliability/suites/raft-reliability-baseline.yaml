@@ -1,0 +1,13 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: raft-reliability-baseline
+  description: Baseline reliability suite for graph, raft, and named-pod disruption smoke coverage.
+scenarios:
+  - path: ../scenarios/one-node-graph-smoke.yaml
+  - path: ../scenarios/three-node-graph-smoke.yaml
+  - path: ../scenarios/three-node-short-outage.yaml
+  - path: ../scenarios/five-node-long-outage.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

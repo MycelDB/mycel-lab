@@ -7,6 +7,7 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 
 - [Structured reliability harness design](docs/design/reliability-harness.md)
 - [Structured reliability harness implementation plan](docs/implementation/reliability-harness-implementation-plan.md)
+- [Operations guide](docs/operations.md)
 
 ## Current commands
 
@@ -21,6 +22,7 @@ mycel-lab run scenario-file tests/reliability/scenarios/actor-noop.yaml --confir
 mycel-lab run scenario-file tests/reliability/scenarios/graph-actor-smoke.yaml --confirm-destructive
 mycel-lab run scenario-file tests/reliability/scenarios/graph-convergence-smoke.yaml --confirm-destructive
 mycel-lab run scenario-file tests/reliability/scenarios/three-node-short-outage.yaml --confirm-destructive
+mycel-lab run suite raft-reliability-baseline --dry-run
 ```
 
 Catalog commands require Postgres via `--database-url`, `MYCEL_LAB_DATABASE_URL`,

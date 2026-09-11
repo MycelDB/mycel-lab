@@ -1,0 +1,29 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: one-node-graph-smoke
+  description: Single-node graph transaction smoke scenario.
+seed: 8080
+environment:
+  driver: k3d
+  namespace: mycel-lab
+clusterRef: single-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 10
+phases:
+  - name: smoke
+    duration: 1s
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

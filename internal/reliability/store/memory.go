@@ -154,8 +154,66 @@ func (s *MemoryStore) CreateRun(_ context.Context, run Run, _ []RunActorProfile,
 	if _, exists := s.runs[run.ID]; exists {
 		return fmt.Errorf("run %q already exists", run.ID)
 	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now().UTC()
+	}
+	if run.CreatedAt.IsZero() {
+		run.CreatedAt = time.Now().UTC()
+	}
 	s.runs[run.ID] = run
 	return nil
+}
+
+func (s *MemoryStore) FinishRun(_ context.Context, runID string, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	run.Status = status
+	run.FinishedAt = &now
+	s.runs[runID] = run
+	return nil
+}
+
+func (s *MemoryStore) ListRuns(_ context.Context) ([]Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Run, 0, len(s.runs))
+	for _, run := range s.runs {
+		out = append(out, run)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) GetRun(_ context.Context, runID string) (RunDetails, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		return RunDetails{}, ErrNotFound
+	}
+	var details RunDetails
+	details.Run = run
+	for _, event := range s.events {
+		if event.RunID == runID {
+			details.Events = append(details.Events, event)
+		}
+	}
+	for _, metric := range s.metrics {
+		if metric.RunID == runID {
+			details.Metrics = append(details.Metrics, metric)
+		}
+	}
+	for _, artifact := range s.artifacts {
+		if artifact.RunID == runID {
+			details.Artifacts = append(details.Artifacts, artifact)
+		}
+	}
+	return details, nil
 }
 
 func (s *MemoryStore) AppendEvent(_ context.Context, event RunEvent) error {

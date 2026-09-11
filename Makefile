@@ -1,4 +1,4 @@
-.PHONY: test build build-mycel-lab fmt
+.PHONY: test build build-mycel-lab fmt check-docs
 
 test:
 	go test ./...
@@ -10,3 +10,6 @@ build-mycel-lab:
 
 fmt:
 	gofmt -w $$(find . -name '*.go')
+
+check-docs:
+	python3 scripts/checkDocs.py docs/ tests/reliability/

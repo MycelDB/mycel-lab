@@ -170,6 +170,85 @@ func (s *PostgresStore) CreateRun(ctx context.Context, run Run, actors []RunActo
 	return tx.Commit()
 }
 
+func (s *PostgresStore) FinishRun(ctx context.Context, runID string, status string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE test_runs SET status = $2, finished_at = now() WHERE id = $1`, runID, status)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListRuns(ctx context.Context) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, scenario_name, scenario_version, status, seed, resolved_spec, started_at, finished_at, created_at FROM test_runs ORDER BY started_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *PostgresStore) GetRun(ctx context.Context, runID string) (RunDetails, error) {
+	run, err := scanRun(s.db.QueryRowContext(ctx, `SELECT id, scenario_name, scenario_version, status, seed, resolved_spec, started_at, finished_at, created_at FROM test_runs WHERE id = $1`, runID))
+	if err != nil {
+		return RunDetails{}, err
+	}
+	details := RunDetails{Run: run}
+	eventRows, err := s.db.QueryContext(ctx, `SELECT run_id, COALESCE(phase_name, ''), event_type, COALESCE(actor_id, ''), payload FROM test_run_events WHERE run_id = $1 ORDER BY event_time, id`, runID)
+	if err != nil {
+		return RunDetails{}, err
+	}
+	defer eventRows.Close()
+	for eventRows.Next() {
+		var event RunEvent
+		if err := eventRows.Scan(&event.RunID, &event.PhaseName, &event.EventType, &event.ActorID, &event.Payload); err != nil {
+			return RunDetails{}, err
+		}
+		details.Events = append(details.Events, event)
+	}
+	if err := eventRows.Err(); err != nil {
+		return RunDetails{}, err
+	}
+	metricRows, err := s.db.QueryContext(ctx, `SELECT run_id, name, value, labels FROM test_run_metrics WHERE run_id = $1 ORDER BY metric_time, id`, runID)
+	if err != nil {
+		return RunDetails{}, err
+	}
+	defer metricRows.Close()
+	for metricRows.Next() {
+		var metric RunMetric
+		if err := metricRows.Scan(&metric.RunID, &metric.Name, &metric.Value, &metric.Labels); err != nil {
+			return RunDetails{}, err
+		}
+		details.Metrics = append(details.Metrics, metric)
+	}
+	if err := metricRows.Err(); err != nil {
+		return RunDetails{}, err
+	}
+	artifactRows, err := s.db.QueryContext(ctx, `SELECT run_id, artifact_type, path, COALESCE(media_type, ''), size_bytes, metadata FROM test_run_artifacts WHERE run_id = $1 ORDER BY created_at, id`, runID)
+	if err != nil {
+		return RunDetails{}, err
+	}
+	defer artifactRows.Close()
+	for artifactRows.Next() {
+		var artifact RunArtifact
+		if err := artifactRows.Scan(&artifact.RunID, &artifact.Type, &artifact.Path, &artifact.MediaType, &artifact.SizeBytes, &artifact.Metadata); err != nil {
+			return RunDetails{}, err
+		}
+		details.Artifacts = append(details.Artifacts, artifact)
+	}
+	return details, artifactRows.Err()
+}
+
 func (s *PostgresStore) AppendEvent(ctx context.Context, event RunEvent) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO test_run_events (run_id, phase_name, event_type, actor_id, payload) VALUES ($1, NULLIF($2, ''), $3, NULLIF($4, ''), $5)`, event.RunID, event.PhaseName, event.EventType, event.ActorID, jsonOrObject(event.Payload))
 	return err
@@ -212,6 +291,17 @@ func tableForKind(kind DefinitionKind) (string, error) {
 
 type scanner interface {
 	Scan(dest ...any) error
+}
+
+func scanRun(row scanner) (Run, error) {
+	var run Run
+	if err := row.Scan(&run.ID, &run.ScenarioName, &run.ScenarioVersion, &run.Status, &run.Seed, &run.ResolvedJSON, &run.StartedAt, &run.FinishedAt, &run.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, ErrNotFound
+		}
+		return Run{}, err
+	}
+	return run, nil
 }
 
 func scanDefinition(row scanner, kind DefinitionKind) (Definition, error) {
