@@ -33,12 +33,15 @@ func TestRunUnknownCommand(t *testing.T) {
 }
 
 func TestSubcommandSkeletons(t *testing.T) {
-	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml")
+	fixtureRoot := filepath.Join("..", "..", "..", "tests", "reliability")
+	scenarioPath := filepath.Join(fixtureRoot, "scenarios", "raft-3-node-short-outage.yaml")
 	tests := [][]string{
-		{"db", "migrate"},
-		{"db", "status"},
-		{"import", "--dry-run", "tests/reliability"},
-		{"export", "scenario", "raft-5-node"},
+		{"db", "--help"},
+		{"import", "--dry-run", fixtureRoot},
+		{"export", "--help"},
+		{"list", "--help"},
+		{"show", "--help"},
+		{"delete", "--help"},
 		{"run", "scenario-file", scenarioPath, "--dry-run"},
 		{"version"},
 	}
@@ -50,6 +53,20 @@ func TestSubcommandSkeletons(t *testing.T) {
 		if stdout.Len() == 0 {
 			t.Fatalf("Run(%v) wrote no stdout", args)
 		}
+	}
+}
+
+func TestDBRequiresDatabaseURL(t *testing.T) {
+	t.Setenv("MYCEL_LAB_DATABASE_URL", "")
+	t.Setenv("MYCEL_RELIABILITY_DATABASE_URL", "")
+	t.Setenv("DATABASE_URL", "")
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"db", "status"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("Run(db status) code=0, want nonzero")
+	}
+	if !strings.Contains(stderr.String(), "database URL is required") {
+		t.Fatalf("stderr missing database URL requirement: %q", stderr.String())
 	}
 }
 

@@ -2,6 +2,7 @@ package spec
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -48,6 +49,23 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 
 func (d Duration) MarshalYAML() (any, error) {
 	return d.String(), nil
+}
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.String())
+}
+
+func (d *Duration) UnmarshalJSON(raw []byte) error {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("parse duration %q: %w", value, err)
+	}
+	d.Duration = parsed
+	return nil
 }
 
 type ClusterProfile struct {
