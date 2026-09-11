@@ -18,6 +18,7 @@ make build-mycel-lab
 mycel-lab import --dry-run tests/reliability/
 mycel-lab run scenario-file tests/reliability/scenarios/example.yaml --dry-run
 mycel-lab run suite-file tests/reliability/suites/raft-baseline.yaml --dry-run
+# Non-dry runs require local k3d + kubectl and create disposable clusters.
 mycel-lab run scenario-file tests/reliability/scenarios/actor-noop.yaml --confirm-destructive
 mycel-lab run scenario-file tests/reliability/scenarios/graph-actor-smoke.yaml --confirm-destructive
 mycel-lab run scenario-file tests/reliability/scenarios/graph-convergence-smoke.yaml --confirm-destructive

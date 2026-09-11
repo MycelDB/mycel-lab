@@ -130,7 +130,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	driver := opts.EnvironmentDriver
 	if driver == nil {
-		driver = env.DryRunDriver{}
+		driver = defaultEnvironmentDriver(scenario, opts)
 	}
 	if !opts.DryRun {
 		if err := env.RequireDestructiveConfirmation(env.Options{ConfirmDestructive: opts.ConfirmDestructive}); err != nil {
@@ -145,22 +145,27 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 	}
 	cleanupEnvironment := true
+	runFailedAfterEnvironmentCreate := false
 	defer func() {
-		if cleanupEnvironment {
+		if cleanupEnvironment && !(runFailedAfterEnvironmentCreate && opts.KeepEnvironmentOnFailure) {
 			_ = driver.Delete(context.Background(), environment)
 		}
 	}()
+	failAfterEnvironmentCreate := func(status RunStatus, err error) (Result, error) {
+		runFailedAfterEnvironmentCreate = true
+		return finalize(ctx, opts.Store, sink, result, status, err)
+	}
 	if err := driver.CaptureState(ctx, environment, sink); err != nil {
-		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	recorder := &runRecorder{store: opts.Store, sink: sink, runID: runID}
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
-		eventRuntime = events.LocalRuntime{}
+		eventRuntime = defaultEventRuntime(opts, environment)
 	}
 	scheduler := actors.NewSchedulerWithRecorder(scenario, opts.ActorFactory, recorder)
 	if err := scheduler.Start(ctx); err != nil {
-		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	defer scheduler.Stop(context.Background())
 
@@ -168,21 +173,21 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		select {
 		case <-ctx.Done():
 			_ = Transition(&result.Phases[i], PhaseAborted, time.Now().UTC())
-			return finalize(ctx, opts.Store, sink, result, RunAborted, ctx.Err())
+			return failAfterEnvironmentCreate(RunAborted, ctx.Err())
 		default:
 		}
 		if err := Transition(&result.Phases[i], PhaseRunning, time.Now().UTC()); err != nil {
-			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		phaseSpec := scenario.Phases[i]
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-started", phaseSpec.Name, "", map[string]any{"dryRun": opts.DryRun}))
 		if err := eventRuntime.ExecutePhaseEvents(ctx, phaseSpec, opts.DryRun, recorder); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
-			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if err := scheduler.ApplyPhase(ctx, phaseSpec); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
-			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if opts.DryRun {
 			_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-dry-run", phaseSpec.Name, "", map[string]any{"plannedDuration": phaseSpec.Duration.String()}))
@@ -192,23 +197,42 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			case <-ctx.Done():
 				timer.Stop()
 				_ = Transition(&result.Phases[i], PhaseAborted, time.Now().UTC())
-				return finalize(ctx, opts.Store, sink, result, RunAborted, ctx.Err())
+				return failAfterEnvironmentCreate(RunAborted, ctx.Err())
 			case <-timer.C:
 			}
 		}
 		if err := scheduler.RestoreBaseRates(ctx); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
-			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if err := Transition(&result.Phases[i], PhasePassed, time.Now().UTC()); err != nil {
-			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-passed", phaseSpec.Name, "", nil))
 	}
-	if result.Status == RunFailed && opts.KeepEnvironmentOnFailure {
-		cleanupEnvironment = false
-	}
 	return finalize(ctx, opts.Store, sink, result, RunPassed, nil)
+}
+
+func defaultEnvironmentDriver(scenario spec.ResolvedScenario, opts Options) env.EnvironmentDriver {
+	if opts.DryRun {
+		return env.DryRunDriver{}
+	}
+	switch scenario.Environment.Driver {
+	case "", "k3d", "kubernetes":
+		return env.K3DDriver{Confirmed: opts.ConfirmDestructive}
+	default:
+		return env.DryRunDriver{}
+	}
+}
+
+func defaultEventRuntime(opts Options, environment env.Environment) events.Runtime {
+	if opts.DryRun {
+		return events.LocalRuntime{}
+	}
+	if environment.Driver == "k3d" || environment.Driver == "kubernetes" {
+		return events.NewKubernetesRuntime(environment.Context, environment.Namespace, nil)
+	}
+	return events.LocalRuntime{}
 }
 
 func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, error) {

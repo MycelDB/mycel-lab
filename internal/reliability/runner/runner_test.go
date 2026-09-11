@@ -51,7 +51,7 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 func TestRunScenarioGraphMetricsAggregate(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "graph-actor-smoke.yaml")
 	st := store.NewMemoryStore()
-	result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), Store: st, ConfirmDestructive: true})
+	result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), Store: st, ConfirmDestructive: true, EnvironmentDriver: env.DryRunDriver{}})
 	if err != nil {
 		t.Fatalf("RunScenario() error=%v", err)
 	}

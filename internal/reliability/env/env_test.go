@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
+	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
 
@@ -50,4 +52,48 @@ func TestK3DPreflightRequiresConfirmation(t *testing.T) {
 	if !strings.Contains(err.Error(), "--confirm-destructive") {
 		t.Fatalf("Preflight() error=%v, want confirmation message", err)
 	}
+}
+
+func TestK3DDriverCreateAppliesManifestsAndWaits(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "Example Scenario"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns"}, Cluster: spec.ClusterSpec{Nodes: 1, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
+	environment, err := driver.Create(context.Background(), scenario)
+	if err != nil {
+		t.Fatalf("Create() error=%v", err)
+	}
+	if environment.Driver != "k3d" || environment.Namespace != "test-ns" || !strings.HasPrefix(environment.Context, "k3d-mlab-example-scenar-") {
+		t.Fatalf("environment=%+v", environment)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"k3d cluster create", "kubectl --context " + environment.Context + " apply -f", "kubectl --context " + environment.Context + " -n test-ns rollout status statefulset/myceld", "kubectl --context " + environment.Context + " -n test-ns wait pods -l app=myceld"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
+func TestK3DDriverCaptureStateWritesArtifacts(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSink() error=%v", err)
+	}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test"}
+	if err := driver.CaptureState(context.Background(), environment, sink); err != nil {
+		t.Fatalf("CaptureState() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if !strings.Contains(joined, "get all,pvc") || !strings.Contains(joined, "describe pods") || !strings.Contains(joined, "logs statefulset/myceld") {
+		t.Fatalf("capture commands missing expected kubectl calls:\n%s", joined)
+	}
+}
+
+type fakeRunner struct{ commands []string }
+
+func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
 }

@@ -59,9 +59,17 @@ Run a baseline scenario by name from `tests/reliability/scenarios/`:
 mycel-lab run scenario one-node-graph-smoke --confirm-destructive
 ```
 
-Current non-dry-run execution uses the local harness foundations and dry-run
-cluster driver; real k3d/Kubernetes mutation remains behind the environment
-driver boundary.
+Non-dry-run execution for `environment.driver: k3d` creates a disposable k3d
+cluster, applies the rendered MycelDB Kubernetes manifests, waits for the
+StatefulSet pods to become ready, runs phase events through `kubectl`, captures
+Kubernetes state/log artifacts, and deletes the cluster during cleanup.
+
+Required local tools:
+
+```sh
+k3d version
+kubectl version --client=true
+```
 
 ## Running suites
 
@@ -100,6 +108,15 @@ Use `--keep-environment-on-failure` with scenario execution to preserve the
 environment after a failed run. Destructive environment operations require
 `--confirm-destructive`; this prevents accidental mutation while preserving a
 safe dry-run mode.
+
+The generated cluster name starts with `mycel-lab-`, and the Kubernetes context
+is `k3d-<cluster-name>`. If a process is interrupted before cleanup, inspect and
+remove clusters manually with:
+
+```sh
+k3d cluster list
+k3d cluster delete <cluster-name>
+```
 
 ## Safety notes
 
