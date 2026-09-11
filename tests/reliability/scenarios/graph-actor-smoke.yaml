@@ -1,0 +1,29 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: graph-actor-smoke
+  description: Short graph transaction actor smoke scenario.
+seed: 4242
+environment:
+  driver: k3d
+  namespace: mycel-lab
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 2
+    rate:
+      mode: group-total
+      commitsPerSecond: 20
+phases:
+  - name: graph-smoke
+    duration: 1s
+assertions:
+  final:
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true

@@ -415,7 +415,7 @@ func (s Scenario) Validate() error {
 
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case "pod-stop", "pod-restart", "pod-delete":
+	case "pod-stop", "pod-restart", "pod-delete", "rolling-restart":
 		return true
 	default:
 		return false

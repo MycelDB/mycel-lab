@@ -1,0 +1,41 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: three-node-short-outage
+  description: Three-node graph smoke with a deterministic pod-stop event.
+seed: 6262
+environment:
+  driver: k3d
+  namespace: mycel-lab
+clusterRef: raft-3-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 10
+phases:
+  - name: warmup
+    duration: 1s
+  - name: outage
+    duration: 1s
+    events:
+      - type: pod-stop
+        target:
+          pod: myceld-1
+        duration: 100ms
+    outcome:
+      availability: expected-degradation
+  - name: recovery
+    duration: 1s
+    assertions:
+      requireConvergedCounts: true
+assertions:
+  final:
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectKubernetesState: true
+  collectActorEvents: true

@@ -14,6 +14,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/deploy"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/events"
 	"github.com/MycelDB/mycel-lab/internal/reliability/report"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
@@ -65,6 +66,7 @@ type Options struct {
 	ConfirmDestructive       bool
 	KeepEnvironmentOnFailure bool
 	EnvironmentDriver        env.EnvironmentDriver
+	EventRuntime             events.Runtime
 	ActorFactory             actors.Factory
 }
 
@@ -151,7 +153,12 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if err := driver.CaptureState(ctx, environment, sink); err != nil {
 		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 	}
-	scheduler := actors.NewScheduler(scenario, opts.ActorFactory)
+	recorder := &runRecorder{store: opts.Store, sink: sink, runID: runID}
+	eventRuntime := opts.EventRuntime
+	if eventRuntime == nil {
+		eventRuntime = events.LocalRuntime{}
+	}
+	scheduler := actors.NewSchedulerWithRecorder(scenario, opts.ActorFactory, recorder)
 	if err := scheduler.Start(ctx); err != nil {
 		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 	}
@@ -169,6 +176,10 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		}
 		phaseSpec := scenario.Phases[i]
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-started", phaseSpec.Name, "", map[string]any{"dryRun": opts.DryRun}))
+		if err := eventRuntime.ExecutePhaseEvents(ctx, phaseSpec, opts.DryRun, recorder); err != nil {
+			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+		}
 		if err := scheduler.ApplyPhase(ctx, phaseSpec); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
 			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
@@ -278,6 +289,20 @@ func finalize(ctx context.Context, st store.Store, sink *artifacts.Sink, result 
 		return result, runErr
 	}
 	return result, nil
+}
+
+type runRecorder struct {
+	store store.Store
+	sink  *artifacts.Sink
+	runID string
+}
+
+func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEvent) error {
+	return appendEvent(ctx, r.store, r.sink, r.runID, artifacts.EventNow(event.Type, "", event.ActorID, event))
+}
+
+func (r *runRecorder) RecordRuntimeEvent(ctx context.Context, record events.Record) error {
+	return appendEvent(ctx, r.store, r.sink, r.runID, events.ArtifactEvent(record))
 }
 
 func appendEvent(ctx context.Context, st store.Store, sink *artifacts.Sink, runID string, event artifacts.Event) error {

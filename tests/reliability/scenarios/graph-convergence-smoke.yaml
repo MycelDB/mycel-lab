@@ -1,0 +1,37 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: graph-convergence-smoke
+  description: Graph actor scenario with convergence-oriented assertions.
+seed: 5151
+environment:
+  driver: k3d
+  namespace: mycel-lab
+clusterRef: raft-3-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 2
+    rate:
+      mode: group-total
+      commitsPerSecond: 20
+phases:
+  - name: write
+    duration: 1s
+  - name: converge
+    duration: 1s
+    actorGroupOverrides:
+      graph-writers:
+        rate:
+          mode: group-total
+          commitsPerSecond: 2
+    assertions:
+      requireConvergedCounts: true
+assertions:
+  final:
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

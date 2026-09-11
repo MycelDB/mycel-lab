@@ -37,17 +37,32 @@ type Scheduler struct {
 	scenario  spec.ResolvedScenario
 	instances []Instance
 	factory   Factory
+	recorder  EventRecorder
 }
 
 type Factory func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) Actor
 
 func NewScheduler(scenario spec.ResolvedScenario, factory Factory) *Scheduler {
+	return NewSchedulerWithRecorder(scenario, factory, nil)
+}
+
+func NewSchedulerWithRecorder(scenario spec.ResolvedScenario, factory Factory, recorder EventRecorder) *Scheduler {
 	if factory == nil {
-		factory = func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) Actor {
-			return &NoopActor{GroupName: group.Name, Index: index, Seed: seed, Rate: rate}
-		}
+		factory = defaultFactory(recorder)
 	}
-	return &Scheduler{scenario: scenario, factory: factory}
+	return &Scheduler{scenario: scenario, factory: factory, recorder: recorder}
+}
+
+func defaultFactory(recorder EventRecorder) Factory {
+	return func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) Actor {
+		if behaviorType, _ := group.Profile.Behavior["type"].(string); behaviorType == "graph-transaction" {
+			actor, err := NewGraphActor(group, index, seed, rate, recorder)
+			if err == nil {
+				return actor
+			}
+		}
+		return &NoopActor{GroupName: group.Name, Index: index, Seed: seed, Rate: rate}
+	}
 }
 
 func (s *Scheduler) Start(ctx context.Context) error {

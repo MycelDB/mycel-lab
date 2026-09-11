@@ -1,0 +1,49 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: five-node-long-outage
+  description: Five-node graph smoke with deterministic pod restart events.
+seed: 7373
+environment:
+  driver: k3d
+  namespace: mycel-lab
+clusterRef: raft-5-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 2
+    rate:
+      mode: group-total
+      commitsPerSecond: 20
+phases:
+  - name: warmup
+    duration: 1s
+  - name: long-outage
+    duration: 1s
+    events:
+      - type: pod-stop
+        target:
+          pod: myceld-3
+        duration: 100ms
+      - type: pod-restart
+        target:
+          pod: myceld-4
+    outcome:
+      availability: expected-degradation
+  - name: recovery
+    duration: 1s
+    events:
+      - type: rolling-restart
+        target:
+          batchSize: 1
+          pause: 100ms
+    assertions:
+      requireConvergedCounts: true
+assertions:
+  final:
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectKubernetesState: true
+  collectActorEvents: true
