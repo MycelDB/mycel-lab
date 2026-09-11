@@ -16,7 +16,7 @@ actor execution, and disruption behavior.
 
 ## Goals
 
-- Add a reusable `mycel-reliability` command and `internal/reliability` package
+- Add a reusable `mycel-lab` command and `internal/reliability` package
   tree.
 - Support YAML authoring/import/export for cluster profiles, actor profiles,
   scenarios, and suites.
@@ -71,7 +71,7 @@ actor execution, and disruption behavior.
 ## Proposed command and package layout
 
 ```text
-cmd/mycel-reliability/
+cmd/mycel-lab/
   main.go
 
 internal/reliability/
@@ -115,8 +115,8 @@ Initial command-level configuration should support:
 Database migrations should be explicit:
 
 ```sh
-mycel-reliability db migrate
-mycel-reliability db status
+mycel-lab db migrate
+mycel-lab db status
 ```
 
 ## Phases
@@ -134,7 +134,7 @@ cluster operations yet.
    - `docs/design/testing/reliability-harness.md`.
 2. Add this implementation plan.
 3. Add command skeleton:
-   - `cmd/mycel-reliability/main.go`;
+   - `cmd/mycel-lab/main.go`;
    - top-level command parsing and help text;
    - no-op subcommands for `db`, `import`, `export`, and `run`.
 4. Add package skeletons under `internal/reliability` with package docs.
@@ -142,7 +142,7 @@ cluster operations yet.
    execution:
 
    ```sh
-   make build-mycel-reliability
+   make build-mycel-lab
    ```
 
 ### Tests
@@ -154,8 +154,8 @@ cluster operations yet.
 ### Acceptance
 
 ```sh
-go test ./internal/reliability/... ./cmd/mycel-reliability -count=1
-go run ./cmd/mycel-reliability --help
+go test ./internal/reliability/... ./cmd/mycel-lab -count=1
+go run ./cmd/mycel-lab --help
 git diff --check
 ```
 
@@ -203,7 +203,7 @@ ActorProfile, Scenario, and Suite. No database yet.
 
 ```sh
 go test ./internal/reliability/spec ./internal/reliability/catalog -count=1
-go run ./cmd/mycel-reliability run scenario-file tests/reliability/scenarios/example.yaml --dry-run
+go run ./cmd/mycel-lab run scenario-file tests/reliability/scenarios/example.yaml --dry-run
 git diff --check
 ```
 
@@ -238,8 +238,8 @@ No cluster execution yet.
 7. Add migration commands:
 
    ```sh
-   mycel-reliability db migrate
-   mycel-reliability db status
+   mycel-lab db migrate
+   mycel-lab db status
    ```
 
 ### Tests
@@ -255,7 +255,7 @@ No cluster execution yet.
 ```sh
 go test ./internal/reliability/store ./internal/reliability/migrations -count=1
 MYCEL_RELIABILITY_TEST_DATABASE_URL=postgres://... go test ./internal/reliability/store -run Integration -count=1
-mycel-reliability db migrate --database-url "$MYCEL_RELIABILITY_TEST_DATABASE_URL"
+mycel-lab db migrate --database-url "$MYCEL_RELIABILITY_TEST_DATABASE_URL"
 git diff --check
 ```
 
@@ -271,8 +271,8 @@ lifecycle: mutable until used, immutable after first run.
 1. Implement `import` command:
 
    ```sh
-   mycel-reliability import tests/reliability/
-   mycel-reliability import --dry-run tests/reliability/
+   mycel-lab import tests/reliability/
+   mycel-lab import --dry-run tests/reliability/
    ```
 
 2. Implement default import behavior:
@@ -283,8 +283,8 @@ lifecycle: mutable until used, immutable after first run.
 3. Implement `export` command:
 
    ```sh
-   mycel-reliability export scenario raft-5-node-long-outage --version 3
-   mycel-reliability export actor-profile graph-committer --version latest
+   mycel-lab export scenario raft-5-node-long-outage --version 3
+   mycel-lab export actor-profile graph-committer --version latest
    ```
 
 4. Implement list/show commands for definitions.
@@ -307,9 +307,9 @@ lifecycle: mutable until used, immutable after first run.
 
 ```sh
 go test ./internal/reliability/catalog ./internal/reliability/spec ./internal/reliability/store -count=1
-mycel-reliability import --dry-run tests/reliability/
-mycel-reliability import tests/reliability/
-mycel-reliability export scenario <name> --version latest >/tmp/scenario.yaml
+mycel-lab import --dry-run tests/reliability/
+mycel-lab import tests/reliability/
+mycel-lab export scenario <name> --version latest >/tmp/scenario.yaml
 git diff --check
 ```
 
@@ -355,8 +355,8 @@ summary generation.
 
 ```sh
 go test ./internal/reliability/runner ./internal/reliability/artifacts ./internal/reliability/report -count=1
-mycel-reliability run scenario-file tests/reliability/scenarios/example.yaml --dry-run
-mycel-reliability run suite <suite-name> --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/example.yaml --dry-run
+mycel-lab run suite <suite-name> --dry-run
 git diff --check
 ```
 
@@ -411,7 +411,7 @@ profile.
 
 ```sh
 go test ./internal/reliability/env ./internal/reliability/deploy -count=1
-mycel-reliability run scenario-file tests/reliability/scenarios/one-node-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/one-node-smoke.yaml --confirm-destructive
 # Manual when k3d is available:
 kubectl --context <context> -n <namespace> get pods
 git diff --check
@@ -463,7 +463,7 @@ start with a no-op/test actor before graph transactions.
 
 ```sh
 go test ./internal/reliability/actors ./internal/reliability/runner -count=1
-mycel-reliability run scenario-file tests/reliability/scenarios/actor-noop.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/actor-noop.yaml --confirm-destructive
 git diff --check
 ```
 
@@ -505,7 +505,7 @@ weighted operation mix, bounded retries, and structured operation logging.
 
 ```sh
 go test ./internal/reliability/actors ./internal/reliability/oracle -count=1
-mycel-reliability run scenario-file tests/reliability/scenarios/graph-actor-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/graph-actor-smoke.yaml --confirm-destructive
 git diff --check
 ```
 
@@ -546,7 +546,7 @@ acknowledged graph transaction counts.
 
 ```sh
 go test ./internal/reliability/oracle ./internal/reliability/actors -count=1
-mycel-reliability run scenario-file tests/reliability/scenarios/graph-convergence-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/graph-convergence-smoke.yaml --confirm-destructive
 git diff --check
 ```
 
@@ -582,8 +582,8 @@ expected-degradation phases.
 
 ```sh
 go test ./internal/reliability/events ./internal/reliability/runner -count=1
-mycel-reliability run scenario-file tests/reliability/scenarios/three-node-short-outage.yaml --confirm-destructive
-mycel-reliability run scenario-file tests/reliability/scenarios/five-node-long-outage.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/three-node-short-outage.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/five-node-long-outage.yaml --confirm-destructive
 git diff --check
 ```
 
@@ -607,9 +607,9 @@ Add aggregate metrics and query surfaces needed for future dashboard/trending.
 3. Add CLI commands:
 
    ```sh
-   mycel-reliability runs list
-   mycel-reliability runs show <run-id>
-   mycel-reliability runs compare <run-a> <run-b>
+   mycel-lab runs list
+   mycel-lab runs show <run-id>
+   mycel-lab runs compare <run-a> <run-b>
    ```
 
 4. Add basic trend query by scenario/profile name.
@@ -625,8 +625,8 @@ Add aggregate metrics and query surfaces needed for future dashboard/trending.
 
 ```sh
 go test ./internal/reliability/metrics ./internal/reliability/report ./internal/reliability/store -count=1
-mycel-reliability runs list
-mycel-reliability runs show <run-id>
+mycel-lab runs list
+mycel-lab runs show <run-id>
 git diff --check
 ```
 
@@ -671,10 +671,10 @@ Add initial reusable profiles/scenarios/suites and document local operation.
 ### Acceptance
 
 ```sh
-mycel-reliability import --dry-run tests/reliability/
-mycel-reliability import tests/reliability/
-mycel-reliability run suite raft-reliability-baseline --dry-run
-mycel-reliability run scenario one-node-graph-smoke --confirm-destructive
+mycel-lab import --dry-run tests/reliability/
+mycel-lab import tests/reliability/
+mycel-lab run suite raft-reliability-baseline --dry-run
+mycel-lab run scenario one-node-graph-smoke --confirm-destructive
 python3 scripts/checkDocs.py docs/ tests/reliability/
 git diff --check
 ```

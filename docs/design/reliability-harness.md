@@ -385,7 +385,7 @@ seed: 12345
 
 environment:
   driver: k3d
-  namespace: mycel-reliability
+  namespace: mycel-lab
   keepOnFailure: false
 
 clusterRef: raft-5-node
@@ -863,27 +863,27 @@ artifacts.
 Initial CLI examples:
 
 ```bash
-mycel-reliability import tests/reliability/
-mycel-reliability import --dry-run tests/reliability/
+mycel-lab import tests/reliability/
+mycel-lab import --dry-run tests/reliability/
 
-mycel-reliability run scenario raft-5-node-long-outage --version latest
-mycel-reliability run scenario-file tests/reliability/scenarios/raft-5-node-long-outage.yaml
-mycel-reliability run suite raft-reliability-baseline --version latest
+mycel-lab run scenario raft-5-node-long-outage --version latest
+mycel-lab run scenario-file tests/reliability/scenarios/raft-5-node-long-outage.yaml
+mycel-lab run suite raft-reliability-baseline --version latest
 
-mycel-reliability export scenario raft-5-node-long-outage --version 3 > scenario.yaml
+mycel-lab export scenario raft-5-node-long-outage --version 3 > scenario.yaml
 ```
 
 Potential code location:
 
 ```text
-cmd/mycel-reliability/
+cmd/mycel-lab/
 internal/reliability/
 ```
 
 ## Internal architecture
 
 ```text
-cmd/mycel-reliability/
+cmd/mycel-lab/
   main.go
 
 internal/reliability/
