@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -32,12 +33,13 @@ func TestRunUnknownCommand(t *testing.T) {
 }
 
 func TestSubcommandSkeletons(t *testing.T) {
+	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml")
 	tests := [][]string{
 		{"db", "migrate"},
 		{"db", "status"},
 		{"import", "--dry-run", "tests/reliability"},
 		{"export", "scenario", "raft-5-node"},
-		{"run", "scenario-file", "tests/reliability/scenarios/example.yaml"},
+		{"run", "scenario-file", scenarioPath, "--dry-run"},
 		{"version"},
 	}
 	for _, args := range tests {

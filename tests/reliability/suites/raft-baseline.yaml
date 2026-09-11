@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: raft-baseline
+  description: Baseline raft reliability scenarios.
+scenarios:
+  - path: ../scenarios/raft-3-node-short-outage.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

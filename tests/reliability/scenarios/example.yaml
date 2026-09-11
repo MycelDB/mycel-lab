@@ -1,0 +1,29 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: example
+  description: Minimal reliability scenario for parser and resolver smoke tests.
+seed: 7
+environment:
+  driver: k3d
+  namespace: mycel-lab
+clusterRef: ../clusters/raft-3-node.yaml
+actorGroups:
+  - name: writers
+    profileRef: ../actor-profiles/graph-committer.yaml
+    count: 1
+    rate:
+      commitsPerSecond: 1
+    overrides:
+      behavior:
+        transaction:
+          operationsPerTransaction:
+            max: 3
+phases:
+  - name: smoke
+    duration: 30s
+assertions:
+  final:
+    requireHealthyCluster: true
+artifacts:
+  collectScenarioSpec: true

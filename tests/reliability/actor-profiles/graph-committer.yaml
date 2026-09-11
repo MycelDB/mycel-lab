@@ -1,0 +1,63 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: graph-committer
+  description: Creates and updates graph data using graph transactions.
+behavior:
+  type: graph-transaction
+  identity:
+    mode: per-instance
+    principalPrefix: graph-user
+  dataScope:
+    space:
+      mode: per-instance
+      prefix: journal
+    domain:
+      mode: per-instance
+      schema: pkm-lite
+      prefix: journal-domain
+  transaction:
+    commitUnit: graph-transaction
+    operationsPerTransaction:
+      min: 1
+      max: 20
+    operationMix:
+      createNode:
+        weight: 60
+        maxPerTransaction: 10
+      updateNode:
+        weight: 20
+        maxPerTransaction: 5
+        requiresExistingNode: true
+      createEdge:
+        weight: 20
+        maxPerTransaction: 10
+        requiresExistingNodes: 2
+    fallbackOperation: createNode
+    dataModel:
+      nodeLabels: [Note, Page, Task]
+      edgeTypes: [LINKS_TO, CONTAINS, REFERENCES]
+      properties:
+        text:
+          mode: generated-text
+          minBytes: 32
+          maxBytes: 512
+        ordinal:
+          mode: sequence
+        actor:
+          mode: actor-id
+        transactionSeq:
+          mode: transaction-seq
+  retry:
+    maxAttempts: 4
+    initialBackoff: 100ms
+    maxBackoff: 2s
+    retryOn: [transient, unavailable]
+  checks:
+    readAfterWrite:
+      enabled: true
+      sampleEveryCommits: 10
+      maxAttempts: 4
+      backoff: 100ms
+    countConvergence:
+      enabled: true

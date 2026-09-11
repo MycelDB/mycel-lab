@@ -1,0 +1,16 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: gql-reader
+  description: Runs read-only GQL queries against actor-owned spaces/domains.
+behavior:
+  type: gql-read
+  querySet:
+    - name: count-nodes
+      gql: "MATCH (n) RETURN count(n)"
+    - name: recent-nodes
+      gql: "MATCH (n) RETURN n ORDER BY n.properties.createdAt DESC FETCH FIRST 25 ROWS ONLY"
+  retry:
+    maxAttempts: 3
+    initialBackoff: 100ms
+    maxBackoff: 1s

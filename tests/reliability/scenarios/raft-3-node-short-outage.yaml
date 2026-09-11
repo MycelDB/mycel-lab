@@ -1,0 +1,59 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: raft-3-node-short-outage
+  description: Three-node raft cluster with a short named-pod outage.
+seed: 12345
+environment:
+  driver: k3d
+  namespace: mycel-lab
+  keepOnFailure: false
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 32
+actorGroups:
+  - name: journal-users
+    profileRef: graph-committer
+    count: 4
+    rate:
+      mode: group-total
+      commitsPerSecond: 10
+  - name: readers
+    profileRef: gql-reader
+    count: 2
+    target:
+      actorGroups:
+        - journal-users
+    rate:
+      mode: group-total
+      queriesPerSecond: 5
+phases:
+  - name: warmup
+    duration: 2m
+  - name: short-outage
+    duration: 3m
+    events:
+      - type: pod-stop
+        target:
+          pod: myceld-2
+        duration: 30s
+    outcome:
+      availability: expected-degradation
+  - name: recovery
+    duration: 2m
+    assertions:
+      requireHealthyCluster: true
+      requireConvergedCounts: true
+      requireNoAcknowledgedGraphTransactionLoss: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectLogs: true
+  collectKubernetesState: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectScenarioSpec: true

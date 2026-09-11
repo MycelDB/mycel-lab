@@ -1,0 +1,32 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ClusterProfile
+metadata:
+  name: raft-5-node
+  description: Five-node raft cluster for longer disruption scenarios.
+cluster:
+  nodes: 5
+  image: myceldb/mycel:latest
+  raft:
+    nodeCount: 5
+    partitionCount: 64
+    replicaFactor: 3
+    localNodeIDMode: ordinal
+    electionTick: 25
+    heartbeatTick: 1
+    sendTimeout: 500ms
+    compaction:
+      mode: off
+      snapshotEntries: 0
+      snapshotInterval: 0
+      snapshotMaxLogBytes: 0
+      snapshotMinRetainEntries: 0
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  storage:
+    size: "10Gi"
+    className: local-path

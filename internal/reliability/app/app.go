@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
+	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
 
 const commandName = "mycel-lab"
@@ -88,7 +91,24 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	}
 	positional := nonFlagArgs(args)
 	switch positional[0] {
-	case "scenario", "scenario-file", "suite":
+	case "scenario-file":
+		if hasFlag(args, "--dry-run") {
+			resolved, err := catalog.ResolveScenarioFile(positional[1], catalog.ResolveOptions{ProfileDirs: flagValues(args, "--profile-dir")})
+			if err != nil {
+				fmt.Fprintf(stderr, "resolve scenario-file: %v\n", err)
+				return 1
+			}
+			data, err := spec.MarshalYAML(resolved)
+			if err != nil {
+				fmt.Fprintf(stderr, "marshal resolved scenario: %v\n", err)
+				return 1
+			}
+			fmt.Fprint(stdout, string(data))
+			return 0
+		}
+		fmt.Fprintf(stdout, "run scenario-file %s: execution not implemented yet (planned in RH4+)\n", positional[1])
+		return 0
+	case "scenario", "suite":
 		fmt.Fprintf(stdout, "run %s %s: not implemented yet (planned in RH4+)\n", positional[0], positional[1])
 		return 0
 	default:
@@ -146,6 +166,31 @@ func flagTakesValue(arg string) bool {
 	default:
 		return false
 	}
+}
+
+func hasFlag(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name || strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func flagValues(args []string, name string) []string {
+	var values []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == name && i+1 < len(args) {
+			values = append(values, args[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, name+"=") {
+			values = append(values, strings.TrimPrefix(arg, name+"="))
+		}
+	}
+	return values
 }
 
 func lastNonFlag(args []string) string {
