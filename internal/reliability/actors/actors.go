@@ -8,6 +8,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
 
@@ -33,11 +34,12 @@ type Instance struct {
 }
 
 type Scheduler struct {
-	mu        sync.Mutex
-	scenario  spec.ResolvedScenario
-	instances []Instance
-	factory   Factory
-	recorder  EventRecorder
+	mu          sync.Mutex
+	scenario    spec.ResolvedScenario
+	instances   []Instance
+	factory     Factory
+	recorder    EventRecorder
+	assignments map[string]provision.ActorAssignment
 }
 
 type Factory func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) Actor
@@ -47,18 +49,33 @@ func NewScheduler(scenario spec.ResolvedScenario, factory Factory) *Scheduler {
 }
 
 func NewSchedulerWithRecorder(scenario spec.ResolvedScenario, factory Factory, recorder EventRecorder) *Scheduler {
-	if factory == nil {
-		factory = defaultFactory(recorder)
-	}
-	return &Scheduler{scenario: scenario, factory: factory, recorder: recorder}
+	return NewSchedulerWithRecorderAndAssignments(scenario, factory, recorder, nil)
 }
 
-func defaultFactory(recorder EventRecorder) Factory {
+func NewSchedulerWithRecorderAndAssignments(scenario spec.ResolvedScenario, factory Factory, recorder EventRecorder, assignments map[string]provision.ActorAssignment) *Scheduler {
+	if factory == nil {
+		factory = defaultFactory(recorder, assignments)
+	}
+	return &Scheduler{scenario: scenario, factory: factory, recorder: recorder, assignments: assignments}
+}
+
+func defaultFactory(recorder EventRecorder, assignments map[string]provision.ActorAssignment) Factory {
 	return func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) Actor {
-		if behaviorType, _ := group.Profile.Behavior["type"].(string); behaviorType == "graph-transaction" {
+		actorID := fmt.Sprintf("%s-%d", group.Name, index)
+		assignment, hasAssignment := assignments[actorID]
+		behaviorType, _ := group.Profile.Behavior["type"].(string)
+		switch behaviorType {
+		case "graph-transaction":
 			actor, err := NewGraphActor(group, index, seed, rate, recorder)
 			if err == nil {
+				if hasAssignment {
+					actor.Assignment = assignment
+				}
 				return actor
+			}
+		case "gql-read":
+			if hasAssignment {
+				return NewReaderActor(group, index, seed, rate, assignment, recorder)
 			}
 		}
 		return &NoopActor{GroupName: group.Name, Index: index, Seed: seed, Rate: rate}

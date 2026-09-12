@@ -1,0 +1,38 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: fifty-user-read-write
+  description: Fifty user-like actors that write frequently and read periodically.
+seed: 5050
+environment:
+  driver: k3d
+  namespace: mycel-lab
+  keepOnFailure: false
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 32
+actorGroups:
+  - name: active-users
+    profileRef: graph-committer
+    count: 50
+    rate:
+      mode: group-total
+      # Average per actor: 0.5 writes/sec, one write every ~2 seconds.
+      commitsPerSecond: 25
+      # Average per actor: 0.1 reads/sec, one read every ~10 seconds.
+      queriesPerSecond: 5
+phases:
+  - name: steady-user-traffic
+    duration: 2m
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectLogs: true
+  collectKubernetesState: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectScenarioSpec: true

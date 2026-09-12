@@ -22,6 +22,7 @@ mycel-lab run suite-file tests/reliability/suites/raft-baseline.yaml --dry-run
 mycel-lab run scenario-file tests/reliability/scenarios/actor-noop.yaml --confirm-destructive
 mycel-lab run scenario-file tests/reliability/scenarios/graph-actor-smoke.yaml --confirm-destructive
 mycel-lab run scenario-file tests/reliability/scenarios/graph-convergence-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/fifty-user-read-write.yaml --confirm-destructive --console-endpoints
 mycel-lab run scenario-file tests/reliability/scenarios/three-node-short-outage.yaml --confirm-destructive
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```

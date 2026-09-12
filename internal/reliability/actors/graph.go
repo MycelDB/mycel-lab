@@ -2,15 +2,21 @@ package actors
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/oracle"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	mycel "github.com/myceldb/mycel-go-sdk"
+	clientv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/client/v1"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type EventRecorder interface {
@@ -155,9 +161,9 @@ func ClassifyError(err error) string {
 	if err == nil {
 		return ""
 	}
-	msg := err.Error()
+	msg := strings.ToLower(err.Error())
 	switch {
-	case containsAny(msg, "unavailable", "connection refused", "deadline exceeded"):
+	case containsAny(msg, "unavailable", "connection refused", "deadline exceeded", "server preface", "context canceled", "canceled"):
 		return "unavailable"
 	case containsAny(msg, "transient", "timeout", "temporarily"):
 		return "transient"
@@ -167,13 +173,14 @@ func ClassifyError(err error) string {
 }
 
 type GraphActor struct {
-	GroupName string
-	Index     int
-	ID        string
-	Seed      int64
-	Rate      spec.RateSpec
-	Profile   GraphProfile
-	Recorder  EventRecorder
+	GroupName  string
+	Index      int
+	ID         string
+	Seed       int64
+	Rate       spec.RateSpec
+	Profile    GraphProfile
+	Recorder   EventRecorder
+	Assignment provision.ActorAssignment
 
 	mu           sync.Mutex
 	state        KnownState
@@ -247,46 +254,150 @@ func (a *GraphActor) Transactions() []oracle.Transaction {
 
 func (a *GraphActor) loop(ctx context.Context) {
 	defer close(a.done)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	lastCommit := time.Now()
+	lastRead := time.Now()
 	for {
-		interval := a.interval()
-		if interval <= 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(100 * time.Millisecond):
-				continue
-			}
-		}
-		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return
-		case <-timer.C:
-			a.commit(ctx)
+		case now := <-ticker.C:
+			commitInterval, readInterval := a.intervals()
+			if commitInterval > 0 && now.Sub(lastCommit) >= commitInterval {
+				opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				a.commit(opCtx)
+				cancel()
+				lastCommit = now
+			}
+			if readInterval > 0 && now.Sub(lastRead) >= readInterval {
+				opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				a.read(opCtx)
+				cancel()
+				lastRead = now
+			}
 		}
 	}
 }
 
-func (a *GraphActor) interval() time.Duration {
+func (a *GraphActor) intervals() (time.Duration, time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.Rate.CommitsPerSecond <= 0 {
-		return 0
+	var commitInterval time.Duration
+	if a.Rate.CommitsPerSecond > 0 {
+		commitInterval = time.Duration(float64(time.Second) / a.Rate.CommitsPerSecond)
 	}
-	return time.Duration(float64(time.Second) / a.Rate.CommitsPerSecond)
+	var readInterval time.Duration
+	if a.Rate.QueriesPerSecond > 0 {
+		readInterval = time.Duration(float64(time.Second) / a.Rate.QueriesPerSecond)
+	}
+	return commitInterval, readInterval
 }
 
 func (a *GraphActor) commit(ctx context.Context) {
 	a.mu.Lock()
 	a.sequence++
 	tx := GenerateGraphTransaction(a.ID, a.Seed, a.sequence, a.Profile, a.state)
+	a.mu.Unlock()
+	if err := a.executeRealTransaction(ctx, tx); err != nil {
+		tx.Acknowledged = false
+		tx.ErrorClass = ClassifyError(err)
+		if a.Recorder != nil {
+			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-failed", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"error": err.Error(), "class": tx.ErrorClass}})
+		}
+		return
+	}
+	a.mu.Lock()
 	ApplyAcknowledged(&a.state, tx)
 	a.transactions = append(a.transactions, tx)
 	a.mu.Unlock()
 	if a.Recorder != nil {
-		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-acknowledged", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx})
+		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-acknowledged", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"spaceId": a.Assignment.SpaceID, "domainId": a.Assignment.DomainID, "daemonAddr": a.Assignment.DaemonAddr}})
 	}
+}
+
+func (a *GraphActor) read(ctx context.Context) {
+	if a.Assignment.DaemonAddr == "" || a.Assignment.SpaceID == "" || a.Assignment.DomainID == "" || (a.Assignment.AccessToken == "" && (a.Assignment.Username == "" || a.Assignment.Password == "")) {
+		if a.Recorder != nil {
+			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-read-check", ActorID: a.ID, GroupName: a.GroupName, Payload: map[string]any{"ok": true, "simulated": true}})
+		}
+		return
+	}
+	client, err := a.dialClient(ctx)
+	if err == nil {
+		_, err = client.QueryGQLReadOnly(ctx, a.Assignment.SpaceID, a.Assignment.DomainID, "MATCH (n) RETURN count(n)", 10)
+		_ = client.Close()
+	}
+	payload := map[string]any{"ok": err == nil, "spaceId": a.Assignment.SpaceID, "domainId": a.Assignment.DomainID, "daemonAddr": a.Assignment.DaemonAddr, "targetActorId": a.ID}
+	if err != nil {
+		payload["error"] = err.Error()
+		payload["class"] = ClassifyError(err)
+	}
+	if a.Recorder != nil {
+		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-read-check", ActorID: a.ID, GroupName: a.GroupName, Payload: payload})
+	}
+}
+
+func (a *GraphActor) executeRealTransaction(ctx context.Context, tx oracle.Transaction) error {
+	if a.Assignment.DaemonAddr == "" || a.Assignment.SpaceID == "" || a.Assignment.DomainID == "" || (a.Assignment.AccessToken == "" && (a.Assignment.Username == "" || a.Assignment.Password == "")) {
+		return nil
+	}
+	client, err := a.dialClient(ctx)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	sessionID, err := client.OpenSession(ctx, a.Assignment.SpaceID, a.Assignment.DomainID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.CloseSession(context.Background(), sessionID) }()
+	graphTx, err := client.BeginReadWriteTransaction(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = client.CloseTransaction(context.Background(), graphTx)
+		}
+	}()
+	for _, op := range tx.Operations {
+		props, _ := structpb.NewStruct(op.Properties)
+		switch op.Type {
+		case oracle.OperationCreateNode:
+			nodeID := op.NodeID
+			payload, _ := structpb.NewStruct(map[string]any{"text": fmt.Sprintf("%s %d", a.ID, tx.Sequence)})
+			if _, err := client.CreateNode(ctx, graphTx, &clientv1.NodeCreate{NodeId: &nodeID, Labels: []string{op.Label}, Properties: props, Payload: payload}); err != nil {
+				return err
+			}
+		case oracle.OperationUpdateNode:
+			if _, err := client.UpdateNodeContent(ctx, graphTx, op.NodeID, fmt.Sprintf("updated by %s seq %d", a.ID, tx.Sequence)); err != nil {
+				return err
+			}
+		case oracle.OperationCreateEdge:
+			if _, err := client.CreateEdge(ctx, graphTx, &clientv1.EdgeCreate{FromNodeId: op.FromID, ToNodeId: op.ToID, Labels: []string{op.EdgeType}, Properties: props}); err != nil {
+				return err
+			}
+		}
+	}
+	if err := client.CommitTransaction(ctx, graphTx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (a *GraphActor) dialClient(ctx context.Context) (*mycel.Client, error) {
+	cfg := mycel.Config{Addr: a.Assignment.DaemonAddr, Username: a.Assignment.Username, Password: a.Assignment.Password, ClientName: "mycel-lab"}
+	if a.Assignment.AccessToken != "" {
+		cfg.Username = ""
+		cfg.Password = ""
+		cfg.AccessToken = a.Assignment.AccessToken
+		cfg.RefreshToken = a.Assignment.RefreshToken
+		cfg.AccessTokenExpireTime = a.Assignment.TokenExpires
+	}
+	return mycel.Dial(ctx, cfg)
 }
 
 func selectPossibleOperation(rng *rand.Rand, profile GraphProfile, state KnownState, perType map[oracle.OperationType]int) (oracle.OperationType, bool) {
@@ -382,11 +493,18 @@ func buildOperation(rng *rand.Rand, actorID string, sequence int64, index int, t
 		edgeType := profile.Transaction.DataModel.EdgeTypes[rng.Intn(len(profile.Transaction.DataModel.EdgeTypes))]
 		return oracle.Operation{Type: typ, FromID: from, ToID: to, EdgeType: edgeType, Properties: map[string]any{"createdBy": actorID, "transactionSeq": sequence}}
 	default:
-		nodeID := fmt.Sprintf("%s-node-%d-%d", actorID, sequence, index)
+		nodeID := stableUUID(fmt.Sprintf("%s-node-%d-%d", actorID, sequence, index))
 		label := profile.Transaction.DataModel.NodeLabels[rng.Intn(len(profile.Transaction.DataModel.NodeLabels))]
 		state.Nodes = append(state.Nodes, nodeID)
 		return oracle.Operation{Type: oracle.OperationCreateNode, NodeID: nodeID, Label: label, Properties: map[string]any{"createdBy": actorID, "transactionSeq": sequence}}
 	}
+}
+
+func stableUUID(value string) string {
+	sum := sha1.Sum([]byte(value))
+	sum[6] = (sum[6] & 0x0f) | 0x50
+	sum[8] = (sum[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
 func cloneKnownState(in KnownState) KnownState {
