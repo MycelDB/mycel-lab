@@ -62,7 +62,38 @@ mycel-lab run scenario one-node-graph-smoke --confirm-destructive
 Non-dry-run execution for `environment.driver: k3d` creates a disposable k3d
 cluster, applies the rendered MycelDB Kubernetes manifests, waits for the
 StatefulSet pods to become ready, runs phase events through `kubectl`, captures
-Kubernetes state/log artifacts, and deletes the cluster during cleanup.
+Kubernetes state/log artifacts, and deletes the cluster during cleanup. The
+rendered daemons run in `MYCELD_MODE=mesh` with recognized raft node addresses
+and per-pod raft local node IDs derived from StatefulSet ordinals.
+
+Use `--console-endpoints` to expose every StatefulSet pod as a stable local
+Mycel Console endpoint for the duration of a run. The lab renders one
+Kubernetes service per pod (`myceld-0-client`, `myceld-1-client`, ...), starts
+`kubectl port-forward` processes, prints the connection table, and writes
+`environment/console-endpoints.json` into the run artifacts. The default local
+ports start at `19091`; override the base with `--console-port-base`.
+
+```sh
+mycel-lab run scenario raft-3-node-short-outage \
+  --confirm-destructive \
+  --console-endpoints
+```
+
+For a three-node scenario, connect Mycel Console to:
+
+```text
+myceld-0  127.0.0.1:19091
+myceld-1  127.0.0.1:19092
+myceld-2  127.0.0.1:19093
+```
+
+Lab clusters use fixed local-only bootstrap credentials so each endpoint can be
+monitored consistently:
+
+```text
+username: admin
+password: admin-password
+```
 
 Required local tools:
 
@@ -91,6 +122,7 @@ Each run writes a filesystem artifact directory containing:
 - `metrics.jsonl` — metric samples such as commits and latency placeholders;
 - `manifests/myceld.yaml` — rendered Kubernetes manifests;
 - `environment/state.json` — captured environment state;
+- `environment/console-endpoints.json` — per-pod Console endpoints when `--console-endpoints` is enabled;
 - `result.json` — terminal run status and phase status;
 - `summary.md` — human-readable summary.
 

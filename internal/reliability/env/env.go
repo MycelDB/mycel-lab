@@ -101,6 +101,10 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario) (
 		return Environment{}, err
 	}
 	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName}
+	if err := d.importLocalImageIfPresent(ctx, environment, scenario.Cluster.Image); err != nil {
+		_ = d.Delete(context.Background(), environment)
+		return Environment{}, err
+	}
 	manifests, err := deploy.RenderKubernetesManifests(scenario)
 	if err != nil {
 		_ = d.Delete(context.Background(), environment)
@@ -121,6 +125,21 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario) (
 		return Environment{}, err
 	}
 	return environment, nil
+}
+
+func (d K3DDriver) importLocalImageIfPresent(ctx context.Context, environment Environment, image string) error {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return nil
+	}
+	runner := d.runner()
+	if _, err := runner.Run(ctx, "docker", "image", "inspect", image); err != nil {
+		return nil
+	}
+	if _, err := runner.Run(ctx, "k3d", "image", "import", image, "-c", environment.Name); err != nil {
+		return fmt.Errorf("import local image %s into k3d cluster %s: %w", image, environment.Name, err)
+	}
+	return nil
 }
 
 func (d K3DDriver) Delete(ctx context.Context, environment Environment) error {

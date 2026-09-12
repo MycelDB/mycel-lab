@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
@@ -65,6 +66,9 @@ type Options struct {
 	ScenarioVersion          int
 	ConfirmDestructive       bool
 	KeepEnvironmentOnFailure bool
+	ConsoleEndpoints         bool
+	ConsolePortBase          int
+	ProgressWriter           io.Writer
 	EnvironmentDriver        env.EnvironmentDriver
 	EventRuntime             events.Runtime
 	ActorFactory             actors.Factory
@@ -158,6 +162,19 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if err := driver.CaptureState(ctx, environment, sink); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
+	if opts.ConsoleEndpoints && !opts.DryRun {
+		endpoints := env.ConsoleEndpointsForNodeCount(scenario.Cluster.Nodes, opts.ConsolePortBase)
+		if _, err := sink.WriteJSON("environment/console-endpoints.json", endpoints); err != nil {
+			return failAfterEnvironmentCreate(RunFailed, err)
+		}
+		session, err := env.StartConsolePortForwards(ctx, environment, endpoints)
+		if err != nil {
+			return failAfterEnvironmentCreate(RunFailed, err)
+		}
+		defer session.Stop(context.Background())
+		writeConsoleEndpoints(opts.ProgressWriter, endpoints)
+		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("console-endpoints-ready", "", "", map[string]any{"endpoints": endpoints}))
+	}
 	recorder := &runRecorder{store: opts.Store, sink: sink, runID: runID}
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
@@ -211,6 +228,16 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-passed", phaseSpec.Name, "", nil))
 	}
 	return finalize(ctx, opts.Store, sink, result, RunPassed, nil)
+}
+
+func writeConsoleEndpoints(w io.Writer, endpoints []env.ConsoleEndpoint) {
+	if w == nil || len(endpoints) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "Console endpoints:")
+	for _, endpoint := range endpoints {
+		fmt.Fprintf(w, "  %s  %s\n", endpoint.NodeName, endpoint.DaemonAddr)
+	}
 }
 
 func defaultEnvironmentDriver(scenario spec.ResolvedScenario, opts Options) env.EnvironmentDriver {

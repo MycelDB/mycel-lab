@@ -71,6 +71,19 @@ func TestDBRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidConsolePortBase(t *testing.T) {
+	fixtureRoot := filepath.Join("..", "..", "..", "tests", "reliability")
+	scenarioPath := filepath.Join(fixtureRoot, "scenarios", "raft-3-node-short-outage.yaml")
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"run", "scenario-file", scenarioPath, "--dry-run", "--console-port-base", "nope"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("Run(invalid console port) code=0, want nonzero")
+	}
+	if !strings.Contains(stderr.String(), "invalid --console-port-base") {
+		t.Fatalf("stderr missing invalid console port: %q", stderr.String())
+	}
+}
+
 func TestRunRequiresTarget(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"run", "scenario"}, &stdout, &stderr)

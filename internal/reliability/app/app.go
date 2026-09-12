@@ -270,11 +270,15 @@ func runDelete(args []string, stdout, stderr io.Writer) int {
 
 func runRun(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [flags]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--console-endpoints] [--console-port-base <port>]")
 		return 0
 	}
 	if len(nonFlagArgs(args)) < 2 {
 		fmt.Fprintln(stderr, "run requires a target kind and name/path")
+		return 2
+	}
+	runOpts, ok := runOptionsFromArgs(args, stdout, stderr)
+	if !ok {
 		return 2
 	}
 	positional := nonFlagArgs(args)
@@ -285,7 +289,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "resolve scenario-file: %v\n", err)
 			return 1
 		}
-		result, err := runner.RunScenario(context.Background(), resolved, runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
+		result, err := runner.RunScenario(context.Background(), resolved, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "run scenario-file: %v\n", err)
 			return 1
@@ -293,7 +297,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "run %s %s: %s\nartifacts: %s\n", positional[0], positional[1], result.Status, result.ArtifactRoot)
 		return 0
 	case "suite-file":
-		result, err := runner.RunSuiteFile(context.Background(), positional[1], runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
+		result, err := runner.RunSuiteFile(context.Background(), positional[1], runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "run suite-file: %v\n", err)
 			return 1
@@ -308,7 +312,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		if !looksLikePath(suitePath) {
 			suitePath = filepath.Join("tests", "reliability", "suites", suitePath+".yaml")
 		}
-		result, err := runner.RunSuiteFile(context.Background(), suitePath, runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
+		result, err := runner.RunSuiteFile(context.Background(), suitePath, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "run suite: %v\n", err)
 			return 1
@@ -328,7 +332,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "resolve scenario: %v\n", err)
 			return 1
 		}
-		result, err := runner.RunScenario(context.Background(), resolved, runner.Options{DryRun: hasFlag(args, "--dry-run"), ArtifactRoot: flagValue(args, "--artifact-root"), ConfirmDestructive: hasFlag(args, "--confirm-destructive"), KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure")})
+		result, err := runner.RunScenario(context.Background(), resolved, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "run scenario: %v\n", err)
 			return 1
@@ -339,6 +343,27 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "unknown run target %q\n", positional[0])
 		return 2
 	}
+}
+
+func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options, bool) {
+	consolePortBase := 0
+	if raw := flagValue(args, "--console-port-base"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			fmt.Fprintf(stderr, "invalid --console-port-base %q: must be a positive integer\n", raw)
+			return runner.Options{}, false
+		}
+		consolePortBase = parsed
+	}
+	return runner.Options{
+		DryRun:                   hasFlag(args, "--dry-run"),
+		ArtifactRoot:             flagValue(args, "--artifact-root"),
+		ConfirmDestructive:       hasFlag(args, "--confirm-destructive"),
+		KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure"),
+		ConsoleEndpoints:         hasFlag(args, "--console-endpoints") || hasFlag(args, "--expose-console-ports"),
+		ConsolePortBase:          consolePortBase,
+		ProgressWriter:           stdout,
+	}, true
 }
 
 func runRuns(args []string, stdout, stderr io.Writer) int {
@@ -461,7 +486,7 @@ func flagTakesValue(arg string) bool {
 		return false
 	}
 	switch arg {
-	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version":
+	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base":
 		return true
 	default:
 		return false

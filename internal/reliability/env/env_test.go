@@ -44,6 +44,30 @@ func TestDryRunDriverLifecycle(t *testing.T) {
 	}
 }
 
+func TestConsoleEndpointsForNodeCount(t *testing.T) {
+	endpoints := ConsoleEndpointsForNodeCount(3, 19091)
+	if len(endpoints) != 3 {
+		t.Fatalf("endpoints len=%d, want 3", len(endpoints))
+	}
+	checks := []struct {
+		index       int
+		nodeName    string
+		serviceName string
+		daemonAddr  string
+		localPort   int
+	}{
+		{0, "myceld-0", "myceld-0-client", "127.0.0.1:19091", 19091},
+		{1, "myceld-1", "myceld-1-client", "127.0.0.1:19092", 19092},
+		{2, "myceld-2", "myceld-2-client", "127.0.0.1:19093", 19093},
+	}
+	for _, check := range checks {
+		got := endpoints[check.index]
+		if got.NodeName != check.nodeName || got.ServiceName != check.serviceName || got.DaemonAddr != check.daemonAddr || got.LocalPort != check.localPort || got.RemotePort != DefaultDaemonGRPCPort {
+			t.Fatalf("endpoint[%d]=%+v", check.index, got)
+		}
+	}
+}
+
 func TestK3DPreflightRequiresConfirmation(t *testing.T) {
 	err := (K3DDriver{}).Preflight(context.Background())
 	if err == nil {
@@ -66,7 +90,7 @@ func TestK3DDriverCreateAppliesManifestsAndWaits(t *testing.T) {
 		t.Fatalf("environment=%+v", environment)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"k3d cluster create", "kubectl --context " + environment.Context + " apply -f", "kubectl --context " + environment.Context + " -n test-ns rollout status statefulset/myceld", "kubectl --context " + environment.Context + " -n test-ns wait pods -l app=myceld"} {
+	for _, want := range []string{"k3d cluster create", "docker image inspect myceldb/mycel:latest", "k3d image import myceldb/mycel:latest -c " + environment.Name, "kubectl --context " + environment.Context + " apply -f", "kubectl --context " + environment.Context + " -n test-ns rollout status statefulset/myceld", "kubectl --context " + environment.Context + " -n test-ns wait pods -l app=myceld"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
 		}
