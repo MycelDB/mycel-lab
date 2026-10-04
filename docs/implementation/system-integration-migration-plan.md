@@ -35,6 +35,9 @@ package, and in-process integration tests in `mycel`.
 
 ## Current source inventory
 
+SIM0 produced a detailed inventory and migration matrix in
+[MycelDB system integration migration inventory](system-integration-migration-inventory.md).
+
 Initial migration candidates in `mycel` include:
 
 - Compose cluster validation:
@@ -62,9 +65,9 @@ Initial migration candidates in `mycel` include:
   - `docs/system_integration/cluster-raft-sensitive-gate.md`
   - `docs/system_integration/cluster-release-gate.md`
 
-The first implementation PR should refresh this inventory against current
-`mycel/develop` and record exact Make targets, CI references, scripts, docs, and
-required environment assumptions before migrating behavior.
+SIM0 refreshed this inventory against current `mycel/develop` and recorded exact
+Make targets, CI references, scripts, docs, and required environment assumptions
+before behavior migration.
 
 ## Classification policy
 
@@ -325,7 +328,7 @@ Each migration tranche should update the relevant docs:
 
 ## Tracking checklist
 
-- [ ] SIM0 inventory and compatibility map.
+- [x] SIM0 inventory and compatibility map.
 - [ ] SIM1 Compose cluster validation migration.
 - [ ] SIM2 k3d local cluster validation migration.
 - [ ] SIM3 restart/outage/disruption migration.
