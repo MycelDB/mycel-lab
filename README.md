@@ -14,6 +14,7 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Environment driver abstraction implementation plan](docs/implementation/environment-driver-abstraction-plan.md)
 - [MycelDB system integration migration plan](docs/implementation/system-integration-migration-plan.md)
 - [MycelDB system integration migration inventory](docs/implementation/system-integration-migration-inventory.md)
+- [Native wrapper transition inventory](docs/implementation/native-wrapper-transition-inventory.md)
 - [Operations guide](docs/operations.md)
 
 ## Current commands

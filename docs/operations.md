@@ -161,9 +161,11 @@ Destructive/operator variants use the same suite names with
 `--confirm-destructive`. Backup/restore and long restart-soak suites currently
 wrap the legacy MycelDB harnesses through a constrained `host-command` event so
 Mycel Lab owns run tracking and artifacts while full native backup/restore
-operations are still being designed. The k3d cluster-validation suite
-intentionally does not yet include the legacy one-PVC replacement/rejoin step;
-that remains blocked on a dedicated volume-replacement capability.
+operations are still being designed. The parity requirements for replacing
+those wrappers are tracked in the [native wrapper transition inventory](implementation/native-wrapper-transition-inventory.md).
+The k3d cluster-validation suite intentionally does not yet include the legacy
+one-PVC replacement/rejoin step; that remains blocked on a dedicated
+volume-replacement capability.
 
 ## Running suites
 
