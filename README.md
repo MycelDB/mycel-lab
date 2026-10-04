@@ -36,6 +36,7 @@ mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --dry
 mycel-lab run suite compose-cluster-validation --dry-run
 mycel-lab run suite k3d-cluster-validation --dry-run
 mycel-lab run suite k3d-raft-disruption --dry-run
+mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run

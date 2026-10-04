@@ -531,15 +531,20 @@ conditions.
 
 ## Event model
 
-Initial event types:
+Supported event types include:
 
 ```yaml
 type: pod-stop
 type: pod-restart
+type: node-stop
+type: node-restart
 type: rolling-restart
+type: user-backup-export
+type: user-backup-validate
+type: user-backup-import
 ```
 
-Initial targeting is deterministic pod-name targeting:
+Pod and node events use deterministic pod/name/ordinal targeting:
 
 ```yaml
 target:

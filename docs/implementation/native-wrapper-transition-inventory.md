@@ -88,6 +88,11 @@ Legacy disruption harness assertions include:
 
 ## NT2: native Compose user backup/restore parity
 
+Status: native operation smoke support exists for user backup export, archive
+validation, and import through the environment driver. Full fresh-cluster restore
+parity still requires archive handoff across environment reset, richer graph/blob
+fixtures, and restored-data safety assertions.
+
 ### Legacy behavior to preserve
 
 The legacy script `scripts/testComposeUserBackupRestore.sh` currently:
@@ -121,7 +126,7 @@ The legacy script `scripts/testComposeUserBackupRestore.sh` currently:
 | Compose lifecycle reset | Compose driver supports reset/create/delete. | Need explicit mid-scenario environment reset/recreate operation or suite split with artifact handoff. |
 | Multi-user provisioning | Provisioner creates actor users/spaces/domains. | Need declarative fixture users not tied only to actor assignments. |
 | Graph fixture with blobs | Graph actor writes nodes/edges. | Need blob-node creation actor/operation and blob payload verification. |
-| User backup export/import | Not native. | Need admin operation event(s): `user-backup-export`, `user-backup-validate`, `user-backup-import`. |
+| User backup export/import | Native operation events exist: `user-backup-export`, `user-backup-validate`, `user-backup-import`. | Need full fresh-cluster restore flow and richer assertions before retiring the wrapper. |
 | Backup archive staging | Not native. | Need artifact path model and driver file copy/staging for Compose services. |
 | Fresh cluster restore | Compose driver can delete/create once per scenario. | Need reset/recreate event, or two-scenario suite with artifact handoff. |
 | Restored data verification | Partial graph count checks exist. | Need per-user restored space/domain/blob assertions across all endpoints. |
@@ -129,15 +134,14 @@ The legacy script `scripts/testComposeUserBackupRestore.sh` currently:
 
 ### Proposed native deliverables
 
-1. Add backup operation model under a new package such as
-   `internal/reliability/backupops` or `internal/reliability/operations`.
-2. Add scenario events:
-   - `fixture-user-create`;
-   - `fixture-graph-blob-write`;
+1. Use the native backup operation events already added for operation smoke:
    - `user-backup-export`;
    - `user-backup-validate`;
+   - `user-backup-import`.
+2. Add remaining scenario events:
+   - `fixture-user-create`;
+   - `fixture-graph-blob-write`;
    - `environment-reset` for Compose;
-   - `user-backup-import`;
    - `restored-user-verify`.
 3. Add artifact routing for backup archives:
    - `backup/user/<username>.tar.zst`;

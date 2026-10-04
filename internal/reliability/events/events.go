@@ -93,6 +93,24 @@ func validateEvent(event spec.EventSpec) error {
 		if len(hostCommandTarget(event.Target)) == 0 {
 			return fmt.Errorf("%s requires target.command", event.Type)
 		}
+	case "user-backup-export":
+		if stringTarget(event.Target, "file") == "" {
+			return fmt.Errorf("%s requires target.file", event.Type)
+		}
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" && stringTarget(event.Target, "username") == "" && stringTarget(event.Target, "sourceUsername") == "" {
+			return fmt.Errorf("%s requires target.actorId, target.sourceActorId, target.username, or target.sourceUsername", event.Type)
+		}
+	case "user-backup-validate":
+		if stringTarget(event.Target, "file") == "" {
+			return fmt.Errorf("%s requires target.file", event.Type)
+		}
+	case "user-backup-import":
+		if stringTarget(event.Target, "file") == "" {
+			return fmt.Errorf("%s requires target.file", event.Type)
+		}
+		if stringTarget(event.Target, "targetUsername") == "" && stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" && stringTarget(event.Target, "username") == "" && stringTarget(event.Target, "sourceUsername") == "" {
+			return fmt.Errorf("%s requires target.targetUsername or a source user target", event.Type)
+		}
 	default:
 		return fmt.Errorf("unsupported event type %q", event.Type)
 	}
