@@ -107,6 +107,15 @@ type ExecRequest struct {
 
 type ExecResult = executil.Result
 
+type EnvironmentResetter interface {
+	Reset(context.Context, Environment) error
+}
+
+type NodeFileStager interface {
+	CopyFromNode(context.Context, Environment, NodeRef, string, string) (ExecResult, error)
+	CopyToNode(context.Context, Environment, NodeRef, string, string) (ExecResult, error)
+}
+
 type EnvironmentDriver interface {
 	Name() string
 	Capabilities() CapabilitySet
@@ -624,6 +633,35 @@ func (d ComposeDriver) RollingRestart(ctx context.Context, environment Environme
 		}
 	}
 	return nil
+}
+
+func (d ComposeDriver) Reset(ctx context.Context, environment Environment) error {
+	if _, err := d.compose(ctx, environment, "down", "--volumes", "--remove-orphans"); err != nil {
+		return err
+	}
+	if _, err := d.compose(ctx, environment, "up", "-d", "--wait"); err != nil {
+		return err
+	}
+	return d.WaitReady(ctx, environment)
+}
+
+func (d ComposeDriver) CopyFromNode(ctx context.Context, environment Environment, node NodeRef, containerPath, hostPath string) (ExecResult, error) {
+	if containerPath == "" || hostPath == "" {
+		return ExecResult{}, errors.New("container and host paths are required")
+	}
+	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+		return ExecResult{}, err
+	}
+	service := composeNodeService(environment, node)
+	return d.compose(ctx, environment, "cp", service+":"+containerPath, hostPath)
+}
+
+func (d ComposeDriver) CopyToNode(ctx context.Context, environment Environment, node NodeRef, hostPath, containerPath string) (ExecResult, error) {
+	if hostPath == "" || containerPath == "" {
+		return ExecResult{}, errors.New("host and container paths are required")
+	}
+	service := composeNodeService(environment, node)
+	return d.compose(ctx, environment, "cp", hostPath, service+":"+containerPath)
 }
 
 func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment, sink *artifacts.Sink) error {

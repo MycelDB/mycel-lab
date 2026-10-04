@@ -6,8 +6,9 @@ NT0 inventory for [mycel-lab#12](https://github.com/MycelDB/mycel-lab/issues/12)
 
 This document captures the parity requirements for replacing transitional Mycel
 Lab wrapper suites with native Mycel Lab implementation. The current wrappers
-use `host-command` events to invoke legacy MycelDB scripts/harnesses while Mycel
-Lab owns run entrypoints, dry-run planning, and artifact roots.
+used `host-command` events to invoke legacy MycelDB scripts/harnesses while Mycel
+Lab owns run entrypoints, dry-run planning, and artifact roots. The remaining
+transitional wrapper is the k3d system backup/restore suite.
 
 ## Goals
 
@@ -29,7 +30,7 @@ Lab owns run entrypoints, dry-run planning, and artifact roots.
 
 | Suite | Wrapper scenario | Legacy entrypoint | Purpose |
 | --- | --- | --- | --- |
-| `compose-user-backup-restore` | `compose-user-backup-restore-harness` | `../mycel/scripts/testComposeUserBackupRestore.sh` | Principal-scoped backup export/import, graph/blob restore, and safety checks on Compose. |
+| `compose-user-backup-restore` | native `compose-user-backup-restore` | Native Mycel Lab Compose scenario | Principal-scoped backup export/import, graph/blob restore, fresh-cluster reset, and safety checks on Compose. |
 | `k3d-system-backup-restore` | `k3d-system-backup-restore-harness` | `go run ./cmd/mycel-system-backuptest ...` | Full-cluster backup/restore on disposable k3d/K3s, including PVC wipe/restore evidence. |
 | `k3d-raft-restart-soak` | native `k3d-raft-restart-soak` | Native Mycel Lab k3d scenario | One-hour moderate restart/write soak using rotating single-node restarts. |
 | `k3d-raft-restart-hard-soak` | native `k3d-raft-restart-hard-soak` | Native Mycel Lab k3d scenario | One-hour harder restart/write soak using frequent rotating single-node restarts. |
@@ -88,10 +89,10 @@ Legacy disruption harness assertions include:
 
 ## NT2: native Compose user backup/restore parity
 
-Status: native operation smoke support exists for user backup export, archive
-validation, and import through the environment driver. Full fresh-cluster restore
-parity still requires archive handoff across environment reset, richer graph/blob
-fixtures, and restored-data safety assertions.
+Status: implemented with a native Compose scenario. The suite now creates source
+fixtures, exports and validates principal backup archives, stages archives across
+a fresh Compose reset, imports into restored principals, verifies restored graph
+and blob counts across Compose endpoints, and asserts archive/login safety.
 
 ### Legacy behavior to preserve
 
@@ -123,37 +124,29 @@ The legacy script `scripts/testComposeUserBackupRestore.sh` currently:
 
 | Requirement | Current support | Gap |
 | --- | --- | --- |
-| Compose lifecycle reset | Compose driver supports reset/create/delete. | Need explicit mid-scenario environment reset/recreate operation or suite split with artifact handoff. |
-| Multi-user provisioning | Provisioner creates actor users/spaces/domains. | Need declarative fixture users not tied only to actor assignments. |
-| Graph fixture with blobs | Graph actor writes nodes/edges. | Need blob-node creation actor/operation and blob payload verification. |
-| User backup export/import | Native operation events exist: `user-backup-export`, `user-backup-validate`, `user-backup-import`. | Need full fresh-cluster restore flow and richer assertions before retiring the wrapper. |
-| Backup archive staging | Not native. | Need artifact path model and driver file copy/staging for Compose services. |
-| Fresh cluster restore | Compose driver can delete/create once per scenario. | Need reset/recreate event, or two-scenario suite with artifact handoff. |
-| Restored data verification | Partial graph count checks exist. | Need per-user restored space/domain/blob assertions across all endpoints. |
-| Secret/session safety assertions | Not native. | Need backup manifest/content assertion and login-negative assertion. |
+| Compose lifecycle reset | Native `environment-reset` support for Compose. | Destructive operator run still required before NT4 retirement. |
+| Multi-user provisioning | Native scenario covers empty, one-space, and complex source principals via actor assignments. | Declarative fixture-user syntax remains future ergonomics work. |
+| Graph fixture with blobs | Native `user-backup-fixture` creates graph nodes, an edge, and a blob-backed node. | Broader fixture shapes can be added later. |
+| User backup export/import | Native operation events exist: `user-backup-export`, `user-backup-validate`, `user-backup-import`. | None for NT2 parity. |
+| Backup archive staging | Compose driver supports node-to-host and host-to-node archive staging. | Artifact-root routing can replace `/tmp/{runID}-...` staging later. |
+| Fresh cluster restore | Native scenario resets Compose mid-run and imports staged archives into the fresh cluster. | None for NT2 parity. |
+| Restored data verification | Native `user-backup-verify-restored` checks imported graph/blob counts and restored queries across Compose nodes. | Payload-by-payload diff remains future hardening. |
+| Secret/session safety assertions | Native `user-backup-assert-safety` checks forbidden archive text and source-password login rejection. | Additional structured manifest/content assertions can be added later. |
 
 ### Proposed native deliverables
 
-1. Use the native backup operation events already added for operation smoke:
+1. Native backup operation events are available:
+   - `user-backup-fixture`;
    - `user-backup-export`;
    - `user-backup-validate`;
-   - `user-backup-import`.
-2. Add remaining scenario events:
-   - `fixture-user-create`;
-   - `fixture-graph-blob-write`;
-   - `environment-reset` for Compose;
-   - `restored-user-verify`.
-3. Add artifact routing for backup archives:
-   - `backup/user/<username>.tar.zst`;
-   - validation JSON/Markdown;
-   - restore import reports.
-4. Add assertions:
-   - restored user exists;
-   - restored spaces/domains exist;
-   - restored graph/blob payloads match expected fixture;
-   - source password rejected after restore with new password;
-   - forbidden secret/session material absent.
-5. Replace `compose-user-backup-restore-harness` with native Compose scenario(s).
+   - `environment-reset`;
+   - `user-backup-import`;
+   - `user-backup-verify-restored`;
+   - `user-backup-assert-safety`.
+2. The public `compose-user-backup-restore` suite now points at a native Compose
+   scenario instead of `compose-user-backup-restore-harness`.
+3. Destructive validation evidence is still required by NT4 before deleting or
+   deprecating fallback harness files.
 
 ## NT3: native k3d system backup/restore parity
 
@@ -244,10 +237,10 @@ A wrapper suite can be retired when all of the following are true:
    soak scenarios.
 3. NT1c: add per-endpoint final convergence and soak summary artifacts.
 4. NT1d: replace k3d restart-soak wrapper scenarios with native scenarios.
-5. NT2a: add native user-backup export/validate/import operations.
-6. NT2b: add fixture graph/blob writer and restored-data assertions.
-7. NT2c: implement Compose environment reset/handoff for restore.
-8. NT2d: replace Compose user backup/restore wrapper.
+5. NT2a: add native user-backup export/validate/import operations. Done.
+6. NT2b: add fixture graph/blob writer and restored-data assertions. Done.
+7. NT2c: implement Compose environment reset/handoff for restore. Done.
+8. NT2d: replace Compose user backup/restore wrapper. Done.
 9. NT3a: implement k3d `volume-replacement`/PVC evidence capability.
 10. NT3b: implement cluster backup metadata assertions.
 11. NT3c: implement native system restore operation and restored workload checks.
@@ -258,6 +251,6 @@ A wrapper suite can be retired when all of the following are true:
 
 - [x] NT0 wrapper parity inventory.
 - [x] NT1 native k3d restart-soak suites.
-- [ ] NT2 native Compose user backup/restore suite.
+- [x] NT2 native Compose user backup/restore suite.
 - [ ] NT3 native k3d system backup/restore suite.
 - [ ] NT4 wrapper retirement/deprecation.

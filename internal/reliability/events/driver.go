@@ -14,17 +14,18 @@ type DriverRuntime struct {
 	Driver      env.EnvironmentDriver
 	Environment env.Environment
 	Resources   *provision.ScenarioResources
+	userBackups map[string]UserBackupOperationResult
 }
 
-func NewDriverRuntime(driver env.EnvironmentDriver, environment env.Environment) DriverRuntime {
-	return DriverRuntime{Driver: driver, Environment: environment}
+func NewDriverRuntime(driver env.EnvironmentDriver, environment env.Environment) *DriverRuntime {
+	return &DriverRuntime{Driver: driver, Environment: environment, userBackups: map[string]UserBackupOperationResult{}}
 }
 
-func NewDriverRuntimeWithResources(driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources) DriverRuntime {
-	return DriverRuntime{Driver: driver, Environment: environment, Resources: resources}
+func NewDriverRuntimeWithResources(driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources) *DriverRuntime {
+	return &DriverRuntime{Driver: driver, Environment: environment, Resources: resources, userBackups: map[string]UserBackupOperationResult{}}
 }
 
-func (r DriverRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
+func (r *DriverRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
 	for _, event := range phase.Events {
 		if err := r.executeOne(ctx, phase, event, dryRun, recorder); err != nil {
 			return err
@@ -33,7 +34,7 @@ func (r DriverRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseS
 	return nil
 }
 
-func (r DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec, dryRun bool, recorder Recorder) error {
+func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec, dryRun bool, recorder Recorder) error {
 	if recorder != nil {
 		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"dryRun": dryRun, "runtime": r.Environment.Driver}}); err != nil {
 			return err
@@ -75,7 +76,7 @@ func (r DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, eve
 	return nil
 }
 
-func (r DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (map[string]any, error) {
+func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (map[string]any, error) {
 	switch event.Type {
 	case "pod-stop", "pod-restart", "pod-delete", "node-stop", "node-restart":
 		return nil, r.Driver.RestartNode(ctx, r.Environment, env.NodeRef{Name: nodeName(event.Target), Ordinal: nodeOrdinal(event.Target)})
@@ -84,8 +85,17 @@ func (r DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (ma
 	case "host-command":
 		result, err := ExecuteHostCommand(ctx, event.Target)
 		return map[string]any{"hostCommand": result}, err
-	case "user-backup-export", "user-backup-validate", "user-backup-import":
-		result, err := executeUserBackupEvent(ctx, r.Driver, r.Environment, r.Resources, event.Type, event.Target)
+	case "environment-reset":
+		resetter, ok := r.Driver.(env.EnvironmentResetter)
+		if !ok {
+			return nil, fmt.Errorf("driver %q does not support environment-reset", r.Driver.Name())
+		}
+		return nil, resetter.Reset(ctx, r.Environment)
+	case "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-fixture", "user-backup-verify-restored", "user-backup-assert-safety":
+		result, err := executeUserBackupEvent(ctx, r.Driver, r.Environment, r.Resources, event.Type, event.Target, r.userBackups)
+		if event.Type == "user-backup-export" || event.Type == "user-backup-import" {
+			r.userBackups[userBackupKey(event.Target)] = result
+		}
 		return map[string]any{"userBackup": result}, err
 	default:
 		return nil, fmt.Errorf("unsupported event type %q", event.Type)
@@ -134,7 +144,7 @@ func nodeOrdinal(target map[string]any) int {
 	return nodeTargetOrdinal(target)
 }
 
-func (r DriverRuntime) recordFailure(ctx context.Context, recorder Recorder, phase spec.PhaseSpec, event spec.EventSpec, err error) error {
+func (r *DriverRuntime) recordFailure(ctx context.Context, recorder Recorder, phase spec.PhaseSpec, event spec.EventSpec, err error) error {
 	if recorder != nil {
 		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"error": err.Error(), "runtime": r.Environment.Driver}})
 	}
