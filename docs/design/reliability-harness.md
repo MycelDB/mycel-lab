@@ -15,7 +15,9 @@ availability, and reliability trends over time.
 The harness is scenario-driven. A scenario creates exactly one MycelDB cluster,
 starts one or more simulated actor groups through the public SDK/gRPC API,
 executes deterministic phase-based events such as pod outages or restarts, and
-records structured events, metrics, artifacts, and assertion results.
+records structured events, metrics, artifacts, and assertion results. See
+[Mycel Lab model](model.md) for the full concept glossary covering scenarios,
+suites, cluster profiles, actor profiles, phases, events, runs, and artifacts.
 
 YAML is the portable authoring and import/export format. Postgres is the
 operational source of truth for definitions, runs, events, metrics, trends, and
@@ -892,7 +894,7 @@ internal/reliability/
   migrations/    # DB schema migrations
   catalog/       # import/export/versioning/profile resolution
   runner/        # scenario/suite execution
-  env/           # k3d/k8s drivers
+  env/           # dry-run, k3d, compose, and future environment drivers
   deploy/        # manifests and cluster deployment
   actors/        # actor profiles and runtime actor instances
   events/        # pod-stop, pod-restart, rolling-restart
@@ -922,10 +924,12 @@ internal/reliability/
 
 ### Phase 3: cluster environment and deployment
 
-- Implement k3d/k8s environment driver.
-- Render/deploy MycelDB StatefulSet for arbitrary initial node count.
+See [Environment driver abstraction](environment-drivers.md) for the current driver model.
+
+- Implement dry-run, k3d, and Compose environment drivers behind one runner abstraction.
+- Render/deploy MycelDB StatefulSet for k3d and Compose-equivalent resources for Compose.
 - Support raft settings from cluster profile.
-- Collect pod logs and Kubernetes state snapshots.
+- Collect backend-specific logs and environment state snapshots.
 
 ### Phase 4: graph actor and oracle
 
