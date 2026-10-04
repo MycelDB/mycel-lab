@@ -1,5 +1,7 @@
 # Mycel Lab
 
+[![License](https://img.shields.io/github/license/MycelDB/mycel-lab)](LICENSE)
+
 Mycel Lab is a deterministic reliability and benchmarking system for designing,
 running, observing, and comparing long-running MycelDB cluster experiments.
 
@@ -37,3 +39,7 @@ mycel-lab import tests/reliability/
 mycel-lab list scenario
 mycel-lab export scenario example --version latest
 ```
+
+## License
+
+Mycel Lab is licensed under the [Apache License 2.0](LICENSE).
