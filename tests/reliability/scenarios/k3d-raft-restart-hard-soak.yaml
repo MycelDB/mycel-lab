@@ -1,0 +1,60 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-raft-restart-hard-soak
+  description: Native one-hour hard k3d raft restart/write soak with multi-space pressure.
+seed: 26262
+environment:
+  driver: k3d
+  namespace: mycel-lab
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - node-restart
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 6
+    rate:
+      mode: group-total
+      commitsPerSecond: 3
+  - name: readers
+    profileRef: gql-reader
+    count: 3
+    target:
+      actorGroups:
+        - graph-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 3
+phases:
+  - name: warmup
+    duration: 1m
+  - name: frequent-rotating-restarts
+    duration: 1s
+    events:
+      - type: node-restart
+        target:
+          ordinalSequence: [0, 1, 2]
+        repeat: 60
+        interval: 1m
+    outcome:
+      availability: expected-degradation
+  - name: recovery
+    duration: 2m
+    assertions:
+      requireConvergedCounts: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: true

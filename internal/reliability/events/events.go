@@ -84,8 +84,8 @@ func validateEvent(event spec.EventSpec) error {
 			return fmt.Errorf("%s requires target.pod", event.Type)
 		}
 	case "node-stop", "node-restart":
-		if PodName(event.Target) == "" && nodeTargetName(event.Target) == "" && nodeTargetOrdinal(event.Target) < 0 {
-			return fmt.Errorf("%s requires target.node, target.service, target.pod, or target.ordinal", event.Type)
+		if PodName(event.Target) == "" && nodeTargetName(event.Target) == "" && nodeTargetOrdinal(event.Target) < 0 && len(nodeTargetOrdinalSequence(event.Target)) == 0 {
+			return fmt.Errorf("%s requires target.node, target.service, target.pod, target.ordinal, or target.ordinalSequence", event.Type)
 		}
 	case "rolling-restart":
 		return nil
@@ -124,6 +124,35 @@ func nodeTargetOrdinal(target map[string]any) int {
 		}
 	}
 	return -1
+}
+
+func nodeTargetOrdinalSequence(target map[string]any) []int {
+	if target == nil {
+		return nil
+	}
+	value, ok := target["ordinalSequence"]
+	if !ok {
+		value = target["ordinals"]
+	}
+	switch v := value.(type) {
+	case []int:
+		return append([]int(nil), v...)
+	case []any:
+		out := make([]int, 0, len(v))
+		for _, item := range v {
+			switch n := item.(type) {
+			case int:
+				out = append(out, n)
+			case int64:
+				out = append(out, int(n))
+			case float64:
+				out = append(out, int(n))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func hostCommandTarget(target map[string]any) []string {

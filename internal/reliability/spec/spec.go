@@ -176,6 +176,8 @@ type EventSpec struct {
 	Type     string         `yaml:"type" json:"type"`
 	Target   map[string]any `yaml:"target" json:"target"`
 	Duration Duration       `yaml:"duration,omitempty" json:"duration,omitempty"`
+	Repeat   int            `yaml:"repeat,omitempty" json:"repeat,omitempty"`
+	Interval Duration       `yaml:"interval,omitempty" json:"interval,omitempty"`
 }
 
 type Suite struct {

@@ -2,9 +2,9 @@ apiVersion: myceldb.io/reliability/v1
 kind: Suite
 metadata:
   name: k3d-raft-restart-hard-soak
-  description: Transitional Mycel Lab suite for the one-hour hard raft restart soak harness.
+  description: Native one-hour hard raft restart/write soak with frequent rotating single-node restarts.
 scenarios:
-  - path: ../scenarios/k3d-raft-restart-hard-soak-harness.yaml
+  - path: ../scenarios/k3d-raft-restart-hard-soak.yaml
 execution:
   mode: sequential
   stopOnFailure: true
