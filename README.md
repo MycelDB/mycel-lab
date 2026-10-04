@@ -8,7 +8,9 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 ## Documents
 
 - [Structured reliability harness design](docs/design/reliability-harness.md)
+- [Environment driver abstraction design](docs/design/environment-drivers.md)
 - [Structured reliability harness implementation plan](docs/implementation/reliability-harness-implementation-plan.md)
+- [Environment driver abstraction implementation plan](docs/implementation/environment-driver-abstraction-plan.md)
 - [Operations guide](docs/operations.md)
 
 ## Current commands
