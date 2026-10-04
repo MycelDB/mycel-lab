@@ -179,3 +179,28 @@ phases:
 		t.Fatalf("capabilities=%+v", scenario.Environment.Capabilities.Required)
 	}
 }
+
+func TestScenarioRejectsGenericKubernetesDriver(t *testing.T) {
+	_, err := Load([]byte(`
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: bad-driver
+seed: 1
+environment:
+  driver: kubernetes
+clusterRef: raft-3-node
+actorGroups:
+  - name: writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      commitsPerSecond: 1
+phases:
+  - name: warmup
+    duration: 1m
+`))
+	if err == nil || !strings.Contains(err.Error(), "environment.driver") || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("Load() error=%v, want unsupported environment.driver", err)
+	}
+}
