@@ -234,7 +234,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	recorder := &runRecorder{store: opts.Store, sink: sink, runID: runID}
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
-		eventRuntime = defaultEventRuntime(opts, driver, environment, &resources)
+		eventRuntime = defaultEventRuntime(opts, driver, environment, scenario, &resources)
 	}
 	assignmentMap := provision.AssignmentMap(resources)
 	if provisionDryRun {
@@ -372,11 +372,11 @@ func writeConsoleEndpoints(w io.Writer, endpoints []env.ConsoleEndpoint) {
 	}
 }
 
-func defaultEventRuntime(opts Options, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources) events.Runtime {
+func defaultEventRuntime(opts Options, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, resources *provision.ScenarioResources) events.Runtime {
 	if opts.DryRun {
 		return events.LocalRuntime{}
 	}
-	return events.NewDriverRuntimeWithResources(driver, environment, resources)
+	return events.NewDriverRuntimeWithScenario(driver, environment, scenario, resources)
 }
 
 func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, error) {

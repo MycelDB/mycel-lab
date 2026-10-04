@@ -334,6 +334,6 @@ Each migration tranche should update the relevant docs:
   - Initial k3d migration excludes legacy one-PVC replacement/rejoin parity until a dedicated volume-replacement capability is added.
 - [x] SIM3 restart/outage/disruption migration.
 - [x] SIM4 backup/restore system migration.
-  - Initial backup/restore migration uses constrained Mycel Lab `host-command` wrappers around the legacy harnesses; native backup/restore operations remain future hardening work.
+  - The earlier constrained `host-command` wrappers have been superseded by native Mycel Lab Compose user backup/restore and k3d system backup/restore scenarios.
 - [x] SIM5 soak and release-gate suite migration.
-  - Initial long-running k3d restart-soak migration uses constrained `host-command` wrappers around legacy harness profiles; Compose soak is native Mycel Lab scenario coverage.
+  - The earlier restart-soak wrappers have been superseded by native repeated rotating `node-restart` scenarios; Compose soak is native Mycel Lab scenario coverage.

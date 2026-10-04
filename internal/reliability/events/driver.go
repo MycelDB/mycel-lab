@@ -11,18 +11,24 @@ import (
 )
 
 type DriverRuntime struct {
-	Driver      env.EnvironmentDriver
-	Environment env.Environment
-	Resources   *provision.ScenarioResources
-	userBackups map[string]UserBackupOperationResult
+	Driver        env.EnvironmentDriver
+	Environment   env.Environment
+	Scenario      spec.ResolvedScenario
+	Resources     *provision.ScenarioResources
+	userBackups   map[string]UserBackupOperationResult
+	systemBackups map[string]SystemBackupOperationResult
 }
 
 func NewDriverRuntime(driver env.EnvironmentDriver, environment env.Environment) *DriverRuntime {
-	return &DriverRuntime{Driver: driver, Environment: environment, userBackups: map[string]UserBackupOperationResult{}}
+	return &DriverRuntime{Driver: driver, Environment: environment, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}}
 }
 
 func NewDriverRuntimeWithResources(driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources) *DriverRuntime {
-	return &DriverRuntime{Driver: driver, Environment: environment, Resources: resources, userBackups: map[string]UserBackupOperationResult{}}
+	return &DriverRuntime{Driver: driver, Environment: environment, Resources: resources, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}}
+}
+
+func NewDriverRuntimeWithScenario(driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, resources *provision.ScenarioResources) *DriverRuntime {
+	return &DriverRuntime{Driver: driver, Environment: environment, Scenario: scenario, Resources: resources, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}}
 }
 
 func (r *DriverRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
@@ -97,6 +103,12 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 			r.userBackups[userBackupKey(event.Target)] = result
 		}
 		return map[string]any{"userBackup": result}, err
+	case "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify":
+		result, err := executeSystemBackupEvent(ctx, r.Driver, r.Environment, r.Scenario, r.Resources, event.Type, event.Target, r.systemBackups)
+		if event.Type == "cluster-backup-create" || event.Type == "cluster-restore-apply" {
+			r.systemBackups[systemBackupKey(event.Target)] = result
+		}
+		return map[string]any{"systemBackup": result}, err
 	default:
 		return nil, fmt.Errorf("unsupported event type %q", event.Type)
 	}
