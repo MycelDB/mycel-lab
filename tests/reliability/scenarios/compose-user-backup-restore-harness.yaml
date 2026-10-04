@@ -1,0 +1,30 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-user-backup-restore-harness
+  description: Transitional Mycel Lab wrapper for the Compose user backup/restore system harness.
+seed: 23232
+environment:
+  driver: dry-run
+clusterRef: single-node
+actorGroups:
+  - name: harness
+    profileRef: noop
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 1
+phases:
+  - name: run-compose-user-backup-restore
+    duration: 1s
+    events:
+      - type: host-command
+        target:
+          workingDirectory: ../mycel
+          command:
+            - ./scripts/testComposeUserBackupRestore.sh
+assertions:
+  final:
+    requireHealthyCluster: false
+artifacts:
+  collectScenarioSpec: true

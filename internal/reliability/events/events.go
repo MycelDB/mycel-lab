@@ -1,8 +1,12 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
@@ -85,6 +89,10 @@ func validateEvent(event spec.EventSpec) error {
 		}
 	case "rolling-restart":
 		return nil
+	case "host-command":
+		if len(hostCommandTarget(event.Target)) == 0 {
+			return fmt.Errorf("%s requires target.command", event.Type)
+		}
 	default:
 		return fmt.Errorf("unsupported event type %q", event.Type)
 	}
@@ -116,6 +124,83 @@ func nodeTargetOrdinal(target map[string]any) int {
 		}
 	}
 	return -1
+}
+
+func hostCommandTarget(target map[string]any) []string {
+	if target == nil {
+		return nil
+	}
+	switch value := target["command"].(type) {
+	case []string:
+		return append([]string(nil), value...)
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			part := strings.TrimSpace(fmt.Sprint(item))
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+		return out
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		return []string{value}
+	default:
+		return nil
+	}
+}
+
+type HostCommandResult struct {
+	Command          string `json:"command"`
+	WorkingDirectory string `json:"workingDirectory,omitempty"`
+	Stdout           string `json:"stdout,omitempty"`
+	Stderr           string `json:"stderr,omitempty"`
+	Truncated        bool   `json:"truncated,omitempty"`
+}
+
+func ExecuteHostCommand(ctx context.Context, target map[string]any) (HostCommandResult, error) {
+	command := hostCommandTarget(target)
+	if len(command) == 0 {
+		return HostCommandResult{}, fmt.Errorf("host-command requires target.command")
+	}
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	if cwd, _ := target["workingDirectory"].(string); strings.TrimSpace(cwd) != "" {
+		cmd.Dir = cwd
+	}
+	if envMap, ok := target["env"].(map[string]any); ok && len(envMap) > 0 {
+		env := os.Environ()
+		for key, value := range envMap {
+			if strings.TrimSpace(key) != "" {
+				env = append(env, key+"="+fmt.Sprint(value))
+			}
+		}
+		cmd.Env = env
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	result := HostCommandResult{Command: strings.Join(command, " "), WorkingDirectory: cmd.Dir}
+	err := cmd.Run()
+	result.Stdout, result.Stderr, result.Truncated = boundedOutput(stdout.String(), stderr.String(), 8192)
+	if err != nil {
+		return result, fmt.Errorf("host-command %s: %w", result.Command, err)
+	}
+	return result, nil
+}
+
+func boundedOutput(stdout, stderr string, limit int) (string, string, bool) {
+	truncated := false
+	if len(stdout) > limit {
+		stdout = stdout[len(stdout)-limit:]
+		truncated = true
+	}
+	if len(stderr) > limit {
+		stderr = stderr[len(stderr)-limit:]
+		truncated = true
+	}
+	return stdout, stderr, truncated
 }
 
 func IsExpectedDegradation(phase spec.PhaseSpec) bool {

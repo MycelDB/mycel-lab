@@ -1,0 +1,43 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-system-backup-restore-harness
+  description: Transitional Mycel Lab wrapper for the k3d system backup/restore harness.
+seed: 24242
+environment:
+  driver: dry-run
+clusterRef: single-node
+actorGroups:
+  - name: harness
+    profileRef: noop
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 1
+phases:
+  - name: run-k3d-system-backup-restore
+    duration: 1s
+    events:
+      - type: host-command
+        target:
+          workingDirectory: ../mycel
+          command:
+            - go
+            - run
+            - ./cmd/mycel-system-backuptest
+            - --driver
+            - k3s
+            - --provisioner
+            - k3d
+            - --profile
+            - backup-smoke
+            - --workload
+            - edges
+            - --image
+            - myceldb/mycel:system-backup-restore-local
+            - --confirm-destructive
+assertions:
+  final:
+    requireHealthyCluster: false
+artifacts:
+  collectScenarioSpec: true

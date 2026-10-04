@@ -1,0 +1,11 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-raft-sensitive-gate
+  description: Destructive Mycel Lab raft-sensitive gate covering restart smoke and edge workload disruption.
+scenarios:
+  - path: ../scenarios/k3d-raft-disruption-smoke.yaml
+  - path: ../scenarios/k3d-raft-disruption-edges.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

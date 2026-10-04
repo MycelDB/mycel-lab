@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-system-backup-restore
+  description: Transitional Mycel Lab suite for the k3d system backup/restore harness.
+scenarios:
+  - path: ../scenarios/k3d-system-backup-restore-harness.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true
