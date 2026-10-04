@@ -134,3 +134,48 @@ behavior:
 		t.Fatalf("Load() error = %v, want behavior.type", err)
 	}
 }
+
+func TestScenarioEnvironmentOptionsAndCapabilities(t *testing.T) {
+	loaded, err := Load([]byte(`
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-example
+seed: 99
+environment:
+  driver: compose
+  namespace: lab
+  options:
+    composeFile: ../mycel/tests/compose/cluster/compose.yml
+    serviceNames:
+      - myceld-a
+      - myceld-b
+  capabilities:
+    required:
+      - per-node-endpoints
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: writers
+    profileRef: graph-committer
+    count: 2
+    rate:
+      commitsPerSecond: 5
+phases:
+  - name: warmup
+    duration: 1m
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	scenario := loaded.(Scenario)
+	if scenario.Environment.Driver != "compose" || scenario.Environment.Namespace != "lab" {
+		t.Fatalf("environment=%+v", scenario.Environment)
+	}
+	if got := scenario.Environment.Options["composeFile"]; got != "../mycel/tests/compose/cluster/compose.yml" {
+		t.Fatalf("composeFile option=%v", got)
+	}
+	if len(scenario.Environment.Capabilities.Required) != 2 || scenario.Environment.Capabilities.Required[1] != "logs" {
+		t.Fatalf("capabilities=%+v", scenario.Environment.Capabilities.Required)
+	}
+}

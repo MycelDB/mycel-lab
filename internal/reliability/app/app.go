@@ -12,6 +12,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
 	"github.com/MycelDB/mycel-lab/internal/reliability/runner"
+	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
 
@@ -270,7 +271,7 @@ func runDelete(args []string, stdout, stderr io.Writer) int {
 
 func runRun(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--console-endpoints] [--console-port-base <port>]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
 		return 0
 	}
 	if len(nonFlagArgs(args)) < 2 {
@@ -355,6 +356,11 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 		}
 		consolePortBase = parsed
 	}
+	environmentOverride, err := environmentOverrideFromArgs(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid environment override: %v\n", err)
+		return runner.Options{}, false
+	}
 	return runner.Options{
 		DryRun:                   hasFlag(args, "--dry-run"),
 		ArtifactRoot:             flagValue(args, "--artifact-root"),
@@ -362,8 +368,33 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 		KeepEnvironmentOnFailure: hasFlag(args, "--keep-environment-on-failure"),
 		ConsoleEndpoints:         hasFlag(args, "--console-endpoints") || hasFlag(args, "--expose-console-ports"),
 		ConsolePortBase:          consolePortBase,
+		EnvironmentOverride:      environmentOverride,
 		ProgressWriter:           stdout,
 	}, true
+}
+
+func environmentOverrideFromArgs(args []string) (*spec.EnvironmentSpec, error) {
+	override := spec.EnvironmentSpec{}
+	if driver := flagValue(args, "--environment-driver"); driver != "" {
+		override.Driver = driver
+	}
+	if namespace := flagValue(args, "--environment-namespace"); namespace != "" {
+		override.Namespace = namespace
+	}
+	for _, raw := range flagValues(args, "--environment-option") {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("--environment-option must be key=value, got %q", raw)
+		}
+		if override.Options == nil {
+			override.Options = map[string]any{}
+		}
+		override.Options[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	if override.Driver == "" && override.Namespace == "" && len(override.Options) == 0 {
+		return nil, nil
+	}
+	return &override, nil
 }
 
 func runRuns(args []string, stdout, stderr io.Writer) int {

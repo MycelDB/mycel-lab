@@ -29,6 +29,9 @@ mycel-lab run scenario-file tests/reliability/scenarios/graph-actor-smoke.yaml -
 mycel-lab run scenario-file tests/reliability/scenarios/graph-convergence-smoke.yaml --confirm-destructive
 mycel-lab run scenario-file tests/reliability/scenarios/fifty-user-read-write.yaml --confirm-destructive --console-endpoints
 mycel-lab run scenario-file tests/reliability/scenarios/three-node-short-outage.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --dry-run
+# Compose runs require Docker Compose and a local mycel image compatible with the fixture.
+mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --confirm-destructive
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```
 

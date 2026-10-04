@@ -94,3 +94,31 @@ func TestRunRequiresTarget(t *testing.T) {
 		t.Fatalf("stderr missing requires message: %q", stderr.String())
 	}
 }
+
+func TestRunOptionsParseEnvironmentOverride(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts, ok := runOptionsFromArgs([]string{"--environment-driver", "compose", "--environment-namespace", "lab", "--environment-option", "composeFile=/tmp/compose.yml", "--environment-option", "grpcPorts=19091,19092"}, &stdout, &stderr)
+	if !ok {
+		t.Fatalf("runOptionsFromArgs ok=false stderr=%q", stderr.String())
+	}
+	if opts.EnvironmentOverride == nil {
+		t.Fatal("EnvironmentOverride=nil")
+	}
+	if opts.EnvironmentOverride.Driver != "compose" || opts.EnvironmentOverride.Namespace != "lab" {
+		t.Fatalf("override=%+v", opts.EnvironmentOverride)
+	}
+	if opts.EnvironmentOverride.Options["composeFile"] != "/tmp/compose.yml" || opts.EnvironmentOverride.Options["grpcPorts"] != "19091,19092" {
+		t.Fatalf("options=%+v", opts.EnvironmentOverride.Options)
+	}
+}
+
+func TestRunOptionsRejectInvalidEnvironmentOption(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	_, ok := runOptionsFromArgs([]string{"--environment-option", "not-a-pair"}, &stdout, &stderr)
+	if ok {
+		t.Fatal("runOptionsFromArgs ok=true, want false")
+	}
+	if !strings.Contains(stderr.String(), "key=value") {
+		t.Fatalf("stderr=%q, want key=value", stderr.String())
+	}
+}
