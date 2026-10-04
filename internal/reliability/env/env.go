@@ -479,7 +479,7 @@ type ComposeDriver struct {
 func (d ComposeDriver) Name() string { return "compose" }
 
 func (d ComposeDriver) Capabilities() CapabilitySet {
-	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityObjectStoreFixture)
+	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityObjectStoreFixture)
 }
 
 func (d ComposeDriver) Validate(environment spec.EnvironmentSpec) error {
@@ -604,7 +604,7 @@ func (d ComposeDriver) Exec(ctx context.Context, environment Environment, node N
 		return ExecResult{}, errors.New("exec command is required")
 	}
 	service := composeNodeService(environment, node)
-	args := []string{"exec", service}
+	args := []string{"exec", "-T", service}
 	args = append(args, req.Command...)
 	return d.compose(ctx, environment, args...)
 }

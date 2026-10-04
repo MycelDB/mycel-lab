@@ -75,9 +75,13 @@ func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec,
 
 func validateEvent(event spec.EventSpec) error {
 	switch event.Type {
-	case "pod-stop", "pod-restart":
+	case "pod-stop", "pod-restart", "pod-delete":
 		if PodName(event.Target) == "" {
 			return fmt.Errorf("%s requires target.pod", event.Type)
+		}
+	case "node-stop", "node-restart":
+		if PodName(event.Target) == "" && nodeTargetName(event.Target) == "" && nodeTargetOrdinal(event.Target) < 0 {
+			return fmt.Errorf("%s requires target.node, target.service, target.pod, or target.ordinal", event.Type)
 		}
 	case "rolling-restart":
 		return nil
@@ -90,6 +94,28 @@ func validateEvent(event spec.EventSpec) error {
 func PodName(target map[string]any) string {
 	pod, _ := target["pod"].(string)
 	return pod
+}
+
+func nodeTargetName(target map[string]any) string {
+	if node, _ := target["node"].(string); node != "" {
+		return node
+	}
+	service, _ := target["service"].(string)
+	return service
+}
+
+func nodeTargetOrdinal(target map[string]any) int {
+	for _, key := range []string{"ordinal", "nodeOrdinal"} {
+		switch v := target[key].(type) {
+		case int:
+			return v
+		case int64:
+			return int(v)
+		case float64:
+			return int(v)
+		}
+	}
+	return -1
 }
 
 func IsExpectedDegradation(phase spec.PhaseSpec) bool {

@@ -133,6 +133,22 @@ mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --dry
 mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --confirm-destructive
 ```
 
+Migrated system-integration validation suites are available for Compose and
+k3d-backed local clusters:
+
+```sh
+mycel-lab run suite compose-cluster-validation --dry-run
+mycel-lab run suite k3d-cluster-validation --dry-run
+
+mycel-lab run suite compose-cluster-validation --confirm-destructive
+mycel-lab run suite k3d-cluster-validation --confirm-destructive
+```
+
+These suites validate shared cluster identity/health, graph data-plane behavior,
+and rolling restart recovery. The k3d suite intentionally does not yet include
+the legacy one-PVC replacement/rejoin step; that remains blocked on a dedicated
+volume-replacement capability.
+
 ## Running suites
 
 Run a suite by file path or by name from `tests/reliability/suites/`:
