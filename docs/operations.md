@@ -165,10 +165,11 @@ is a native Compose smoke suite for `user-backup-export`,
 `user-backup-validate`, and `user-backup-import` operations through the
 environment driver. `compose-user-backup-restore` is the full native Compose
 backup/restore suite with fixture creation, archive staging across a fresh reset,
-restored-data checks, and safety assertions. `k3d-system-backup-restore` remains
-a constrained `host-command` wrapper while k3d volume/PVC restore parity is being
-implemented. The parity requirements for replacing the remaining wrapper are
-tracked in the [native wrapper transition inventory](implementation/native-wrapper-transition-inventory.md).
+restored-data checks, and safety assertions. `k3d-system-backup-restore` is the
+native k3d full-system backup/restore suite with cluster backup metadata checks,
+PVC replacement evidence, ordinal archive restore, and restored workload
+verification. The completed wrapper transition is tracked in the [native wrapper
+transition inventory](implementation/native-wrapper-transition-inventory.md).
 The k3d cluster-validation suite intentionally does not yet include the legacy
 one-PVC replacement/rejoin step; that remains blocked on a dedicated
 volume-replacement capability.

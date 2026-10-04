@@ -6,7 +6,7 @@ metadata:
 scenarios:
   - path: ../scenarios/compose-cluster-validation.yaml
   - path: ../scenarios/k3d-cluster-validation.yaml
-  - path: ../scenarios/k3d-system-backup-restore-harness.yaml
+  - path: ../scenarios/k3d-system-backup-restore.yaml
 execution:
   mode: sequential
   stopOnFailure: true

@@ -119,6 +119,12 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "file") == "" && stringTarget(event.Target, "backup") == "" && stringTarget(event.Target, "name") == "" {
 			return fmt.Errorf("%s requires target.file, target.backup, or target.name", event.Type)
 		}
+	case "system-backup-fixture", "cluster-restore-verify":
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
+			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
+		}
+	case "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply":
+		return nil
 	default:
 		return fmt.Errorf("unsupported event type %q", event.Type)
 	}

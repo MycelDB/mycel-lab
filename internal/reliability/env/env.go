@@ -116,6 +116,14 @@ type NodeFileStager interface {
 	CopyToNode(context.Context, Environment, NodeRef, string, string) (ExecResult, error)
 }
 
+type VolumeReplacementDriver interface {
+	PVCUIDs(context.Context, Environment, string, int) (map[string]string, error)
+	ResetNamespace(context.Context, Environment) error
+	ApplyYAML(context.Context, Environment, string) (ExecResult, error)
+	ScaleStatefulSet(context.Context, Environment, string, int) error
+	RestoreArchiveToPVC(context.Context, Environment, string, string) error
+}
+
 type EnvironmentDriver interface {
 	Name() string
 	Capabilities() CapabilitySet
@@ -279,7 +287,7 @@ type K3DDriver struct {
 func (d K3DDriver) Name() string { return "k3d" }
 
 func (d K3DDriver) Capabilities() CapabilitySet {
-	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs)
+	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityVolumeReplacement)
 }
 
 func (d K3DDriver) Validate(environment spec.EnvironmentSpec) error {
@@ -447,6 +455,117 @@ func (d K3DDriver) RollingRestart(ctx context.Context, environment Environment) 
 		return err
 	}
 	return d.WaitReady(ctx, environment)
+}
+
+func (d K3DDriver) CopyFromNode(ctx context.Context, environment Environment, node NodeRef, containerPath, hostPath string) (ExecResult, error) {
+	if containerPath == "" || hostPath == "" {
+		return ExecResult{}, errors.New("container and host paths are required")
+	}
+	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+		return ExecResult{}, err
+	}
+	pod := k3dPodName(node)
+	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "cp", pod+":"+containerPath, hostPath)
+}
+
+func (d K3DDriver) CopyToNode(ctx context.Context, environment Environment, node NodeRef, hostPath, containerPath string) (ExecResult, error) {
+	if hostPath == "" || containerPath == "" {
+		return ExecResult{}, errors.New("host and container paths are required")
+	}
+	pod := k3dPodName(node)
+	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "cp", hostPath, pod+":"+containerPath)
+}
+
+func (d K3DDriver) PVCUIDs(ctx context.Context, environment Environment, statefulSet string, count int) (map[string]string, error) {
+	if statefulSet == "" {
+		statefulSet = "myceld"
+	}
+	if count <= 0 {
+		count = intFromMetadata(environment.Metadata, "nodeCount", d.nodeCount)
+	}
+	out := map[string]string{}
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("data-%s-%d", statefulSet, i)
+		result, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pvc", name, "-o", "jsonpath={.metadata.uid}")
+		if err != nil {
+			return nil, err
+		}
+		out[name] = strings.TrimSpace(result.Stdout)
+	}
+	return out, nil
+}
+
+func (d K3DDriver) ResetNamespace(ctx context.Context, environment Environment) error {
+	_, _ = d.runner().Run(ctx, "kubectl", "--context", environment.Context, "delete", "namespace", environment.Namespace, "--wait=true", "--timeout=5m")
+	_, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "create", "namespace", environment.Namespace)
+	return err
+}
+
+func (d K3DDriver) ApplyYAML(ctx context.Context, environment Environment, manifest string) (ExecResult, error) {
+	path, err := writeTempManifest(environment.Name+"-restore", manifest)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	defer os.Remove(path)
+	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "apply", "-f", path)
+}
+
+func (d K3DDriver) ScaleStatefulSet(ctx context.Context, environment Environment, statefulSet string, replicas int) error {
+	if statefulSet == "" {
+		statefulSet = "myceld"
+	}
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "scale", "statefulset/"+statefulSet, "--replicas", strconv.Itoa(replicas)); err != nil {
+		return err
+	}
+	if replicas == 0 {
+		_, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "pods", "-l", "app=myceld", "--for=delete", "--timeout=5m")
+		return err
+	}
+	return d.WaitReady(ctx, environment)
+}
+
+func (d K3DDriver) RestoreArchiveToPVC(ctx context.Context, environment Environment, pvcName, archivePath string) error {
+	if pvcName == "" || archivePath == "" {
+		return errors.New("pvc name and archive path are required")
+	}
+	restorePod := "restore-" + strings.ReplaceAll(pvcName, "_", "-")
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  restartPolicy: Never
+  containers:
+    - name: restore
+      image: alpine:3.21
+      command: ["/bin/sh", "-ec", "sleep 3600"]
+      volumeMounts:
+        - name: data
+          mountPath: /data/mycel
+        - name: restore
+          mountPath: /restore
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: %s
+    - name: restore
+      emptyDir: {}
+`, restorePod, environment.Namespace, pvcName)
+	if _, err := d.ApplyYAML(ctx, environment, manifest); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = d.runner().Run(context.Background(), "kubectl", "--context", environment.Context, "-n", environment.Namespace, "delete", "pod", restorePod, "--ignore-not-found=true", "--wait=true", "--timeout=3m")
+	}()
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "--for=condition=Ready", "pod/"+restorePod, "--timeout=5m"); err != nil {
+		return err
+	}
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "cp", archivePath, restorePod+":/restore/backup.tar"); err != nil {
+		return err
+	}
+	_, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", "find /data/mycel -mindepth 1 -maxdepth 1 -exec rm -rf {} + && tar -xf /restore/backup.tar -C /data/mycel")
+	return err
 }
 
 func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, sink *artifacts.Sink) error {
@@ -823,6 +942,16 @@ func composeFileOptions(environment spec.EnvironmentSpec) []string {
 		}
 	}
 	return files
+}
+
+func k3dPodName(node NodeRef) string {
+	if node.Name != "" {
+		return node.Name
+	}
+	if node.Ordinal >= 0 {
+		return fmt.Sprintf("myceld-%d", node.Ordinal)
+	}
+	return "myceld-0"
 }
 
 func composeServiceNames(environment Environment) []string {

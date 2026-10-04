@@ -5,10 +5,10 @@
 NT0 inventory for [mycel-lab#12](https://github.com/MycelDB/mycel-lab/issues/12).
 
 This document captures the parity requirements for replacing transitional Mycel
-Lab wrapper suites with native Mycel Lab implementation. The current wrappers
-used `host-command` events to invoke legacy MycelDB scripts/harnesses while Mycel
-Lab owns run entrypoints, dry-run planning, and artifact roots. The remaining
-transitional wrapper is the k3d system backup/restore suite.
+Lab wrapper suites with native Mycel Lab implementation. Earlier transitional
+suites used `host-command` events to invoke legacy MycelDB scripts/harnesses
+while Mycel Lab owned run entrypoints, dry-run planning, and artifact roots. The
+public wrapper suites have now been replaced by native scenarios.
 
 ## Goals
 
@@ -31,7 +31,7 @@ transitional wrapper is the k3d system backup/restore suite.
 | Suite | Wrapper scenario | Legacy entrypoint | Purpose |
 | --- | --- | --- | --- |
 | `compose-user-backup-restore` | native `compose-user-backup-restore` | Native Mycel Lab Compose scenario | Principal-scoped backup export/import, graph/blob restore, fresh-cluster reset, and safety checks on Compose. |
-| `k3d-system-backup-restore` | `k3d-system-backup-restore-harness` | `go run ./cmd/mycel-system-backuptest ...` | Full-cluster backup/restore on disposable k3d/K3s, including PVC wipe/restore evidence. |
+| `k3d-system-backup-restore` | native `k3d-system-backup-restore` | Native Mycel Lab k3d scenario | Full-cluster backup/restore on disposable k3d, including PVC replacement/restore evidence. |
 | `k3d-raft-restart-soak` | native `k3d-raft-restart-soak` | Native Mycel Lab k3d scenario | One-hour moderate restart/write soak using rotating single-node restarts. |
 | `k3d-raft-restart-hard-soak` | native `k3d-raft-restart-hard-soak` | Native Mycel Lab k3d scenario | One-hour harder restart/write soak using frequent rotating single-node restarts. |
 
@@ -150,6 +150,12 @@ The legacy script `scripts/testComposeUserBackupRestore.sh` currently:
 
 ## NT3: native k3d system backup/restore parity
 
+Status: implemented with a native k3d scenario. The suite creates a workload
+fixture, triggers and validates coordinated cluster backup metadata, captures
+node archives, replaces fresh PVCs with UID evidence, restores archives by
+ordinal, restarts the StatefulSet, and verifies the restored workload through
+all k3d pods.
+
 ### Legacy behavior to preserve
 
 The legacy `cmd/mycel-system-backuptest` currently validates:
@@ -181,40 +187,34 @@ Legacy profiles:
 | Requirement | Current support | Gap |
 | --- | --- | --- |
 | k3d lifecycle | Supported. | None for baseline lifecycle. |
-| Workload writes | Graph actors support writes. | Need profile parity for `nodes`, `edges`, `multi-space` and count expectations. |
-| Coordinated cluster backup | Not native. | Need admin cluster backup operation. |
-| Backup metadata validation | Not native. | Need `backup-set.json` parser/assertions for raft freeze/checkpoint evidence. |
-| PVC wipe/restore | Not native. | Need `volume-replacement`/PVC operation in k3d driver and archive placement by ordinal. |
-| StatefulSet restore restart | Rolling restart exists. | Need restore-specific ordering and readiness gates. |
-| Restored local consistency counts | Not native. | Need per-node consistency-report assertions. |
-| Restored GQL read through session-capable pod | Partially supported by query actors/oracle. | Need post-restore session recreation and restored workload read assertion. |
-| PVC UID changed evidence | Not native. | Need k3d/Kubernetes PVC metadata capture before/after restore. |
+| Workload writes | Native `system-backup-fixture` creates graph nodes, an edge, and a blob-backed node. | Broader workload profiles remain future hardening. |
+| Coordinated cluster backup | Native `cluster-backup-create` event triggers Admin cluster backup and captures node archives. | None for NT3 parity. |
+| Backup metadata validation | Native `cluster-backup-create` and `cluster-backup-validate` validate status, raft barrier/checkpoint evidence, checksums, and backup-set safety. | None for NT3 parity. |
+| PVC wipe/restore | K3D driver implements `volume-replacement` primitives and `cluster-restore-apply` restores archives by ordinal. | None for NT3 parity. |
+| StatefulSet restore restart | Native restore scales the StatefulSet down, restores PVC contents, scales up, and waits for readiness. | None for NT3 parity. |
+| Restored local consistency counts | Final cluster assertions and restored workload queries cover restored availability. | Dedicated per-node consistency-report artifact remains future hardening. |
+| Restored GQL read through session-capable pod | Native `cluster-restore-verify` queries the restored workload through every pod. | None for NT3 parity. |
+| PVC UID changed evidence | Native restore captures and compares PVC UIDs before/after replacement. | None for NT3 parity. |
 
 ### Proposed native deliverables
 
-1. Add `CapabilityVolumeReplacement` implementation to `K3DDriver` for controlled
-   PVC/data replacement only in disposable k3d environments.
-2. Add cluster backup/restore operations:
+1. K3D driver now advertises `volume-replacement` and implements PVC UID,
+   namespace reset, YAML apply, StatefulSet scale, and ordinal archive restore
+   primitives.
+2. Native system backup/restore events are available:
+   - `system-backup-fixture`;
    - `cluster-backup-create`;
    - `cluster-backup-validate`;
-   - `cluster-restore-stage-ordinal`;
-   - `cluster-restore-apply`.
-3. Add backup metadata assertions for:
-   - backup-set shape;
-   - raft freeze evidence;
-   - graph/checkpoint evidence;
-   - expected ordinal archives.
-4. Add PVC evidence artifacts:
-   - pre-wipe PVC list/UIDs;
-   - post-restore PVC list/UIDs;
-   - restore placement log.
-5. Add restored workload assertions:
-   - per-node local consistency counts;
-   - session-capable GQL read;
-   - cluster identity and health.
-6. Replace `k3d-system-backup-restore-harness` with native k3d scenario(s).
+   - `cluster-restore-apply`;
+   - `cluster-restore-verify`.
+3. The public `k3d-system-backup-restore` suite now points at a native k3d
+   scenario instead of `k3d-system-backup-restore-harness`.
 
 ## NT4: wrapper retirement criteria
+
+Wrapper retirement status: public wrapper scenarios have been removed from suite
+routing. Destructive operator evidence is still required before deleting legacy
+manual fallback scripts/binaries from the Mycel daemon repo.
 
 A wrapper suite can be retired when all of the following are true:
 
@@ -241,16 +241,16 @@ A wrapper suite can be retired when all of the following are true:
 6. NT2b: add fixture graph/blob writer and restored-data assertions. Done.
 7. NT2c: implement Compose environment reset/handoff for restore. Done.
 8. NT2d: replace Compose user backup/restore wrapper. Done.
-9. NT3a: implement k3d `volume-replacement`/PVC evidence capability.
-10. NT3b: implement cluster backup metadata assertions.
-11. NT3c: implement native system restore operation and restored workload checks.
-12. NT3d: replace k3d system backup/restore wrapper.
-13. NT4: update compatibility targets and retire wrapper scenarios.
+9. NT3a: implement k3d `volume-replacement`/PVC evidence capability. Done.
+10. NT3b: implement cluster backup metadata assertions. Done.
+11. NT3c: implement native system restore operation and restored workload checks. Done.
+12. NT3d: replace k3d system backup/restore wrapper. Done.
+13. NT4: update compatibility targets and retire wrapper scenarios. Done for Mycel Lab suite routing; legacy daemon harnesses remain manual fallbacks until destructive evidence is recorded.
 
 ## Tracking checklist
 
 - [x] NT0 wrapper parity inventory.
 - [x] NT1 native k3d restart-soak suites.
 - [x] NT2 native Compose user backup/restore suite.
-- [ ] NT3 native k3d system backup/restore suite.
-- [ ] NT4 wrapper retirement/deprecation.
+- [x] NT3 native k3d system backup/restore suite.
+- [x] NT4 wrapper retirement/deprecation in Mycel Lab suite routing.

@@ -546,6 +546,11 @@ type: user-backup-validate
 type: user-backup-import
 type: user-backup-verify-restored
 type: user-backup-assert-safety
+type: system-backup-fixture
+type: cluster-backup-create
+type: cluster-backup-validate
+type: cluster-restore-apply
+type: cluster-restore-verify
 ```
 
 Pod and node events use deterministic pod/name/ordinal targeting:
