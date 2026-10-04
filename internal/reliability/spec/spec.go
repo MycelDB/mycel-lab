@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -132,9 +133,15 @@ type Scenario struct {
 }
 
 type EnvironmentSpec struct {
-	Driver        string `yaml:"driver" json:"driver"`
-	Namespace     string `yaml:"namespace,omitempty" json:"namespace,omitempty"`
-	KeepOnFailure bool   `yaml:"keepOnFailure,omitempty" json:"keepOnFailure,omitempty"`
+	Driver        string                 `yaml:"driver" json:"driver"`
+	Namespace     string                 `yaml:"namespace,omitempty" json:"namespace,omitempty"`
+	KeepOnFailure bool                   `yaml:"keepOnFailure,omitempty" json:"keepOnFailure,omitempty"`
+	Options       map[string]any         `yaml:"options,omitempty" json:"options,omitempty"`
+	Capabilities  CapabilityRequirements `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
+}
+
+type CapabilityRequirements struct {
+	Required []string `yaml:"required,omitempty" json:"required,omitempty"`
 }
 
 type ActorGroupSpec struct {
@@ -358,6 +365,9 @@ func (s Scenario) Validate() error {
 	if s.ClusterRef == "" {
 		return errors.New("clusterRef is required")
 	}
+	if err := validateEnvironmentSpec(s.Environment); err != nil {
+		return err
+	}
 	if len(s.ActorGroups) == 0 {
 		return errors.New("actorGroups must not be empty")
 	}
@@ -413,9 +423,23 @@ func (s Scenario) Validate() error {
 	return nil
 }
 
+func validateEnvironmentSpec(environment EnvironmentSpec) error {
+	switch environment.Driver {
+	case "", "dry-run", "k3d", "kubernetes", "compose":
+	default:
+		return fmt.Errorf("environment.driver %q is not supported", environment.Driver)
+	}
+	for _, capability := range environment.Capabilities.Required {
+		if strings.TrimSpace(capability) == "" {
+			return errors.New("environment.capabilities.required contains an empty capability")
+		}
+	}
+	return nil
+}
+
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case "pod-stop", "pod-restart", "pod-delete", "rolling-restart":
+	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart":
 		return true
 	default:
 		return false
