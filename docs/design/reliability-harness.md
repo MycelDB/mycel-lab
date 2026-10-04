@@ -15,7 +15,9 @@ availability, and reliability trends over time.
 The harness is scenario-driven. A scenario creates exactly one MycelDB cluster,
 starts one or more simulated actor groups through the public SDK/gRPC API,
 executes deterministic phase-based events such as pod outages or restarts, and
-records structured events, metrics, artifacts, and assertion results.
+records structured events, metrics, artifacts, and assertion results. See
+[Mycel Lab model](model.md) for the full concept glossary covering scenarios,
+suites, cluster profiles, actor profiles, phases, events, runs, and artifacts.
 
 YAML is the portable authoring and import/export format. Postgres is the
 operational source of truth for definitions, runs, events, metrics, trends, and
