@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed for [mycel-lab#1](https://github.com/MycelDB/mycel-lab/issues/1).
+Implemented for [mycel-lab#1](https://github.com/MycelDB/mycel-lab/issues/1).
 
 This design documents the first environment-driver abstraction for Mycel Lab. It
 is intentionally scoped to the initial local drivers: `dry-run`, `k3d`, and
@@ -328,9 +328,8 @@ environment/compose-config.yaml
 
 - Existing scenarios with `environment.driver: k3d` continue to run.
 - Existing `--dry-run` behavior continues to synthesize a dry-run environment.
-- The current `kubernetes` alias can continue mapping to the `k3d` driver only
-  as a temporary compatibility alias; a real remote `kubernetes` driver is out
-  of scope for this issue and should not be implied by docs.
+- No generic `kubernetes` driver or compatibility alias is provided in the
+  initial tranche; use `k3d` for disposable local Kubernetes-backed runs.
 - Existing `pod-stop`/`pod-restart` event names can remain accepted, but design
   docs should describe logical node operations going forward.
 

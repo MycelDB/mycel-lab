@@ -2,12 +2,11 @@
 
 ## Status
 
-Proposed for [mycel-lab#1](https://github.com/MycelDB/mycel-lab/issues/1).
+Implemented for [mycel-lab#1](https://github.com/MycelDB/mycel-lab/issues/1).
 
 Design source: [Environment driver abstraction](../design/environment-drivers.md).
 
-This plan is documentation-only until reviewed. Implementation should proceed in
-small PRs and keep `develop` usable after each tranche.
+This plan records the completed implementation tranches and validation shape.
 
 ## Constraints
 
@@ -34,7 +33,7 @@ Current code already has:
   manifests.
 - Kubernetes-specific event runtime for pod restart / rolling restart.
 - Runner wiring that chooses `DryRunDriver` for `--dry-run` and `K3DDriver` for
-  `k3d` / current `kubernetes` compatibility.
+  `k3d`.
 - Port-forward based endpoint generation for Kubernetes-backed actors.
 
 The implementation should evolve this code rather than replacing it wholesale.
@@ -53,9 +52,7 @@ The implementation should evolve this code rather than replacing it wholesale.
 3. Add validation for known driver names:
    - `dry-run`;
    - `k3d`;
-   - `compose`;
-   - optional temporary `kubernetes` alias only if existing scenarios/tests rely
-     on it.
+   - `compose`.
 4. Add scenario YAML examples for `dry-run`, `k3d`, and `compose`.
 5. Link the environment-driver design from README and operations docs.
 
@@ -92,7 +89,7 @@ python3 scripts/checkDocs.py
    - selects driver by effective `EnvironmentSpec.Driver`;
    - applies dry-run override;
    - returns clear errors for unknown drivers;
-   - owns temporary compatibility aliases.
+   - rejects generic Kubernetes/cloud drivers until separately designed.
 5. Move `defaultEnvironmentDriver` logic out of `runner` into the registry.
 6. Validate required scenario capabilities before `Preflight` or `Create`.
 7. Write `environment/capabilities.json` to run artifacts.

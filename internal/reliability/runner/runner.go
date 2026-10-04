@@ -204,7 +204,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	needsActorEndpoints := len(resources.Assignments) > 0
-	portForwardEnvironment := environment.Driver == "k3d" || environment.Driver == "kubernetes"
+	portForwardEnvironment := environment.Driver == "k3d"
 	if (opts.ConsoleEndpoints || needsActorEndpoints) && !opts.DryRun {
 		if _, err := sink.WriteJSON("environment/console-endpoints.json", endpoints); err != nil {
 			return failAfterEnvironmentCreate(RunFailed, err)

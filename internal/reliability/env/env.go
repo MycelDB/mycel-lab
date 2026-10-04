@@ -156,7 +156,7 @@ func SelectDriver(environment spec.EnvironmentSpec, opts DriverSelectionOptions)
 	switch effective.Driver {
 	case "dry-run":
 		driver = DryRunDriver{}
-	case "k3d", "kubernetes":
+	case "k3d":
 		driver = K3DDriver{Confirmed: opts.ConfirmDestructive, Runner: opts.Runner, WaitTimeout: opts.WaitTimeout}
 	case "compose":
 		driver = ComposeDriver{Confirmed: opts.ConfirmDestructive, Runner: opts.Runner, WaitTimeout: opts.WaitTimeout}

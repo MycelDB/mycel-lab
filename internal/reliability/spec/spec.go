@@ -425,7 +425,7 @@ func (s Scenario) Validate() error {
 
 func validateEnvironmentSpec(environment EnvironmentSpec) error {
 	switch environment.Driver {
-	case "", "dry-run", "k3d", "kubernetes", "compose":
+	case "", "dry-run", "k3d", "compose":
 	default:
 		return fmt.Errorf("environment.driver %q is not supported", environment.Driver)
 	}

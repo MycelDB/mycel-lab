@@ -180,3 +180,10 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectDriverRejectsGenericKubernetesDriver(t *testing.T) {
+	_, _, err := SelectDriver(spec.EnvironmentSpec{Driver: "kubernetes"}, DriverSelectionOptions{})
+	if err == nil || !strings.Contains(err.Error(), "unsupported environment driver") {
+		t.Fatalf("SelectDriver() error=%v, want unsupported environment driver", err)
+	}
+}
