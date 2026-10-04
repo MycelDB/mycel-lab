@@ -151,6 +151,7 @@ backup/restore wrappers, and soak/release-gate entrypoints:
 ```sh
 mycel-lab run suite k3d-raft-disruption --dry-run
 mycel-lab run suite k3d-raft-sensitive-gate --dry-run
+mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run
@@ -159,11 +160,14 @@ mycel-lab run suite cluster-release-gate --dry-run
 
 Destructive/operator variants use the same suite names with
 `--confirm-destructive`. Restart-soak suites are native Mycel Lab k3d scenarios
-with repeated rotating `node-restart` events. Backup/restore suites currently
-wrap the legacy MycelDB harnesses through a constrained `host-command` event so
-Mycel Lab owns run tracking and artifacts while full native backup/restore
-operations are still being designed. The parity requirements for replacing
-those remaining wrappers are tracked in the [native wrapper transition inventory](implementation/native-wrapper-transition-inventory.md).
+with repeated rotating `node-restart` events. `compose-user-backup-operations`
+is a native Compose smoke suite for `user-backup-export`,
+`user-backup-validate`, and `user-backup-import` operations through the
+environment driver. The full backup/restore suites still wrap legacy MycelDB
+harnesses through a constrained `host-command` event while fresh-cluster reset,
+archive handoff, blob verification, and k3d volume/PVC restore parity are being
+implemented. The parity requirements for replacing those remaining wrappers are
+tracked in the [native wrapper transition inventory](implementation/native-wrapper-transition-inventory.md).
 The k3d cluster-validation suite intentionally does not yet include the legacy
 one-PVC replacement/rejoin step; that remains blocked on a dedicated
 volume-replacement capability.

@@ -1,0 +1,76 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-user-backup-operations
+  description: Native Compose user backup export, validate, and import operation smoke.
+seed: 27272
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+    projectNamePrefix: mycel-lab
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 4
+phases:
+  - name: write-source-fixture
+    duration: 2s
+  - name: export-validate-import
+    duration: 1s
+    events:
+      - type: user-backup-export
+        target:
+          actorId: graph-writers-0
+          file: /tmp/mycel-lab-user-backup.tar.zst
+          compression: zstd
+          sourceLabel: compose-user-backup-operations
+          ordinal: 0
+      - type: user-backup-validate
+        target:
+          file: /tmp/mycel-lab-user-backup.tar.zst
+          compression: auto
+          ordinal: 0
+      - type: user-backup-import
+        target:
+          file: /tmp/mycel-lab-user-backup.tar.zst
+          compression: auto
+          targetUsername: mycel-lab-restored-user
+          createUser: true
+          execute: true
+          domainImportMode: append
+          ordinal: 0
+  - name: post-import-stability
+    duration: 1s
+    assertions:
+      requireConvergedCounts: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

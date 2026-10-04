@@ -6,16 +6,22 @@ import (
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
 
 type DriverRuntime struct {
 	Driver      env.EnvironmentDriver
 	Environment env.Environment
+	Resources   *provision.ScenarioResources
 }
 
 func NewDriverRuntime(driver env.EnvironmentDriver, environment env.Environment) DriverRuntime {
 	return DriverRuntime{Driver: driver, Environment: environment}
+}
+
+func NewDriverRuntimeWithResources(driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources) DriverRuntime {
+	return DriverRuntime{Driver: driver, Environment: environment, Resources: resources}
 }
 
 func (r DriverRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
@@ -78,6 +84,9 @@ func (r DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (ma
 	case "host-command":
 		result, err := ExecuteHostCommand(ctx, event.Target)
 		return map[string]any{"hostCommand": result}, err
+	case "user-backup-export", "user-backup-validate", "user-backup-import":
+		result, err := executeUserBackupEvent(ctx, r.Driver, r.Environment, r.Resources, event.Type, event.Target)
+		return map[string]any{"userBackup": result}, err
 	default:
 		return nil, fmt.Errorf("unsupported event type %q", event.Type)
 	}

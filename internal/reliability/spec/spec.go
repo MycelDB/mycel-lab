@@ -441,7 +441,7 @@ func validateEnvironmentSpec(environment EnvironmentSpec) error {
 
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "host-command":
+	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "host-command", "user-backup-export", "user-backup-validate", "user-backup-import":
 		return true
 	default:
 		return false

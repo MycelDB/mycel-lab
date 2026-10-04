@@ -8,6 +8,7 @@ import (
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
 
@@ -56,6 +57,39 @@ func TestHostCommandRequiresCommandTarget(t *testing.T) {
 	phase := spec.PhaseSpec{Name: "host", Events: []spec.EventSpec{{Type: "host-command", Target: map[string]any{}}}}
 	if err := (LocalRuntime{}).ExecutePhaseEvents(context.Background(), phase, true, nil); err == nil {
 		t.Fatal("ExecutePhaseEvents() error=nil, want missing command target")
+	}
+}
+
+func TestUserBackupEventBuildsExportCommandFromActorAssignment(t *testing.T) {
+	resources := &provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", Username: "mlab-writer"}}}
+	cmd, actorID, username, err := userBackupCommand("user-backup-export", map[string]any{"actorId": "writer-0", "file": "/tmp/user.tar.zst", "compression": "zstd", "sourceLabel": "test"}, resources, "/tmp/user.tar.zst")
+	if err != nil {
+		t.Fatalf("userBackupCommand() error=%v", err)
+	}
+	joined := strings.Join(cmd, " ")
+	for _, want := range []string{"admin user-backup export", "--source-username mlab-writer", "--file /tmp/user.tar.zst", "--compression zstd", "--source-label test"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("command %q missing %q", joined, want)
+		}
+	}
+	if actorID != "writer-0" || username != "mlab-writer" {
+		t.Fatalf("actorID=%q username=%q", actorID, username)
+	}
+}
+
+func TestUserBackupImportBuildsCreateUserExecuteCommand(t *testing.T) {
+	cmd, _, username, err := userBackupCommand("user-backup-import", map[string]any{"file": "/tmp/user.tar.zst", "targetUsername": "restored", "createUser": true, "execute": true, "domainImportMode": "append"}, nil, "/tmp/user.tar.zst")
+	if err != nil {
+		t.Fatalf("userBackupCommand() error=%v", err)
+	}
+	joined := strings.Join(cmd, " ")
+	for _, want := range []string{"admin user-backup import", "--file /tmp/user.tar.zst", "--target-username restored", "--create-user", "--new-password", "--execute", "--domain-import-mode append"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("command %q missing %q", joined, want)
+		}
+	}
+	if username != "restored" {
+		t.Fatalf("username=%q, want restored", username)
 	}
 }
 
