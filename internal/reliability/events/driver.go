@@ -37,22 +37,30 @@ func (r DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, eve
 		return r.recordFailure(ctx, recorder, phase, event, err)
 	}
 	completionPayload := map[string]any{"runtime": r.Environment.Driver}
+	repeat := event.Repeat
+	if repeat <= 0 {
+		repeat = 1
+	}
+	completionPayload["repeat"] = repeat
 	if !dryRun {
-		payload, err := r.applyEvent(ctx, event)
-		if err != nil {
-			return r.recordFailure(ctx, recorder, phase, event, err)
-		}
-		for key, value := range payload {
-			completionPayload[key] = value
+		for i := 0; i < repeat; i++ {
+			payload, err := r.applyEvent(ctx, eventForIteration(event, i))
+			if err != nil {
+				return r.recordFailure(ctx, recorder, phase, event, err)
+			}
+			for key, value := range payload {
+				completionPayload[key] = value
+			}
+			if i+1 < repeat && event.Interval.Duration > 0 {
+				if err := sleepContext(ctx, event.Interval.Duration); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	if event.Duration.Duration > 0 {
-		timer := time.NewTimer(event.Duration.Duration)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := sleepContext(ctx, event.Duration.Duration); err != nil {
+			return err
 		}
 	}
 	if recorder != nil {
@@ -75,6 +83,31 @@ func (r DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (ma
 	}
 }
 
+func eventForIteration(event spec.EventSpec, iteration int) spec.EventSpec {
+	sequence := nodeTargetOrdinalSequence(event.Target)
+	if len(sequence) == 0 {
+		return event
+	}
+	out := event
+	out.Target = map[string]any{}
+	for key, value := range event.Target {
+		out.Target[key] = value
+	}
+	out.Target["ordinal"] = sequence[iteration%len(sequence)]
+	return out
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func nodeName(target map[string]any) string {
 	if pod := PodName(target); pod != "" {
 		return pod
@@ -89,17 +122,7 @@ func nodeName(target map[string]any) string {
 }
 
 func nodeOrdinal(target map[string]any) int {
-	for _, key := range []string{"ordinal", "nodeOrdinal"} {
-		switch v := target[key].(type) {
-		case int:
-			return v
-		case int64:
-			return int(v)
-		case float64:
-			return int(v)
-		}
-	}
-	return -1
+	return nodeTargetOrdinal(target)
 }
 
 func (r DriverRuntime) recordFailure(ctx context.Context, recorder Recorder, phase spec.PhaseSpec, event spec.EventSpec, err error) error {

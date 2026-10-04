@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
+	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
 
@@ -57,6 +59,24 @@ func TestHostCommandRequiresCommandTarget(t *testing.T) {
 	}
 }
 
+func TestDriverRuntimeRepeatsNodeRestartWithOrdinalSequence(t *testing.T) {
+	driver := &recordingDriver{}
+	runtime := NewDriverRuntime(driver, env.Environment{Name: "test", Driver: "test"})
+	phase := spec.PhaseSpec{Name: "restart", Events: []spec.EventSpec{{Type: "node-restart", Target: map[string]any{"ordinalSequence": []any{0, 1, 2}}, Repeat: 5}}}
+	if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, nil); err != nil {
+		t.Fatalf("ExecutePhaseEvents() error=%v", err)
+	}
+	want := []int{0, 1, 2, 0, 1}
+	if len(driver.restarted) != len(want) {
+		t.Fatalf("restarted=%v, want %v", driver.restarted, want)
+	}
+	for i := range want {
+		if driver.restarted[i] != want[i] {
+			t.Fatalf("restarted=%v, want %v", driver.restarted, want)
+		}
+	}
+}
+
 func TestExecuteHostCommandCapturesOutput(t *testing.T) {
 	command := []any{"sh", "-c", "printf hello"}
 	if runtime.GOOS == "windows" {
@@ -84,3 +104,34 @@ func (r *recordingEventRecorder) RecordRuntimeEvent(_ context.Context, record Re
 	r.records = append(r.records, record)
 	return nil
 }
+
+type recordingDriver struct{ restarted []int }
+
+func (d *recordingDriver) Name() string { return "test" }
+func (d *recordingDriver) Capabilities() env.CapabilitySet {
+	return env.NewCapabilitySet(env.CapabilityNodeRestart)
+}
+func (d *recordingDriver) Validate(spec.EnvironmentSpec) error                   { return nil }
+func (d *recordingDriver) Preflight(context.Context, spec.EnvironmentSpec) error { return nil }
+func (d *recordingDriver) Create(context.Context, spec.ResolvedScenario, spec.EnvironmentSpec) (env.Environment, error) {
+	return env.Environment{}, nil
+}
+func (d *recordingDriver) WaitReady(context.Context, env.Environment) error { return nil }
+func (d *recordingDriver) Nodes(context.Context, env.Environment) ([]env.Node, error) {
+	return nil, nil
+}
+func (d *recordingDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
+	return nil, nil
+}
+func (d *recordingDriver) Exec(context.Context, env.Environment, env.NodeRef, env.ExecRequest) (env.ExecResult, error) {
+	return env.ExecResult{}, nil
+}
+func (d *recordingDriver) RestartNode(_ context.Context, _ env.Environment, node env.NodeRef) error {
+	d.restarted = append(d.restarted, node.Ordinal)
+	return nil
+}
+func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error { return nil }
+func (d *recordingDriver) CaptureState(context.Context, env.Environment, *artifacts.Sink) error {
+	return nil
+}
+func (d *recordingDriver) Delete(context.Context, env.Environment) error { return nil }

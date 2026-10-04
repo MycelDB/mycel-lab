@@ -31,10 +31,13 @@ Lab owns run entrypoints, dry-run planning, and artifact roots.
 | --- | --- | --- | --- |
 | `compose-user-backup-restore` | `compose-user-backup-restore-harness` | `../mycel/scripts/testComposeUserBackupRestore.sh` | Principal-scoped backup export/import, graph/blob restore, and safety checks on Compose. |
 | `k3d-system-backup-restore` | `k3d-system-backup-restore-harness` | `go run ./cmd/mycel-system-backuptest ...` | Full-cluster backup/restore on disposable k3d/K3s, including PVC wipe/restore evidence. |
-| `k3d-raft-restart-soak` | `k3d-raft-restart-soak-harness` | `go run ./cmd/mycel-raft-disrupttest --profile restart-soak-1h ...` | One-hour moderate restart/write soak using edge workload. |
-| `k3d-raft-restart-hard-soak` | `k3d-raft-restart-hard-soak-harness` | `go run ./cmd/mycel-raft-disrupttest --profile restart-soak-hard-1h ...` | One-hour harder restart/write soak using multi-space workload. |
+| `k3d-raft-restart-soak` | native `k3d-raft-restart-soak` | Native Mycel Lab k3d scenario | One-hour moderate restart/write soak using rotating single-node restarts. |
+| `k3d-raft-restart-hard-soak` | native `k3d-raft-restart-hard-soak` | Native Mycel Lab k3d scenario | One-hour harder restart/write soak using frequent rotating single-node restarts. |
 
 ## NT1: native k3d restart soak parity
+
+Status: implemented with native Mycel Lab scenarios and repeatable rotating
+`node-restart` events.
 
 ### Legacy behavior to preserve
 
@@ -250,7 +253,7 @@ A wrapper suite can be retired when all of the following are true:
 ## Tracking checklist
 
 - [x] NT0 wrapper parity inventory.
-- [ ] NT1 native k3d restart-soak suites.
+- [x] NT1 native k3d restart-soak suites.
 - [ ] NT2 native Compose user backup/restore suite.
 - [ ] NT3 native k3d system backup/restore suite.
 - [ ] NT4 wrapper retirement/deprecation.
