@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-user-backup-restore
+  description: Transitional Mycel Lab suite for the Compose user backup/restore system harness.
+scenarios:
+  - path: ../scenarios/compose-user-backup-restore-harness.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

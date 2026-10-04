@@ -1,0 +1,43 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-raft-restart-soak-harness
+  description: Transitional Mycel Lab wrapper for the one-hour raft restart soak harness.
+seed: 25252
+environment:
+  driver: dry-run
+clusterRef: single-node
+actorGroups:
+  - name: harness
+    profileRef: noop
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 1
+phases:
+  - name: run-k3d-raft-restart-soak
+    duration: 1s
+    events:
+      - type: host-command
+        target:
+          workingDirectory: ../mycel
+          command:
+            - go
+            - run
+            - ./cmd/mycel-raft-disrupttest
+            - --driver
+            - k3s
+            - --provisioner
+            - k3d
+            - --profile
+            - restart-soak-1h
+            - --workload
+            - edges
+            - --image
+            - myceldb/mycel:raft-disrupt-local
+            - --confirm-destructive
+assertions:
+  final:
+    requireHealthyCluster: false
+artifacts:
+  collectScenarioSpec: true

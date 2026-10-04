@@ -145,9 +145,25 @@ mycel-lab run suite k3d-cluster-validation --confirm-destructive
 ```
 
 These suites validate shared cluster identity/health, graph data-plane behavior,
-and rolling restart recovery. The k3d suite intentionally does not yet include
-the legacy one-PVC replacement/rejoin step; that remains blocked on a dedicated
-volume-replacement capability.
+and rolling restart recovery. Additional migrated suites cover disruption,
+backup/restore wrappers, and soak/release-gate entrypoints:
+
+```sh
+mycel-lab run suite k3d-raft-disruption --dry-run
+mycel-lab run suite k3d-raft-sensitive-gate --dry-run
+mycel-lab run suite compose-user-backup-restore --dry-run
+mycel-lab run suite k3d-system-backup-restore --dry-run
+mycel-lab run suite compose-cluster-soak --dry-run
+mycel-lab run suite cluster-release-gate --dry-run
+```
+
+Destructive/operator variants use the same suite names with
+`--confirm-destructive`. Backup/restore and long restart-soak suites currently
+wrap the legacy MycelDB harnesses through a constrained `host-command` event so
+Mycel Lab owns run tracking and artifacts while full native backup/restore
+operations are still being designed. The k3d cluster-validation suite
+intentionally does not yet include the legacy one-PVC replacement/rejoin step;
+that remains blocked on a dedicated volume-replacement capability.
 
 ## Running suites
 

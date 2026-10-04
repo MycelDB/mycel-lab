@@ -36,9 +36,14 @@ func (r DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, eve
 	if err := validateEvent(event); err != nil {
 		return r.recordFailure(ctx, recorder, phase, event, err)
 	}
+	completionPayload := map[string]any{"runtime": r.Environment.Driver}
 	if !dryRun {
-		if err := r.applyEvent(ctx, event); err != nil {
+		payload, err := r.applyEvent(ctx, event)
+		if err != nil {
 			return r.recordFailure(ctx, recorder, phase, event, err)
+		}
+		for key, value := range payload {
+			completionPayload[key] = value
 		}
 	}
 	if event.Duration.Duration > 0 {
@@ -51,19 +56,22 @@ func (r DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, eve
 		}
 	}
 	if recorder != nil {
-		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"runtime": r.Environment.Driver}})
+		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: completionPayload})
 	}
 	return nil
 }
 
-func (r DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) error {
+func (r DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (map[string]any, error) {
 	switch event.Type {
 	case "pod-stop", "pod-restart", "pod-delete", "node-stop", "node-restart":
-		return r.Driver.RestartNode(ctx, r.Environment, env.NodeRef{Name: nodeName(event.Target), Ordinal: nodeOrdinal(event.Target)})
+		return nil, r.Driver.RestartNode(ctx, r.Environment, env.NodeRef{Name: nodeName(event.Target), Ordinal: nodeOrdinal(event.Target)})
 	case "rolling-restart":
-		return r.Driver.RollingRestart(ctx, r.Environment)
+		return nil, r.Driver.RollingRestart(ctx, r.Environment)
+	case "host-command":
+		result, err := ExecuteHostCommand(ctx, event.Target)
+		return map[string]any{"hostCommand": result}, err
 	default:
-		return fmt.Errorf("unsupported event type %q", event.Type)
+		return nil, fmt.Errorf("unsupported event type %q", event.Type)
 	}
 }
 
