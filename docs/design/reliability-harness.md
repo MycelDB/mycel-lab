@@ -539,9 +539,13 @@ type: pod-restart
 type: node-stop
 type: node-restart
 type: rolling-restart
+type: environment-reset
+type: user-backup-fixture
 type: user-backup-export
 type: user-backup-validate
 type: user-backup-import
+type: user-backup-verify-restored
+type: user-backup-assert-safety
 ```
 
 Pod and node events use deterministic pod/name/ordinal targeting:

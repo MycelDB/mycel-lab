@@ -1,0 +1,213 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-user-backup-restore
+  description: Native Compose principal backup export, validation, fresh-cluster restore, and safety verification.
+seed: 28282
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+    projectNamePrefix: mycel-lab
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: empty-users
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 0.0001
+  - name: one-space-users
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 0.0001
+  - name: complex-users
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 0.0001
+phases:
+  - name: create-source-fixtures
+    duration: 1s
+    events:
+      - type: user-backup-fixture
+        target:
+          actorId: one-space-users-0
+          label: nt2-one-space-fixture
+          blobPayload: mycel-lab nt2 one-space backup restore blob payload
+          ordinal: 0
+      - type: user-backup-fixture
+        target:
+          actorId: complex-users-0
+          label: nt2-complex-fixture
+          blobPayload: mycel-lab nt2 complex backup restore blob payload
+          ordinal: 1
+  - name: export-validate-and-stage
+    duration: 1s
+    events:
+      - type: user-backup-export
+        target:
+          actorId: empty-users-0
+          file: /tmp/mycel-lab-empty-user-backup.tar
+          hostFile: /tmp/{runID}-empty-user-backup.tar
+          compression: none
+          sourceLabel: compose-user-backup-restore-empty
+          ordinal: 0
+      - type: user-backup-export
+        target:
+          actorId: one-space-users-0
+          file: /tmp/mycel-lab-one-space-user-backup.tar
+          hostFile: /tmp/{runID}-one-space-user-backup.tar
+          compression: none
+          sourceLabel: compose-user-backup-restore-one-space
+          ordinal: 0
+      - type: user-backup-export
+        target:
+          actorId: complex-users-0
+          file: /tmp/mycel-lab-complex-user-backup.tar
+          hostFile: /tmp/{runID}-complex-user-backup.tar
+          compression: none
+          sourceLabel: compose-user-backup-restore-complex
+          ordinal: 0
+      - type: user-backup-validate
+        target:
+          file: /tmp/mycel-lab-empty-user-backup.tar
+          compression: auto
+          ordinal: 0
+      - type: user-backup-validate
+        target:
+          file: /tmp/mycel-lab-one-space-user-backup.tar
+          compression: auto
+          ordinal: 0
+      - type: user-backup-validate
+        target:
+          file: /tmp/mycel-lab-complex-user-backup.tar
+          compression: auto
+          ordinal: 0
+      - type: user-backup-assert-safety
+        target:
+          sourceActorId: empty-users-0
+          file: /tmp/mycel-lab-empty-user-backup.tar
+          ordinal: 0
+      - type: user-backup-assert-safety
+        target:
+          sourceActorId: one-space-users-0
+          file: /tmp/mycel-lab-one-space-user-backup.tar
+          ordinal: 0
+      - type: user-backup-assert-safety
+        target:
+          sourceActorId: complex-users-0
+          file: /tmp/mycel-lab-complex-user-backup.tar
+          ordinal: 0
+  - name: fresh-cluster-reset
+    duration: 1s
+    events:
+      - type: environment-reset
+        target:
+          reason: fresh-cluster-restore
+  - name: import-and-verify-restore
+    duration: 1s
+    events:
+      - type: user-backup-import
+        target:
+          file: /tmp/mycel-lab-empty-user-backup.tar
+          hostFile: /tmp/{runID}-empty-user-backup.tar
+          compression: auto
+          targetUsername: mycel-lab-restored-empty-user
+          createUser: true
+          newPassword: mycel-lab-restored-empty-password
+          execute: true
+          domainImportMode: append
+          ordinal: 0
+      - type: user-backup-import
+        target:
+          file: /tmp/mycel-lab-one-space-user-backup.tar
+          hostFile: /tmp/{runID}-one-space-user-backup.tar
+          compression: auto
+          targetUsername: mycel-lab-restored-one-space-user
+          createUser: true
+          newPassword: mycel-lab-restored-one-space-password
+          execute: true
+          domainImportMode: append
+          ordinal: 0
+      - type: user-backup-import
+        target:
+          file: /tmp/mycel-lab-complex-user-backup.tar
+          hostFile: /tmp/{runID}-complex-user-backup.tar
+          compression: auto
+          targetUsername: mycel-lab-restored-complex-user
+          createUser: true
+          newPassword: mycel-lab-restored-complex-password
+          execute: true
+          domainImportMode: append
+          ordinal: 0
+      - type: user-backup-verify-restored
+        target:
+          file: /tmp/mycel-lab-empty-user-backup.tar
+          targetUsername: mycel-lab-restored-empty-user
+          newPassword: mycel-lab-restored-empty-password
+          minNodes: 0
+          minEdges: 0
+          minBlobs: 0
+      - type: user-backup-verify-restored
+        target:
+          file: /tmp/mycel-lab-one-space-user-backup.tar
+          targetUsername: mycel-lab-restored-one-space-user
+          newPassword: mycel-lab-restored-one-space-password
+          minNodes: 3
+          minEdges: 1
+          minBlobs: 1
+      - type: user-backup-verify-restored
+        target:
+          file: /tmp/mycel-lab-complex-user-backup.tar
+          targetUsername: mycel-lab-restored-complex-user
+          newPassword: mycel-lab-restored-complex-password
+          minNodes: 3
+          minEdges: 1
+          minBlobs: 1
+      - type: user-backup-assert-safety
+        target:
+          sourceActorId: empty-users-0
+          targetUsername: mycel-lab-restored-empty-user
+          file: /tmp/mycel-lab-empty-user-backup.tar
+          ordinal: 0
+      - type: user-backup-assert-safety
+        target:
+          sourceActorId: one-space-users-0
+          targetUsername: mycel-lab-restored-one-space-user
+          file: /tmp/mycel-lab-one-space-user-backup.tar
+          ordinal: 0
+      - type: user-backup-assert-safety
+        target:
+          sourceActorId: complex-users-0
+          targetUsername: mycel-lab-restored-complex-user
+          file: /tmp/mycel-lab-complex-user-backup.tar
+          ordinal: 0
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

@@ -87,11 +87,15 @@ func validateEvent(event spec.EventSpec) error {
 		if PodName(event.Target) == "" && nodeTargetName(event.Target) == "" && nodeTargetOrdinal(event.Target) < 0 && len(nodeTargetOrdinalSequence(event.Target)) == 0 {
 			return fmt.Errorf("%s requires target.node, target.service, target.pod, target.ordinal, or target.ordinalSequence", event.Type)
 		}
-	case "rolling-restart":
+	case "rolling-restart", "environment-reset":
 		return nil
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {
 			return fmt.Errorf("%s requires target.command", event.Type)
+		}
+	case "user-backup-fixture":
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
+			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
 		}
 	case "user-backup-export":
 		if stringTarget(event.Target, "file") == "" {
@@ -100,7 +104,7 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" && stringTarget(event.Target, "username") == "" && stringTarget(event.Target, "sourceUsername") == "" {
 			return fmt.Errorf("%s requires target.actorId, target.sourceActorId, target.username, or target.sourceUsername", event.Type)
 		}
-	case "user-backup-validate":
+	case "user-backup-validate", "user-backup-assert-safety":
 		if stringTarget(event.Target, "file") == "" {
 			return fmt.Errorf("%s requires target.file", event.Type)
 		}
@@ -110,6 +114,10 @@ func validateEvent(event spec.EventSpec) error {
 		}
 		if stringTarget(event.Target, "targetUsername") == "" && stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" && stringTarget(event.Target, "username") == "" && stringTarget(event.Target, "sourceUsername") == "" {
 			return fmt.Errorf("%s requires target.targetUsername or a source user target", event.Type)
+		}
+	case "user-backup-verify-restored":
+		if stringTarget(event.Target, "file") == "" && stringTarget(event.Target, "backup") == "" && stringTarget(event.Target, "name") == "" {
+			return fmt.Errorf("%s requires target.file, target.backup, or target.name", event.Type)
 		}
 	default:
 		return fmt.Errorf("unsupported event type %q", event.Type)

@@ -146,7 +146,7 @@ mycel-lab run suite k3d-cluster-validation --confirm-destructive
 
 These suites validate shared cluster identity/health, graph data-plane behavior,
 and rolling restart recovery. Additional migrated suites cover disruption,
-backup/restore wrappers, and soak/release-gate entrypoints:
+backup/restore, and soak/release-gate entrypoints:
 
 ```sh
 mycel-lab run suite k3d-raft-disruption --dry-run
@@ -163,10 +163,11 @@ Destructive/operator variants use the same suite names with
 with repeated rotating `node-restart` events. `compose-user-backup-operations`
 is a native Compose smoke suite for `user-backup-export`,
 `user-backup-validate`, and `user-backup-import` operations through the
-environment driver. The full backup/restore suites still wrap legacy MycelDB
-harnesses through a constrained `host-command` event while fresh-cluster reset,
-archive handoff, blob verification, and k3d volume/PVC restore parity are being
-implemented. The parity requirements for replacing those remaining wrappers are
+environment driver. `compose-user-backup-restore` is the full native Compose
+backup/restore suite with fixture creation, archive staging across a fresh reset,
+restored-data checks, and safety assertions. `k3d-system-backup-restore` remains
+a constrained `host-command` wrapper while k3d volume/PVC restore parity is being
+implemented. The parity requirements for replacing the remaining wrapper are
 tracked in the [native wrapper transition inventory](implementation/native-wrapper-transition-inventory.md).
 The k3d cluster-validation suite intentionally does not yet include the legacy
 one-PVC replacement/rejoin step; that remains blocked on a dedicated
