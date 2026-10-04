@@ -329,8 +329,9 @@ Each migration tranche should update the relevant docs:
 ## Tracking checklist
 
 - [x] SIM0 inventory and compatibility map.
-- [ ] SIM1 Compose cluster validation migration.
-- [ ] SIM2 k3d local cluster validation migration.
+- [x] SIM1 Compose cluster validation migration.
+- [x] SIM2 k3d local cluster validation migration.
+  - Initial k3d migration excludes legacy one-PVC replacement/rejoin parity until a dedicated volume-replacement capability is added.
 - [ ] SIM3 restart/outage/disruption migration.
 - [ ] SIM4 backup/restore system migration.
 - [ ] SIM5 soak and release-gate suite migration.

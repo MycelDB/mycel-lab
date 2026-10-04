@@ -96,6 +96,34 @@ func TestCleanupInvokedOnFailure(t *testing.T) {
 	}
 }
 
+func TestFinalClusterAssertionsPassForHealthySharedIdentity(t *testing.T) {
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSink() error=%v", err)
+	}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 2}, Assertions: map[string]any{"final": map[string]any{"requireHealthyCluster": true}}}
+	nodes := []env.Node{{Name: "myceld-0", Ordinal: 0}, {Name: "myceld-1", Ordinal: 1}}
+	if err := runFinalClusterAssertions(context.Background(), sink, scenario, &clusterAssertionDriver{}, env.Environment{Name: "test", Driver: "test"}, nodes, true); err != nil {
+		t.Fatalf("runFinalClusterAssertions() error=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sink.Root(), "oracle", "cluster-report.json")); err != nil {
+		t.Fatalf("cluster report missing: %v", err)
+	}
+}
+
+func TestFinalClusterAssertionsFailOnClusterIDMismatch(t *testing.T) {
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSink() error=%v", err)
+	}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 2}, Assertions: map[string]any{"final": map[string]any{"requireSharedClusterIdentity": true}}}
+	nodes := []env.Node{{Name: "myceld-0", Ordinal: 0}, {Name: "myceld-1", Ordinal: 1}}
+	driver := &clusterAssertionDriver{clusterIDs: []string{"cluster-a", "cluster-b"}}
+	if err := runFinalClusterAssertions(context.Background(), sink, scenario, driver, env.Environment{Name: "test", Driver: "test"}, nodes, true); err == nil {
+		t.Fatal("runFinalClusterAssertions() error=nil, want mismatch error")
+	}
+}
+
 func resolveFixtureScenario(t *testing.T, name string) spec.ResolvedScenario {
 	t.Helper()
 	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", name)
@@ -111,6 +139,27 @@ type failingActor struct{}
 func (failingActor) Start(context.Context) error                     { return errors.New("boom") }
 func (failingActor) UpdateRate(context.Context, spec.RateSpec) error { return nil }
 func (failingActor) Stop(context.Context) error                      { return nil }
+
+type clusterAssertionDriver struct {
+	recordingDriver
+	clusterIDs []string
+}
+
+func (d clusterAssertionDriver) Exec(_ context.Context, _ env.Environment, node env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
+	clusterID := "cluster-a"
+	if node.Ordinal >= 0 && node.Ordinal < len(d.clusterIDs) && d.clusterIDs[node.Ordinal] != "" {
+		clusterID = d.clusterIDs[node.Ordinal]
+	}
+	for _, part := range req.Command {
+		if part == "status" {
+			return env.ExecResult{Stdout: `{"cluster":{"cluster_id":"` + clusterID + `","cluster_name":"test","mode":"clustered"},"node":{"node_id":"node","state":"clustered","admitted":true},"peers":[{},{}]}`}, nil
+		}
+		if part == "health" {
+			return env.ExecResult{Stdout: `{"status":"healthy","active_members":2,"pending_members":0,"unreachable_peers":0,"warnings":[]}`}, nil
+		}
+	}
+	return env.ExecResult{}, nil
+}
 
 type recordingDriver struct{ deleted bool }
 

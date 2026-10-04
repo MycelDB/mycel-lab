@@ -296,6 +296,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	schedulerStopped = true
+	if err := runFinalClusterAssertions(ctx, sink, scenario, driver, environment, nodes, !provisionDryRun); err != nil {
+		return failAfterEnvironmentCreate(RunFailed, err)
+	}
 	if err := writeFinalOracleReport(ctx, sink, recorder, resources, !provisionDryRun); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
