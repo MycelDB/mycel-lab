@@ -112,31 +112,74 @@ func (a *ReaderActor) interval() time.Duration {
 }
 
 func (a *ReaderActor) read(ctx context.Context) {
-	if a.Assignment.DaemonAddr == "" || a.Assignment.SpaceID == "" || a.Assignment.DomainID == "" || a.Assignment.Username == "" || a.Assignment.Password == "" {
+	assignment := a.currentAssignment()
+	if !assignmentCanUseRealClient(assignment) {
 		if a.Recorder != nil {
 			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-read-check", ActorID: a.ID, GroupName: a.GroupName, Payload: map[string]any{"ok": true, "simulated": true}})
 		}
 		return
 	}
-	cfg := mycel.Config{Addr: a.Assignment.DaemonAddr, Username: a.Assignment.Username, Password: a.Assignment.Password, ClientName: "mycel-lab"}
-	if a.Assignment.AccessToken != "" {
-		cfg.Username = ""
-		cfg.Password = ""
-		cfg.AccessToken = a.Assignment.AccessToken
-		cfg.RefreshToken = a.Assignment.RefreshToken
-		cfg.AccessTokenExpireTime = a.Assignment.TokenExpires
-	}
-	client, err := mycel.Dial(ctx, cfg)
-	if err == nil {
-		_, err = client.QueryGQLReadOnly(ctx, a.Assignment.SpaceID, a.Assignment.DomainID, "MATCH (n) RETURN count(n)", 10)
-		_ = client.Close()
+	erredAfterReauth := false
+	reauthenticated := false
+	err := a.readOnce(ctx, false)
+	if shouldReauthenticate(err, a.currentAssignment()) {
+		reauthenticated = true
+		err = a.readOnce(ctx, true)
+		erredAfterReauth = err != nil
 	}
 	if a.Recorder != nil {
-		payload := map[string]any{"ok": err == nil, "spaceId": a.Assignment.SpaceID, "domainId": a.Assignment.DomainID, "targetActorId": a.Assignment.TargetActorID}
+		payload := map[string]any{"ok": err == nil, "spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "targetActorId": assignment.TargetActorID}
+		if reauthenticated {
+			payload["reauthenticated"] = true
+			payload["reauthenticationRetryFailed"] = erredAfterReauth
+		}
 		if err != nil {
 			payload["error"] = err.Error()
 			payload["class"] = ClassifyError(err)
 		}
 		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-read-check", ActorID: a.ID, GroupName: a.GroupName, Payload: payload})
 	}
+}
+
+func (a *ReaderActor) readOnce(ctx context.Context, forceLogin bool) error {
+	assignment := a.currentAssignment()
+	client, err := a.dialClient(ctx, forceLogin)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	defer a.captureClientTokens(client)
+	_, err = client.QueryGQLReadOnly(ctx, assignment.SpaceID, assignment.DomainID, "MATCH (n) RETURN count(n)", 10)
+	return err
+}
+
+func (a *ReaderActor) dialClient(ctx context.Context, forceLogin bool) (*mycel.Client, error) {
+	assignment := a.currentAssignment()
+	if forceLogin {
+		recordReauthenticationEvent(ctx, a.Recorder, "actor-reauthentication-attempted", a.ID, a.GroupName, map[string]any{"daemonAddr": assignment.DaemonAddr, "targetActorId": assignment.TargetActorID})
+	}
+	client, err := mycel.Dial(ctx, clientConfigForAssignment(assignment, forceLogin))
+	if err != nil {
+		if forceLogin {
+			recordReauthenticationEvent(ctx, a.Recorder, "actor-reauthentication-failed", a.ID, a.GroupName, map[string]any{"daemonAddr": assignment.DaemonAddr, "targetActorId": assignment.TargetActorID, "error": err.Error(), "class": ClassifyError(err)})
+		}
+		return nil, err
+	}
+	if forceLogin {
+		a.captureClientTokens(client)
+		recordReauthenticationEvent(ctx, a.Recorder, "actor-reauthenticated", a.ID, a.GroupName, map[string]any{"daemonAddr": assignment.DaemonAddr, "targetActorId": assignment.TargetActorID})
+	}
+	return client, nil
+}
+
+func (a *ReaderActor) currentAssignment() provision.ActorAssignment {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Assignment
+}
+
+func (a *ReaderActor) captureClientTokens(client *mycel.Client) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	captureClientTokens(&a.Assignment, client)
 }

@@ -161,6 +161,9 @@ func ClassifyError(err error) string {
 	if err == nil {
 		return ""
 	}
+	if isUnauthenticatedError(err) {
+		return "authentication"
+	}
 	msg := strings.ToLower(err.Error())
 	switch {
 	case containsAny(msg, "unavailable", "connection refused", "deadline exceeded", "server preface", "context canceled", "canceled"):
@@ -312,23 +315,32 @@ func (a *GraphActor) commit(ctx context.Context) {
 	a.transactions = append(a.transactions, tx)
 	a.mu.Unlock()
 	if a.Recorder != nil {
-		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-acknowledged", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"spaceId": a.Assignment.SpaceID, "domainId": a.Assignment.DomainID, "daemonAddr": a.Assignment.DaemonAddr}})
+		assignment := a.currentAssignment()
+		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-acknowledged", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr}})
 	}
 }
 
 func (a *GraphActor) read(ctx context.Context) {
-	if a.Assignment.DaemonAddr == "" || a.Assignment.SpaceID == "" || a.Assignment.DomainID == "" || (a.Assignment.AccessToken == "" && (a.Assignment.Username == "" || a.Assignment.Password == "")) {
+	assignment := a.currentAssignment()
+	if !assignmentCanUseRealClient(assignment) {
 		if a.Recorder != nil {
 			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-read-check", ActorID: a.ID, GroupName: a.GroupName, Payload: map[string]any{"ok": true, "simulated": true}})
 		}
 		return
 	}
-	client, err := a.dialClient(ctx)
-	if err == nil {
-		_, err = client.QueryGQLReadOnly(ctx, a.Assignment.SpaceID, a.Assignment.DomainID, "MATCH (n) RETURN count(n)", 10)
-		_ = client.Close()
+	erredAfterReauth := false
+	reauthenticated := false
+	err := a.readOnce(ctx, false)
+	if shouldReauthenticate(err, a.currentAssignment()) {
+		reauthenticated = true
+		err = a.readOnce(ctx, true)
+		erredAfterReauth = err != nil
 	}
-	payload := map[string]any{"ok": err == nil, "spaceId": a.Assignment.SpaceID, "domainId": a.Assignment.DomainID, "daemonAddr": a.Assignment.DaemonAddr, "targetActorId": a.ID}
+	payload := map[string]any{"ok": err == nil, "spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr, "targetActorId": a.ID}
+	if reauthenticated {
+		payload["reauthenticated"] = true
+		payload["reauthenticationRetryFailed"] = erredAfterReauth
+	}
 	if err != nil {
 		payload["error"] = err.Error()
 		payload["class"] = ClassifyError(err)
@@ -338,16 +350,41 @@ func (a *GraphActor) read(ctx context.Context) {
 	}
 }
 
-func (a *GraphActor) executeRealTransaction(ctx context.Context, tx oracle.Transaction) error {
-	if a.Assignment.DaemonAddr == "" || a.Assignment.SpaceID == "" || a.Assignment.DomainID == "" || (a.Assignment.AccessToken == "" && (a.Assignment.Username == "" || a.Assignment.Password == "")) {
-		return nil
-	}
-	client, err := a.dialClient(ctx)
+func (a *GraphActor) readOnce(ctx context.Context, forceLogin bool) error {
+	assignment := a.currentAssignment()
+	client, err := a.dialClient(ctx, forceLogin)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-	sessionID, err := client.OpenSession(ctx, a.Assignment.SpaceID, a.Assignment.DomainID)
+	defer a.captureClientTokens(client)
+	_, err = client.QueryGQLReadOnly(ctx, assignment.SpaceID, assignment.DomainID, "MATCH (n) RETURN count(n)", 10)
+	return err
+}
+
+func (a *GraphActor) executeRealTransaction(ctx context.Context, tx oracle.Transaction) error {
+	if !assignmentCanUseRealClient(a.currentAssignment()) {
+		return nil
+	}
+	err := a.executeRealTransactionOnce(ctx, tx, false)
+	if shouldReauthenticate(err, a.currentAssignment()) {
+		if retryErr := a.executeRealTransactionOnce(ctx, tx, true); retryErr != nil {
+			return fmt.Errorf("reauthentication retry failed: %w (original error: %v)", retryErr, err)
+		}
+		return nil
+	}
+	return err
+}
+
+func (a *GraphActor) executeRealTransactionOnce(ctx context.Context, tx oracle.Transaction, forceLogin bool) error {
+	assignment := a.currentAssignment()
+	client, err := a.dialClient(ctx, forceLogin)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	defer a.captureClientTokens(client)
+	sessionID, err := client.OpenSession(ctx, assignment.SpaceID, assignment.DomainID)
 	if err != nil {
 		return err
 	}
@@ -388,16 +425,35 @@ func (a *GraphActor) executeRealTransaction(ctx context.Context, tx oracle.Trans
 	return nil
 }
 
-func (a *GraphActor) dialClient(ctx context.Context) (*mycel.Client, error) {
-	cfg := mycel.Config{Addr: a.Assignment.DaemonAddr, Username: a.Assignment.Username, Password: a.Assignment.Password, ClientName: "mycel-lab"}
-	if a.Assignment.AccessToken != "" {
-		cfg.Username = ""
-		cfg.Password = ""
-		cfg.AccessToken = a.Assignment.AccessToken
-		cfg.RefreshToken = a.Assignment.RefreshToken
-		cfg.AccessTokenExpireTime = a.Assignment.TokenExpires
+func (a *GraphActor) dialClient(ctx context.Context, forceLogin bool) (*mycel.Client, error) {
+	assignment := a.currentAssignment()
+	if forceLogin {
+		recordReauthenticationEvent(ctx, a.Recorder, "actor-reauthentication-attempted", a.ID, a.GroupName, map[string]any{"daemonAddr": assignment.DaemonAddr})
 	}
-	return mycel.Dial(ctx, cfg)
+	client, err := mycel.Dial(ctx, clientConfigForAssignment(assignment, forceLogin))
+	if err != nil {
+		if forceLogin {
+			recordReauthenticationEvent(ctx, a.Recorder, "actor-reauthentication-failed", a.ID, a.GroupName, map[string]any{"daemonAddr": assignment.DaemonAddr, "error": err.Error(), "class": ClassifyError(err)})
+		}
+		return nil, err
+	}
+	if forceLogin {
+		a.captureClientTokens(client)
+		recordReauthenticationEvent(ctx, a.Recorder, "actor-reauthenticated", a.ID, a.GroupName, map[string]any{"daemonAddr": assignment.DaemonAddr})
+	}
+	return client, nil
+}
+
+func (a *GraphActor) currentAssignment() provision.ActorAssignment {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Assignment
+}
+
+func (a *GraphActor) captureClientTokens(client *mycel.Client) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	captureClientTokens(&a.Assignment, client)
 }
 
 func selectPossibleOperation(rng *rand.Rand, profile GraphProfile, state KnownState, perType map[oracle.OperationType]int) (oracle.OperationType, bool) {
