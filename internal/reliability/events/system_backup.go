@@ -175,6 +175,14 @@ func executeClusterBackupValidate(ctx context.Context, driver env.EnvironmentDri
 	if backup.BackupDir != "" {
 		result.BackupDir = backup.BackupDir
 	}
+	if backup.HostDir != "" {
+		result.HostDir = backup.HostDir
+	}
+	if len(backup.Artifacts) > 0 {
+		if err := stageClusterBackupForValidation(ctx, driver, environment, backup, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}); err != nil {
+			return result, err
+		}
+	}
 	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "validate", "--backup-set", result.BackupDir)
 	execResult, err := driver.Exec(ctx, environment, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}, env.ExecRequest{Command: cmd})
 	result.Stdout = bounded(execResult.Stdout, 8192)
@@ -189,7 +197,39 @@ func executeClusterBackupValidate(ctx context.Context, driver env.EnvironmentDri
 	if !response.Valid {
 		return result, fmt.Errorf("cluster backup set invalid: %s", strings.Join(response.Errors, "; "))
 	}
+	result.BackupSetID = backup.BackupSetID
+	result.Artifacts = backup.Artifacts
 	return result, nil
+}
+
+func stageClusterBackupForValidation(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, backup SystemBackupOperationResult, node env.NodeRef) error {
+	stager, ok := driver.(env.NodeFileStager)
+	if !ok {
+		return nil
+	}
+	if backup.BackupDir == "" || backup.HostDir == "" {
+		return nil
+	}
+	if _, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: []string{"sh", "-ec", "mkdir -p " + shellQuote(backup.BackupDir)}}); err != nil {
+		return fmt.Errorf("prepare validation backup dir: %w", err)
+	}
+	backupSetPath := filepath.Join(backup.HostDir, "backup-set.json")
+	if _, err := stager.CopyToNode(ctx, environment, node, backupSetPath, filepath.Join(backup.BackupDir, "backup-set.json")); err != nil {
+		return fmt.Errorf("stage backup-set.json for validation: %w", err)
+	}
+	for _, artifact := range backup.Artifacts {
+		if artifact.LocalArchive != "" && artifact.ArchiveName != "" {
+			if _, err := stager.CopyToNode(ctx, environment, node, artifact.LocalArchive, filepath.Join(backup.BackupDir, artifact.ArchiveName)); err != nil {
+				return fmt.Errorf("stage archive %s for validation: %w", artifact.PodName, err)
+			}
+		}
+		if artifact.LocalManifest != "" && artifact.ManifestName != "" {
+			if _, err := stager.CopyToNode(ctx, environment, node, artifact.LocalManifest, filepath.Join(backup.BackupDir, artifact.ManifestName)); err != nil {
+				return fmt.Errorf("stage manifest %s for validation: %w", artifact.PodName, err)
+			}
+		}
+	}
+	return nil
 }
 
 func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, state map[string]SystemBackupOperationResult, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {
