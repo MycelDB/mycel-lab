@@ -63,6 +63,8 @@ phases:
 assertions:
   final:
     requireHealthyCluster: true
+    healthConvergenceTimeout: 10m
+    healthConvergenceInterval: 5s
     requireSharedClusterIdentity: true
     requireNoAcknowledgedGraphTransactionLoss: true
 artifacts:
