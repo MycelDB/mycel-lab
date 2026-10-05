@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -111,6 +112,33 @@ func TestFinalClusterAssertionsPassForHealthySharedIdentity(t *testing.T) {
 	}
 }
 
+func TestFinalClusterAssertionsWaitForHealthConvergence(t *testing.T) {
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSink() error=%v", err)
+	}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 2}, Assertions: map[string]any{"final": map[string]any{"requireHealthyCluster": true, "healthConvergenceTimeout": "100ms", "healthConvergenceInterval": "1ms"}}}
+	nodes := []env.Node{{Name: "myceld-0", Ordinal: 0}, {Name: "myceld-1", Ordinal: 1}}
+	driver := &clusterAssertionDriver{healthStatuses: []string{"unhealthy", "unhealthy", "healthy", "healthy"}}
+	if err := runFinalClusterAssertions(context.Background(), sink, scenario, driver, env.Environment{Name: "test", Driver: "test"}, nodes, true); err != nil {
+		t.Fatalf("runFinalClusterAssertions() error=%v", err)
+	}
+	if driver.healthCalls < 4 {
+		t.Fatalf("health calls=%d, want at least 4", driver.healthCalls)
+	}
+	raw, err := os.ReadFile(filepath.Join(sink.Root(), "oracle", "cluster-report.json"))
+	if err != nil {
+		t.Fatalf("read cluster report: %v", err)
+	}
+	var report clusterAssertionReport
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatalf("unmarshal cluster report: %v", err)
+	}
+	if !report.OK || report.Attempts < 2 {
+		t.Fatalf("report=%+v, want convergence after retries", report)
+	}
+}
+
 func TestFinalClusterAssertionsFailOnClusterIDMismatch(t *testing.T) {
 	sink, err := artifacts.NewSink(t.TempDir())
 	if err != nil {
@@ -142,10 +170,12 @@ func (failingActor) Stop(context.Context) error                      { return ni
 
 type clusterAssertionDriver struct {
 	recordingDriver
-	clusterIDs []string
+	clusterIDs     []string
+	healthStatuses []string
+	healthCalls    int
 }
 
-func (d clusterAssertionDriver) Exec(_ context.Context, _ env.Environment, node env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
+func (d *clusterAssertionDriver) Exec(_ context.Context, _ env.Environment, node env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	clusterID := "cluster-a"
 	if node.Ordinal >= 0 && node.Ordinal < len(d.clusterIDs) && d.clusterIDs[node.Ordinal] != "" {
 		clusterID = d.clusterIDs[node.Ordinal]
@@ -155,7 +185,16 @@ func (d clusterAssertionDriver) Exec(_ context.Context, _ env.Environment, node 
 			return env.ExecResult{Stdout: `{"cluster":{"cluster_id":"` + clusterID + `","cluster_name":"test","mode":"clustered"},"node":{"node_id":"node","state":"clustered","admitted":true},"peers":[{},{}]}`}, nil
 		}
 		if part == "health" {
-			return env.ExecResult{Stdout: `{"status":"healthy","active_members":2,"pending_members":0,"unreachable_peers":0,"warnings":[]}`}, nil
+			status := "healthy"
+			if d.healthCalls < len(d.healthStatuses) && d.healthStatuses[d.healthCalls] != "" {
+				status = d.healthStatuses[d.healthCalls]
+			}
+			d.healthCalls++
+			warnings := `[]`
+			if status != "healthy" {
+				warnings = `["raft groups without leaders: space-partition-4"]`
+			}
+			return env.ExecResult{Stdout: `{"status":"` + status + `","active_members":2,"pending_members":0,"unreachable_peers":0,"warnings":` + warnings + `}`}, nil
 		}
 	}
 	return env.ExecResult{}, nil

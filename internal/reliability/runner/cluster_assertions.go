@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
@@ -14,8 +15,10 @@ import (
 )
 
 type clusterAssertionOptions struct {
-	RequireHealthyCluster        bool `json:"requireHealthyCluster"`
-	RequireSharedClusterIdentity bool `json:"requireSharedClusterIdentity"`
+	RequireHealthyCluster        bool          `json:"requireHealthyCluster"`
+	RequireSharedClusterIdentity bool          `json:"requireSharedClusterIdentity"`
+	HealthConvergenceTimeout     spec.Duration `json:"healthConvergenceTimeout,omitempty"`
+	HealthConvergenceInterval    spec.Duration `json:"healthConvergenceInterval,omitempty"`
 }
 
 type clusterAssertionReport struct {
@@ -23,6 +26,9 @@ type clusterAssertionReport struct {
 	Reason        string                       `json:"reason,omitempty"`
 	Required      clusterAssertionOptions      `json:"required"`
 	ExpectedNodes int                          `json:"expectedNodes"`
+	Attempts      int                          `json:"attempts,omitempty"`
+	FirstAttempt  time.Time                    `json:"firstAttempt,omitempty"`
+	LastAttempt   time.Time                    `json:"lastAttempt,omitempty"`
 	OK            bool                         `json:"ok"`
 	ClusterID     string                       `json:"clusterId,omitempty"`
 	Nodes         []clusterAssertionNodeReport `json:"nodes,omitempty"`
@@ -72,6 +78,50 @@ func runFinalClusterAssertions(ctx context.Context, sink *artifacts.Sink, scenar
 	if report.ExpectedNodes <= 0 {
 		report.ExpectedNodes = len(nodes)
 	}
+
+	timeout := required.HealthConvergenceTimeout.Duration
+	interval := required.HealthConvergenceInterval.Duration
+	var deadline time.Time
+	if required.RequireHealthyCluster && timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	for {
+		attemptTime := time.Now().UTC()
+		attemptReport := evaluateClusterAssertions(ctx, required, driver, environment, nodes, report.ExpectedNodes)
+		attemptReport.Attempts = report.Attempts + 1
+		if report.FirstAttempt.IsZero() {
+			attemptReport.FirstAttempt = attemptTime
+		} else {
+			attemptReport.FirstAttempt = report.FirstAttempt
+		}
+		attemptReport.LastAttempt = attemptTime
+		report = attemptReport
+		if report.OK {
+			return nil
+		}
+		if deadline.IsZero() || !time.Now().Before(deadline) {
+			return fmt.Errorf("cluster assertions failed after %d attempt(s): %s", report.Attempts, strings.Join(report.Errors, "; "))
+		}
+		if interval <= 0 {
+			interval = time.Second
+		}
+		sleepFor := interval
+		if remaining := time.Until(deadline); remaining < sleepFor {
+			sleepFor = remaining
+		}
+		if sleepFor <= 0 {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sleepFor):
+		}
+	}
+}
+
+func evaluateClusterAssertions(ctx context.Context, required clusterAssertionOptions, driver env.EnvironmentDriver, environment env.Environment, nodes []env.Node, expectedNodes int) clusterAssertionReport {
+	report := clusterAssertionReport{Required: required, ExpectedNodes: expectedNodes}
 	clusterIDs := map[string]struct{}{}
 	for _, node := range nodes {
 		nodeReport := runClusterNodeAssertion(ctx, driver, environment, node, report.ExpectedNodes)
@@ -93,15 +143,17 @@ func runFinalClusterAssertions(ctx context.Context, sink *artifacts.Sink, scenar
 		}
 	}
 	report.OK = len(report.Errors) == 0
-	if !report.OK {
-		return fmt.Errorf("cluster assertions failed: %s", strings.Join(report.Errors, "; "))
-	}
-	return nil
+	return report
 }
 
 func finalClusterAssertionOptions(assertions map[string]any) clusterAssertionOptions {
 	final, _ := assertions["final"].(map[string]any)
-	return clusterAssertionOptions{RequireHealthyCluster: boolFromMap(final, "requireHealthyCluster"), RequireSharedClusterIdentity: boolFromMap(final, "requireSharedClusterIdentity")}
+	opts := clusterAssertionOptions{RequireHealthyCluster: boolFromMap(final, "requireHealthyCluster"), RequireSharedClusterIdentity: boolFromMap(final, "requireSharedClusterIdentity")}
+	if opts.RequireHealthyCluster {
+		opts.HealthConvergenceTimeout = spec.Duration{Duration: durationFromMap(final, "healthConvergenceTimeout", 60*time.Second)}
+		opts.HealthConvergenceInterval = spec.Duration{Duration: durationFromMap(final, "healthConvergenceInterval", 2*time.Second)}
+	}
+	return opts
 }
 
 func boolFromMap(values map[string]any, key string) bool {
@@ -116,6 +168,39 @@ func boolFromMap(values map[string]any, key string) bool {
 		return parsed
 	default:
 		return false
+	}
+}
+
+func durationFromMap(values map[string]any, key string, defaultValue time.Duration) time.Duration {
+	if values == nil {
+		return defaultValue
+	}
+	value, ok := values[key]
+	if !ok {
+		return defaultValue
+	}
+	switch v := value.(type) {
+	case time.Duration:
+		return v
+	case spec.Duration:
+		return v.Duration
+	case string:
+		if strings.TrimSpace(v) == "" || strings.TrimSpace(v) == "0" {
+			return 0
+		}
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			return defaultValue
+		}
+		return parsed
+	case int:
+		return time.Duration(v) * time.Second
+	case int64:
+		return time.Duration(v) * time.Second
+	case float64:
+		return time.Duration(v * float64(time.Second))
+	default:
+		return defaultValue
 	}
 }
 
@@ -149,7 +234,11 @@ func runClusterNodeAssertion(ctx context.Context, driver env.EnvironmentDriver, 
 		report.Errors = append(report.Errors, fmt.Sprintf("peer count %d below expected %d", report.PeerCount, expectedNodes))
 	}
 	if report.HealthStatus != "healthy" {
-		report.Errors = append(report.Errors, fmt.Sprintf("health status is %s", report.HealthStatus))
+		message := fmt.Sprintf("health status is %s", report.HealthStatus)
+		if len(report.Warnings) > 0 {
+			message += fmt.Sprintf(" (warnings: %s)", strings.Join(report.Warnings, "; "))
+		}
+		report.Errors = append(report.Errors, message)
 	}
 	if report.ActiveMembers < expectedNodes {
 		report.Errors = append(report.Errors, fmt.Sprintf("active member count %d below expected %d", report.ActiveMembers, expectedNodes))
@@ -267,6 +356,9 @@ func formatClusterAssertionReport(report clusterAssertionReport) string {
 	}
 	fmt.Fprintf(&b, "- OK: %t\n", report.OK)
 	fmt.Fprintf(&b, "- Expected nodes: %d\n", report.ExpectedNodes)
+	if report.Attempts > 0 {
+		fmt.Fprintf(&b, "- Attempts: %d\n", report.Attempts)
+	}
 	if report.ClusterID != "" {
 		fmt.Fprintf(&b, "- Cluster ID: `%s`\n", report.ClusterID)
 	}

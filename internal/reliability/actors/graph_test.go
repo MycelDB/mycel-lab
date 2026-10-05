@@ -6,7 +6,10 @@ import (
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/oracle"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestGraphOperationGenerationIsDeterministic(t *testing.T) {
@@ -112,6 +115,37 @@ func TestGraphActorRecordsAcknowledgedTransactions(t *testing.T) {
 	}
 	if recorder.acknowledged == 0 {
 		t.Fatal("recorder saw no acknowledged transaction events")
+	}
+}
+
+func TestClassifyErrorTreatsUnauthenticatedAsAuthentication(t *testing.T) {
+	err := status.Error(codes.Unauthenticated, "authorization token is invalid")
+	if got := ClassifyError(err); got != "authentication" {
+		t.Fatalf("ClassifyError()=%q, want authentication", got)
+	}
+}
+
+func TestClientConfigForAssignmentForcesPasswordLogin(t *testing.T) {
+	assignment := provision.ActorAssignment{DaemonAddr: "127.0.0.1:19091", Username: "user", Password: "pass", AccessToken: "old-access", RefreshToken: "old-refresh"}
+	tokenCfg := clientConfigForAssignment(assignment, false)
+	if tokenCfg.AccessToken != "old-access" || tokenCfg.RefreshToken != "old-refresh" || tokenCfg.Username != "" || tokenCfg.Password != "" {
+		t.Fatalf("token config=%+v, want token-only auth", tokenCfg)
+	}
+	loginCfg := clientConfigForAssignment(assignment, true)
+	if loginCfg.AccessToken != "" || loginCfg.RefreshToken != "" || loginCfg.Username != "user" || loginCfg.Password != "pass" {
+		t.Fatalf("forced login config=%+v, want username/password auth", loginCfg)
+	}
+}
+
+func TestShouldReauthenticateRequiresCredentials(t *testing.T) {
+	err := status.Error(codes.Unauthenticated, "authorization token is invalid")
+	assignment := provision.ActorAssignment{DaemonAddr: "127.0.0.1:19091", Username: "user", Password: "pass"}
+	if !shouldReauthenticate(err, assignment) {
+		t.Fatal("shouldReauthenticate()=false, want true")
+	}
+	assignment.Password = ""
+	if shouldReauthenticate(err, assignment) {
+		t.Fatal("shouldReauthenticate()=true without password, want false")
 	}
 }
 
