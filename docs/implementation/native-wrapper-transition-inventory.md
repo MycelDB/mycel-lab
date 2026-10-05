@@ -188,7 +188,7 @@ Legacy profiles:
 | --- | --- | --- |
 | k3d lifecycle | Supported. | None for baseline lifecycle. |
 | Workload writes | Native `system-backup-fixture` creates graph nodes, an edge, and a blob-backed node. | Broader workload profiles remain future hardening. |
-| Coordinated cluster backup | Native `cluster-backup-create` event triggers Admin cluster backup and captures node archives. | None for NT3 parity. |
+| Coordinated cluster backup | Native `cluster-backup-create` event starts the daemon async Admin cluster backup operation with `--wait`, consumes structured status/blockers, and captures node archives. | None for NT3 parity. |
 | Backup metadata validation | Native `cluster-backup-create` and `cluster-backup-validate` validate status, raft barrier/checkpoint evidence, checksums, and backup-set safety. | None for NT3 parity. |
 | PVC wipe/restore | K3D driver implements `volume-replacement` primitives and `cluster-restore-apply` restores archives by ordinal. | None for NT3 parity. |
 | StatefulSet restore restart | Native restore scales the StatefulSet down, restores PVC contents, scales up, and waits for readiness. | None for NT3 parity. |

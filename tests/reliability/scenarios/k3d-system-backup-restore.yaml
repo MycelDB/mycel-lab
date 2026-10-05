@@ -48,6 +48,8 @@ phases:
           hostDir: /tmp/{runID}-system-backup
           archiveFormat: tar
           reason: native mycel-lab k3d system backup restore test
+          convergenceTimeout: 10m
+          waitTimeout: 15m
       - type: cluster-backup-validate
         target:
           backupDir: /tmp/mycel-system-backups
@@ -65,6 +67,8 @@ phases:
       - type: cluster-restore-verify
         target:
           actorId: system-backup-writers-0
+          verifyTimeout: 5m
+          verifyInterval: 5s
 assertions:
   final:
     requireHealthyCluster: true

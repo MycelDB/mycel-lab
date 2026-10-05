@@ -61,7 +61,7 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 			}
 		}
 	}
-	fmt.Fprintf(&b, "          volumeMounts:\n            - name: data\n              mountPath: /var/lib/myceld\n  volumeClaimTemplates:\n    - metadata:\n        name: data\n      spec:\n        accessModes: [\"ReadWriteOnce\"]\n")
+	fmt.Fprintf(&b, "          volumeMounts:\n            - name: data\n              mountPath: /data/mycel\n  volumeClaimTemplates:\n    - metadata:\n        name: data\n      spec:\n        accessModes: [\"ReadWriteOnce\"]\n")
 	if cluster.Storage.ClassName != "" {
 		fmt.Fprintf(&b, "        storageClassName: %s\n", cluster.Storage.ClassName)
 	}

@@ -119,6 +119,7 @@ type NodeFileStager interface {
 
 type VolumeReplacementDriver interface {
 	PVCUIDs(context.Context, Environment, string, int) (map[string]string, error)
+	WaitPVCs(context.Context, Environment, string, int) error
 	ResetNamespace(context.Context, Environment) error
 	ApplyYAML(context.Context, Environment, string) (ExecResult, error)
 	ScaleStatefulSet(context.Context, Environment, string, int) error
@@ -494,6 +495,44 @@ func (d K3DDriver) PVCUIDs(ctx context.Context, environment Environment, statefu
 		out[name] = strings.TrimSpace(result.Stdout)
 	}
 	return out, nil
+}
+
+func (d K3DDriver) WaitPVCs(ctx context.Context, environment Environment, statefulSet string, count int) error {
+	if statefulSet == "" {
+		statefulSet = "myceld"
+	}
+	if count <= 0 {
+		count = intFromMetadata(environment.Metadata, "nodeCount", d.nodeCount)
+	}
+	if count <= 0 {
+		return fmt.Errorf("PVC count is required")
+	}
+	waitTimeout := d.WaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 5 * time.Minute
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
+	defer cancel()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		missing := []string{}
+		for i := 0; i < count; i++ {
+			name := fmt.Sprintf("data-%s-%d", statefulSet, i)
+			result, err := d.runner().Run(waitCtx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pvc", name, "-o", "jsonpath={.metadata.uid}")
+			if err != nil || strings.TrimSpace(result.Stdout) == "" {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("wait for replacement PVCs %s: %w", strings.Join(missing, ", "), waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (d K3DDriver) ResetNamespace(ctx context.Context, environment Environment) error {

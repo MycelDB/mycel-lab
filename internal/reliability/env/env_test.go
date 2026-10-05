@@ -146,6 +146,21 @@ func TestK3DDriverCaptureStateWritesArtifacts(t *testing.T) {
 	}
 }
 
+func TestK3DDriverWaitPVCsChecksEveryOrdinalPVC(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test"}
+	if err := driver.WaitPVCs(context.Background(), environment, "myceld", 3); err != nil {
+		t.Fatalf("WaitPVCs() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"get pvc data-myceld-0", "get pvc data-myceld-1", "get pvc data-myceld-2"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("WaitPVCs commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
 type fakeRunner struct{ commands []string }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
