@@ -97,13 +97,32 @@ func TestK3DDriverCreateAppliesManifestsAndWaits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error=%v", err)
 	}
-	if environment.Driver != "k3d" || environment.Namespace != "test-ns" || !strings.HasPrefix(environment.Context, "k3d-mlab-example-scenar-") {
+	if environment.Driver != "k3d" || environment.Namespace != "test-ns" || !strings.HasPrefix(environment.Context, "k3d-mlab-example-scenar-") || len(environment.Name) > k3dClusterNameMaxLength {
 		t.Fatalf("environment=%+v", environment)
 	}
 	joined := strings.Join(runner.commands, "\n")
 	for _, want := range []string{"k3d cluster create", "docker image inspect myceldb/mycel:latest", "k3d image import myceldb/mycel:latest -c " + environment.Name, "kubectl --context " + environment.Context + " apply -f", "kubectl --context " + environment.Context + " -n test-ns rollout status statefulset/myceld", "kubectl --context " + environment.Context + " -n test-ns wait pods -l app=myceld"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
+func TestK3DClusterNameHonorsK3DLengthLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{name: "k3d-cluster-validation", prefix: "mycel-lab"},
+		{name: "k3d-system-backup-restore", prefix: "mlab-sbr"},
+		{name: "very-long-scenario-name-that-would-overflow", prefix: "very-long-prefix-that-would-overflow"},
+	} {
+		got := k3dClusterName(tc.name, tc.prefix)
+		if len(got) > k3dClusterNameMaxLength {
+			t.Fatalf("k3dClusterName(%q, %q)=%q len=%d, want <= %d", tc.name, tc.prefix, got, len(got), k3dClusterNameMaxLength)
+		}
+		if strings.HasPrefix(got, "-") || strings.HasSuffix(got, "-") || strings.Contains(got, "--") {
+			t.Fatalf("k3dClusterName(%q, %q)=%q is not cleanly sanitized", tc.name, tc.prefix, got)
 		}
 	}
 }

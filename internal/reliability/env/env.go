@@ -1043,19 +1043,42 @@ func intFromMetadata(metadata map[string]string, key string, fallback int) int {
 	return parsed
 }
 
+const k3dClusterNameMaxLength = 32
+
 func k3dClusterName(name, prefix string) string {
 	base := sanitizeName(name)
 	if base == "" {
 		base = "scenario"
 	}
+	prefix = sanitizeName(prefix)
 	if prefix == "" {
 		prefix = "mlab"
 	}
-	if len(base) > 14 {
-		base = strings.Trim(base[:14], "-")
-	}
+	base = trimNamePart(base, 14)
 	stamp := time.Now().UTC().Format("060102150405")
-	return sanitizeName(prefix) + "-" + base + "-" + stamp
+	nameBudget := k3dClusterNameMaxLength - len(stamp) - 2
+	if nameBudget < 2 {
+		return trimNamePart(prefix+"-"+base+"-"+stamp, k3dClusterNameMaxLength)
+	}
+	if len(prefix)+len(base) > nameBudget {
+		baseBudget := nameBudget - len(prefix)
+		if baseBudget < 3 {
+			baseBudget = 3
+			prefix = trimNamePart(prefix, nameBudget-baseBudget)
+		}
+		base = trimNamePart(base, baseBudget)
+	}
+	return prefix + "-" + base + "-" + stamp
+}
+
+func trimNamePart(value string, maxLength int) string {
+	if maxLength <= 0 {
+		return ""
+	}
+	if len(value) <= maxLength {
+		return strings.Trim(value, "-")
+	}
+	return strings.Trim(value[:maxLength], "-")
 }
 
 func composeProjectName(name, prefix string) string {
