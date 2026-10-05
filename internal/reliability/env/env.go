@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -636,6 +637,25 @@ func (d ComposeDriver) Preflight(ctx context.Context, environment spec.Environme
 		if _, err := os.Stat(composeFile); err != nil {
 			return fmt.Errorf("compose file %s is not readable: %w", composeFile, err)
 		}
+	}
+	if ports := intSliceOption(environment.Options, "grpcPorts"); len(ports) > 0 {
+		if err := ensureHostPortsAvailable(ports); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureHostPortsAvailable(ports []int) error {
+	for _, port := range ports {
+		if port <= 0 {
+			continue
+		}
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return fmt.Errorf("compose preflight failed: host port %d is not available: %w", port, err)
+		}
+		_ = listener.Close()
 	}
 	return nil
 }

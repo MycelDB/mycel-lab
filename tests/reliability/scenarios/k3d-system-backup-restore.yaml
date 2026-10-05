@@ -9,6 +9,11 @@ environment:
   namespace: mycel-system-backup-restore
   options:
     clusterNamePrefix: mlab-sbr
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
     consolePortBase: 19191
   capabilities:
     required:

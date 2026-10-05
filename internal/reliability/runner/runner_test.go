@@ -95,6 +95,9 @@ func TestCleanupInvokedOnFailure(t *testing.T) {
 	if !driver.deleted {
 		t.Fatal("environment cleanup was not invoked")
 	}
+	if driver.captured < 2 {
+		t.Fatalf("capture count=%d, want initial and failure captures", driver.captured)
+	}
 }
 
 func TestFinalClusterAssertionsPassForHealthySharedIdentity(t *testing.T) {
@@ -200,7 +203,10 @@ func (d *clusterAssertionDriver) Exec(_ context.Context, _ env.Environment, node
 	return env.ExecResult{}, nil
 }
 
-type recordingDriver struct{ deleted bool }
+type recordingDriver struct {
+	deleted  bool
+	captured int
+}
 
 func (d *recordingDriver) Name() string { return "test" }
 func (d *recordingDriver) Capabilities() env.CapabilitySet {
@@ -230,6 +236,7 @@ func (d *recordingDriver) Delete(context.Context, env.Environment) error {
 	return nil
 }
 func (d *recordingDriver) CaptureState(_ context.Context, environment env.Environment, sink *artifacts.Sink) error {
+	d.captured++
 	_, err := sink.WriteJSON("environment/state.json", environment)
 	return err
 }

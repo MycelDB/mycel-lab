@@ -178,6 +178,10 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}()
 	failAfterEnvironmentCreate := func(status RunStatus, err error) (Result, error) {
 		runFailedAfterEnvironmentCreate = true
+		captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_ = driver.CaptureState(captureCtx, environment, sink)
+		cancel()
+		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "error": err.Error()}))
 		return finalize(ctx, opts.Store, sink, result, status, err)
 	}
 	nodes, err := driver.Nodes(ctx, environment)
