@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/deploy"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
@@ -41,15 +42,16 @@ type SystemBackupArtifact struct {
 	LocalManifest  string `json:"localManifest,omitempty"`
 }
 
-type clusterBackupTriggerResponse struct {
+type clusterBackupStatusResponse struct {
 	Status struct {
-		BackupSetID   string            `json:"backup_set_id"`
-		State         string            `json:"state"`
-		ExpectedNodes int               `json:"expected_nodes"`
-		ManifestURI   string            `json:"manifest_uri"`
-		Error         string            `json:"error"`
-		FailedPhase   string            `json:"failed_phase"`
-		RaftBarriers  map[string]uint64 `json:"raft_barriers"`
+		BackupSetID   string                       `json:"backup_set_id"`
+		State         string                       `json:"state"`
+		ExpectedNodes int                          `json:"expected_nodes"`
+		ManifestURI   string                       `json:"manifest_uri"`
+		Error         string                       `json:"error"`
+		FailedPhase   string                       `json:"failed_phase"`
+		RaftBarriers  map[string]uint64            `json:"raft_barriers"`
+		Blockers      []clusterBackupStatusBlocker `json:"blockers"`
 		Nodes         []struct {
 			PodName        string            `json:"pod_name"`
 			Ordinal        int               `json:"ordinal"`
@@ -59,6 +61,17 @@ type clusterBackupTriggerResponse struct {
 			AppliedIndexes map[string]uint64 `json:"applied_indexes"`
 		} `json:"nodes"`
 	} `json:"status"`
+}
+
+type clusterBackupStatusBlocker struct {
+	NodeName     string `json:"node_name"`
+	NodeID       string `json:"node_id"`
+	RaftNodeID   uint64 `json:"raft_node_id"`
+	RaftGroup    string `json:"raft_group"`
+	Reason       string `json:"reason"`
+	AppliedIndex uint64 `json:"applied_index"`
+	CommitIndex  uint64 `json:"commit_index"`
+	Detail       string `json:"detail"`
 }
 
 type clusterBackupValidateResponse struct {
@@ -104,21 +117,30 @@ func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDrive
 	}
 	reason := firstNonEmpty(stringTarget(target, "reason"), "native mycel-lab system backup/restore test")
 	format := firstNonEmpty(stringTarget(target, "archiveFormat"), "tar")
-	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "trigger", "--output-dir", result.BackupDir, "--archive-format", format, "--reason", reason)
+	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "start", "--output-dir", result.BackupDir, "--archive-format", format, "--reason", reason, "--wait")
+	if waitTimeout := durationTarget(target, "waitTimeout", 0); waitTimeout > 0 {
+		cmd = append(cmd, "--timeout", waitTimeout.String())
+	}
+	if convergenceTimeout := durationTarget(target, "convergenceTimeout", 0); convergenceTimeout > 0 {
+		cmd = append(cmd, "--convergence-timeout", convergenceTimeout.String())
+	}
+	if idempotencyKey := stringTarget(target, "idempotencyKey"); idempotencyKey != "" {
+		cmd = append(cmd, "--idempotency-key", idempotencyKey)
+	}
 	execResult, err := driver.Exec(ctx, environment, env.NodeRef{Name: nodes[0].Name, Ordinal: nodes[0].Ordinal}, env.ExecRequest{Command: cmd})
 	result.Stdout = bounded(execResult.Stdout, 8192)
 	result.Stderr = bounded(execResult.Stderr, 8192)
 	if err != nil {
 		return result, err
 	}
-	var response clusterBackupTriggerResponse
+	var response clusterBackupStatusResponse
 	if err := json.Unmarshal([]byte(execResult.Stdout), &response); err != nil {
-		return result, fmt.Errorf("decode cluster backup trigger response: %w", err)
+		return result, fmt.Errorf("decode cluster backup status response: %w", err)
 	}
 	status := response.Status
 	result.BackupSetID = status.BackupSetID
 	if strings.ToLower(status.State) != "succeeded" {
-		return result, fmt.Errorf("cluster backup state %q phase=%s error=%s", status.State, status.FailedPhase, status.Error)
+		return result, fmt.Errorf("cluster backup state %q phase=%s error=%s blockers=%s", status.State, status.FailedPhase, status.Error, formatClusterBackupBlockers(status.Blockers))
 	}
 	if want := scenario.Cluster.Nodes; want > 0 && (status.ExpectedNodes != want || len(status.Nodes) != want) {
 		return result, fmt.Errorf("cluster backup expected %d nodes, status expected=%d artifacts=%d", want, status.ExpectedNodes, len(status.Nodes))
@@ -257,6 +279,9 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 	if _, err := vr.ApplyYAML(ctx, environment, manifests.YAML); err != nil {
 		return result, err
 	}
+	if err := vr.WaitPVCs(ctx, environment, statefulSet, scenario.Cluster.Nodes); err != nil {
+		return result, err
+	}
 	if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, 0); err != nil {
 		return result, err
 	}
@@ -292,13 +317,40 @@ func executeClusterRestoreVerify(ctx context.Context, driver env.EnvironmentDriv
 	if err != nil {
 		return result, err
 	}
-	for _, node := range nodes {
-		cmd := append(principalCLIBase(assignment.Username, assignment.Password), "query", "gql", "--space-id", assignment.SpaceID, "--domain-id", assignment.DomainID, "MATCH (n) RETURN count(n)")
-		if _, err := driver.Exec(ctx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: cmd}); err != nil {
-			return result, fmt.Errorf("restored workload query on %s: %w", node.Name, err)
-		}
-		result.VerifiedPods++
+	verifyTimeout := durationTarget(target, "verifyTimeout", 5*time.Minute)
+	verifyInterval := durationTarget(target, "verifyInterval", 5*time.Second)
+	if verifyInterval <= 0 {
+		verifyInterval = 5 * time.Second
 	}
+	verifyCtx, cancel := context.WithTimeout(ctx, verifyTimeout)
+	defer cancel()
+	verified := map[string]bool{}
+	var lastErr error
+	for len(verified) < len(nodes) {
+		for _, node := range nodes {
+			if verified[node.Name] {
+				continue
+			}
+			cmd := append(principalCLIBase(assignment.Username, assignment.Password), "query", "gql", "--space-id", assignment.SpaceID, "--domain-id", assignment.DomainID, "MATCH (n) RETURN count(n)")
+			if _, err := driver.Exec(verifyCtx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: cmd}); err != nil {
+				lastErr = fmt.Errorf("restored workload query on %s: %w", node.Name, err)
+				continue
+			}
+			verified[node.Name] = true
+		}
+		if len(verified) == len(nodes) {
+			break
+		}
+		select {
+		case <-verifyCtx.Done():
+			if lastErr != nil {
+				return result, fmt.Errorf("restored workload query did not converge after %s: %w", verifyTimeout, lastErr)
+			}
+			return result, fmt.Errorf("restored workload query did not converge after %s: %w", verifyTimeout, verifyCtx.Err())
+		case <-time.After(verifyInterval):
+		}
+	}
+	result.VerifiedPods = len(verified)
 	return result, nil
 }
 
@@ -320,6 +372,53 @@ func verifyPVCReplacement(oldUIDs, newUIDs map[string]string) error {
 		}
 	}
 	return nil
+}
+
+func durationTarget(target map[string]any, key string, fallback time.Duration) time.Duration {
+	if target == nil {
+		return fallback
+	}
+	switch value := target[key].(type) {
+	case time.Duration:
+		return value
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return fallback
+		}
+		parsed, err := time.ParseDuration(strings.TrimSpace(value))
+		if err == nil {
+			return parsed
+		}
+	case int:
+		if value > 0 {
+			return time.Duration(value) * time.Second
+		}
+	case int64:
+		if value > 0 {
+			return time.Duration(value) * time.Second
+		}
+	case float64:
+		if value > 0 {
+			return time.Duration(value) * time.Second
+		}
+	}
+	return fallback
+}
+
+func formatClusterBackupBlockers(blockers []clusterBackupStatusBlocker) string {
+	if len(blockers) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(blockers))
+	for _, blocker := range blockers {
+		label := firstNonEmpty(blocker.RaftGroup, blocker.NodeName, blocker.NodeID)
+		if blocker.Reason != "" && label != "" {
+			parts = append(parts, label+":"+blocker.Reason+":"+blocker.Detail)
+			continue
+		}
+		parts = append(parts, firstNonEmpty(blocker.Detail, blocker.Reason, label))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func validateBackupSetFile(path string) error {

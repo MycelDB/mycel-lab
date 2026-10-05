@@ -28,6 +28,7 @@ func TestRenderKubernetesManifestsReflectClusterProfile(t *testing.T) {
 		`MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: "3"`,
 		`MYCELD_CLUSTER_RAFT_NODE_ADDRS: "myceld-0.myceld.mycel-lab.svc.cluster.local:9091,myceld-1.myceld.mycel-lab.svc.cluster.local:9091,myceld-2.myceld.mycel-lab.svc.cluster.local:9091"`,
 		"imagePullPolicy: IfNotPresent",
+		"mountPath: /data/mycel",
 		`export MYCELD_CLUSTER_RAFT_LOCAL_NODE_ID="$((ordinal + 1))"`,
 		`export MYCELD_CLUSTER_BACKEND_ADVERTISE_ADDR="$HOSTNAME.myceld.mycel-lab.svc.cluster.local:9091"`,
 		"name: myceld-0-client",
@@ -47,5 +48,8 @@ func TestRenderKubernetesManifestsReflectClusterProfile(t *testing.T) {
 		if !strings.Contains(manifests.YAML, check) {
 			t.Fatalf("manifest missing %q\n%s", check, manifests.YAML)
 		}
+	}
+	if strings.Contains(manifests.YAML, "mountPath: /var/lib/myceld") {
+		t.Fatalf("manifest mounts PVC at legacy path instead of daemon data dir:\n%s", manifests.YAML)
 	}
 }

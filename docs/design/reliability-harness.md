@@ -553,6 +553,11 @@ type: cluster-restore-apply
 type: cluster-restore-verify
 ```
 
+`cluster-backup-create` uses the daemon async cluster backup API through
+`mycel admin backup cluster start --wait`. Targets may set `backupDir`,
+`hostDir`, `archiveFormat`, `reason`, `convergenceTimeout`, `waitTimeout`, and
+`idempotencyKey`.
+
 Pod and node events use deterministic pod/name/ordinal targeting:
 
 ```yaml
