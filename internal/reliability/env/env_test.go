@@ -2,8 +2,10 @@ package env
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +168,31 @@ func TestSelectDriverDryRunOverride(t *testing.T) {
 	}
 	if driver.Name() != "dry-run" || effective.Driver != "dry-run" {
 		t.Fatalf("driver=%s effective=%+v, want dry-run", driver.Name(), effective)
+	}
+}
+
+func TestComposePreflightRejectsOccupiedGRPCPort(t *testing.T) {
+	composeFile := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(composeFile, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener addr: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	driver := ComposeDriver{Confirmed: true, Runner: &fakeRunner{}}
+	err = driver.Preflight(context.Background(), spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "grpcPorts": []any{port}}})
+	if err == nil || !strings.Contains(err.Error(), "host port") || !strings.Contains(err.Error(), portText) {
+		t.Fatalf("Preflight() error=%v, want occupied port error", err)
 	}
 }
 

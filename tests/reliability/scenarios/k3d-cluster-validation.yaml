@@ -9,6 +9,11 @@ environment:
   namespace: mycel-lab
   options:
     clusterNamePrefix: mycel-lab
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
   capabilities:
     required:
       - per-node-endpoints
