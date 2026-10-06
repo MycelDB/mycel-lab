@@ -36,6 +36,28 @@ func TestRaftPVCReplaceNodeReplacesHighestOrdinalPVC(t *testing.T) {
 	}
 }
 
+func TestRaftPVCReplaceNodeCanSnapshotWhileNodeIsOffline(t *testing.T) {
+	driver := &raftRejoinDriver{
+		execStdout: `{"results":[{"group_id":"system","snapshot_index":7}]}`,
+		oldUIDs:    map[string]string{"data-myceld-2": "old"},
+		newUIDs:    map[string]string{"data-myceld-2": "new"},
+	}
+	result, err := executeRaftPVCReplaceNode(context.Background(), driver, env.Environment{}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3}}, map[string]any{"statefulSet": "myceld", "ordinal": 2, "snapshotOrdinals": []any{0, 1}})
+	if err != nil {
+		t.Fatalf("executeRaftPVCReplaceNode() error=%v", err)
+	}
+	joined := strings.Join(driver.ops, "\n")
+	if len(result.Nodes) != 2 {
+		t.Fatalf("snapshot evidence len=%d, want 2; result=%#v ops=\n%s", len(result.Nodes), result, joined)
+	}
+	deleteIdx := strings.Index(joined, "delete-pvc:data-myceld-2")
+	snapshotIdx := strings.Index(joined, "exec:0")
+	upIdx := strings.Index(joined, "scale:myceld:3")
+	if deleteIdx < 0 || snapshotIdx < 0 || upIdx < 0 || !(deleteIdx < snapshotIdx && snapshotIdx < upIdx) {
+		t.Fatalf("snapshot was not taken while node was offline before scale-up:\n%s", joined)
+	}
+}
+
 func TestRaftSnapshotVerifyRejoinedRequiresNonzeroSnapshotIndexes(t *testing.T) {
 	driver := &raftRejoinDriver{execStdout: `{"groups":[{"group_id":"system","kind":"system","health":"healthy","snapshot_index":1},{"group_id":"space-partition-0","kind":"partition","health":"healthy","snapshot_index":0}]}`}
 	result, err := executeRaftSnapshotVerifyRejoined(context.Background(), driver, env.Environment{}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3}}, map[string]any{"ordinal": 2, "verifyTimeout": "0s"})
@@ -71,7 +93,8 @@ func (d *raftRejoinDriver) Nodes(context.Context, env.Environment) ([]env.Node, 
 func (d *raftRejoinDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
 	return nil, nil
 }
-func (d *raftRejoinDriver) Exec(context.Context, env.Environment, env.NodeRef, env.ExecRequest) (env.ExecResult, error) {
+func (d *raftRejoinDriver) Exec(_ context.Context, _ env.Environment, node env.NodeRef, _ env.ExecRequest) (env.ExecResult, error) {
+	d.ops = append(d.ops, "exec:"+strconv.Itoa(node.Ordinal))
 	return env.ExecResult{Stdout: d.execStdout}, nil
 }
 func (d *raftRejoinDriver) RestartNode(context.Context, env.Environment, env.NodeRef) error {

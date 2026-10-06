@@ -22,6 +22,9 @@ environment:
       - logs
       - volume-replacement
 clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 8
 actorGroups:
   - name: graph-writers
     profileRef: graph-committer
@@ -41,15 +44,6 @@ actorGroups:
 phases:
   - name: bootstrap-and-write
     duration: 5s
-  - name: force-active-quorum-snapshots
-    duration: 1s
-    events:
-      - type: raft-snapshot-create
-        target:
-          ordinals:
-            - 0
-            - 1
-          compact: true
   - name: replace-last-pvc
     duration: 1s
     events:
@@ -57,6 +51,10 @@ phases:
         target:
           statefulSet: myceld
           ordinal: 2
+          snapshotOrdinals:
+            - 0
+            - 1
+          compact: true
     outcome:
       availability: expected-degradation
   - name: post-rejoin-validation
@@ -71,7 +69,7 @@ phases:
           ordinal: 2
           verifyTimeout: 5m
           verifyInterval: 5s
-          execTimeout: 20s
+          execTimeout: 60s
 assertions:
   final:
     requireHealthyCluster: true

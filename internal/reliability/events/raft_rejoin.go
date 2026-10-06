@@ -139,6 +139,17 @@ func executeRaftPVCReplaceNode(ctx context.Context, driver env.EnvironmentDriver
 	if err := vr.DeletePVC(ctx, environment, pvcName); err != nil {
 		return out, err
 	}
+	if snapshotOrdinals := intSliceTarget(target, "snapshotOrdinals"); len(snapshotOrdinals) > 0 {
+		snapshotTarget := map[string]any{"ordinals": snapshotOrdinals, "compact": boolTarget(target, "compact", true)}
+		if groupIDs := stringSliceTarget(target, "groupIds"); len(groupIDs) > 0 {
+			snapshotTarget["groupIds"] = groupIDs
+		}
+		snapshots, err := executeRaftSnapshotCreate(ctx, driver, environment, snapshotTarget)
+		if err != nil {
+			return out, fmt.Errorf("create active quorum snapshots before rejoin: %w", err)
+		}
+		out.Nodes = snapshots.Nodes
+	}
 	if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, nodeCount); err != nil {
 		return out, err
 	}
@@ -271,6 +282,12 @@ func stringSliceTarget(target map[string]any, key string) []string {
 	switch v := value.(type) {
 	case []string:
 		return append([]string(nil), v...)
+	case []int:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			out = append(out, strconv.Itoa(item))
+		}
+		return out
 	case []any:
 		out := make([]string, 0, len(v))
 		for _, item := range v {
