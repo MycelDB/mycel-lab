@@ -4,7 +4,7 @@ metadata:
   name: k3d-raft-restart-hard-soak
   description: Native one-hour hard raft restart/write soak with frequent rotating single-node restarts.
 scenarios:
-  - path: ../scenarios/k3d-raft-restart-hard-soak.yaml
+  - path: ../scenarios/k3d-raft-restart-hard-soak/k3d-raft-restart-hard-soak.yaml
 execution:
   mode: sequential
   stopOnFailure: true

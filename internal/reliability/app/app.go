@@ -326,7 +326,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	case "scenario":
 		scenarioPath := positional[1]
 		if !looksLikePath(scenarioPath) {
-			scenarioPath = filepath.Join("tests", "reliability", "scenarios", scenarioPath+".yaml")
+			scenarioPath = filepath.Join("tests", "reliability", "scenarios", scenarioPath, scenarioPath+".yaml")
 		}
 		resolved, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProfileDirs: flagValues(args, "--profile-dir")})
 		if err != nil {

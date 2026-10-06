@@ -483,9 +483,9 @@ metadata:
   description: Baseline raft reliability scenarios.
 
 scenarios:
-  - path: ../scenarios/one-node-smoke.yaml
-  - path: ../scenarios/three-node-short-outage.yaml
-  - path: ../scenarios/five-node-long-outage.yaml
+  - path: ../scenarios/one-node-smoke/one-node-smoke.yaml
+  - path: ../scenarios/three-node-short-outage/three-node-short-outage.yaml
+  - path: ../scenarios/five-node-long-outage/five-node-long-outage.yaml
 
 execution:
   mode: sequential
@@ -888,7 +888,7 @@ mycel-lab import tests/reliability/
 mycel-lab import --dry-run tests/reliability/
 
 mycel-lab run scenario raft-5-node-long-outage --version latest
-mycel-lab run scenario-file tests/reliability/scenarios/raft-5-node-long-outage.yaml
+mycel-lab run scenario-file tests/reliability/scenarios/raft-5-node-long-outage/raft-5-node-long-outage.yaml
 mycel-lab run suite raft-reliability-baseline --version latest
 
 mycel-lab export scenario raft-5-node-long-outage --version 3 > scenario.yaml

@@ -80,7 +80,7 @@ kind: Suite
 metadata:
   name: baseline
 scenarios:
-  - path: ../scenarios/example.yaml
+  - path: ../scenarios/example/example.yaml
 execution:
   stopOnFailure: true
 `))

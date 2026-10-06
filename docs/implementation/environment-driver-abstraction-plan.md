@@ -227,7 +227,7 @@ Use fake command runners for normal unit tests:
 Manual validation when Docker is available:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke/compose-smoke.yaml --confirm-destructive
 ```
 
 The manual scenario should be skipped/not required in normal `make test` until
@@ -256,7 +256,7 @@ go test ./internal/reliability/env ./internal/reliability/runner
 5. Ensure dry-run of the Compose scenario works without Docker:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke/compose-smoke.yaml --dry-run
 ```
 
 ### Tests
@@ -269,14 +269,14 @@ mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --dry
 
 ```sh
 mycel-lab import --dry-run tests/reliability/
-mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke/compose-smoke.yaml --dry-run
 go test ./...
 ```
 
 Manual destructive validation:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke/compose-smoke.yaml --confirm-destructive
 ```
 
 ## Tranche ED6 — CLI override hooks

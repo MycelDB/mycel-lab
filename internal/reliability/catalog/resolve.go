@@ -15,15 +15,57 @@ type ResolveOptions struct {
 }
 
 func ResolveScenarioFile(path string, opts ResolveOptions) (spec.ResolvedScenario, error) {
-	loaded, err := spec.LoadFile(path)
+	scenarioPath, err := resolveScenarioFilePath(path)
+	if err != nil {
+		return spec.ResolvedScenario{}, err
+	}
+	loaded, err := spec.LoadFile(scenarioPath)
 	if err != nil {
 		return spec.ResolvedScenario{}, err
 	}
 	scenario, ok := loaded.(spec.Scenario)
 	if !ok {
-		return spec.ResolvedScenario{}, fmt.Errorf("%s is %T, want Scenario", path, loaded)
+		return spec.ResolvedScenario{}, fmt.Errorf("%s is %T, want Scenario", scenarioPath, loaded)
 	}
-	return ResolveScenario(scenario, filepath.Dir(path), opts)
+	return ResolveScenario(scenario, filepath.Dir(scenarioPath), opts)
+}
+
+func resolveScenarioFilePath(path string) (string, error) {
+	if info, err := os.Stat(path); err == nil {
+		if !info.IsDir() {
+			return path, nil
+		}
+		base := filepath.Base(path)
+		candidates := []string{
+			filepath.Join(path, base+".yaml"),
+			filepath.Join(path, base+".yml"),
+			filepath.Join(path, "scenario.yaml"),
+			filepath.Join(path, "scenario.yml"),
+		}
+		for _, candidate := range candidates {
+			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+				return candidate, nil
+			}
+		}
+		return "", fmt.Errorf("scenario directory %q does not contain %s.yaml", path, base)
+	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".yaml" || ext == ".yml" {
+		stem := strings.TrimSuffix(filepath.Base(path), ext)
+		dir := filepath.Dir(path)
+		candidates := []string{
+			filepath.Join(dir, stem, stem+ext),
+			filepath.Join(dir, stem, stem+".yaml"),
+			filepath.Join(dir, stem, stem+".yml"),
+		}
+		for _, candidate := range candidates {
+			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+				return candidate, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("scenario file %q not found", path)
 }
 
 func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOptions) (spec.ResolvedScenario, error) {
@@ -141,6 +183,7 @@ func defaultProfileRoots(scenarioDir string) []string {
 	var roots []string
 	add := func(p string) { roots = append(roots, filepath.Clean(p)) }
 	add(filepath.Dir(scenarioDir))
+	add(filepath.Dir(filepath.Dir(scenarioDir)))
 	add(scenarioDir)
 	if cwd, err := os.Getwd(); err == nil {
 		add(filepath.Join(cwd, "tests", "reliability"))

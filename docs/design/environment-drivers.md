@@ -125,7 +125,7 @@ run request / CLI override > scenario YAML environment > runner default
 Initial CLI overrides can be minimal and still set the future REST shape:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/example.yaml \
+mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml \
   --environment-driver compose \
   --environment-option composeFile=../mycel/tests/compose/cluster/compose.yml
 ```

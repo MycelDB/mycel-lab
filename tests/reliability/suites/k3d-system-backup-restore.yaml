@@ -4,7 +4,7 @@ metadata:
   name: k3d-system-backup-restore
   description: Native k3d full-system backup, PVC replacement, ordinal restore, and workload verification.
 scenarios:
-  - path: ../scenarios/k3d-system-backup-restore.yaml
+  - path: ../scenarios/k3d-system-backup-restore/k3d-system-backup-restore.yaml
 execution:
   mode: sequential
   stopOnFailure: true

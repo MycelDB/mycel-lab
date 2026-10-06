@@ -214,7 +214,7 @@ Validation:
 
 ```sh
 go test ./internal/reliability/provision ./internal/reliability/runner -count=1
-mycel-lab run scenario-file tests/reliability/scenarios/raft-3-node-short-outage.yaml --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/raft-3-node-short-outage/raft-3-node-short-outage.yaml --dry-run
 ```
 
 ### Phase 2: Admin login and resource creation
@@ -232,7 +232,7 @@ mycel-lab run scenario-file tests/reliability/scenarios/raft-3-node-short-outage
 Validation:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/one-node-smoke.yaml \
+mycel-lab run scenario-file tests/reliability/scenarios/one-node-smoke/one-node-smoke.yaml \
   --confirm-destructive \
   --console-endpoints
 ```

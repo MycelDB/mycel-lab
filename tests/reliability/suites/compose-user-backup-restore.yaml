@@ -4,7 +4,7 @@ metadata:
   name: compose-user-backup-restore
   description: Native Compose user backup export, fresh-cluster import, restored data verification, and safety checks.
 scenarios:
-  - path: ../scenarios/compose-user-backup-restore.yaml
+  - path: ../scenarios/compose-user-backup-restore/compose-user-backup-restore.yaml
 execution:
   mode: sequential
   stopOnFailure: true

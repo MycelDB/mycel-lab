@@ -173,12 +173,12 @@ func allActions(results []ImportResult, action ImportAction) bool {
 }
 
 func TestCanonicalHashChangesOnContentChange(t *testing.T) {
-	first, err := BuildDefinition(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "example.yaml"), nil)
+	first, err := BuildDefinition(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "example", "example.yaml"), nil)
 	if err != nil {
 		t.Fatalf("BuildDefinition(first) error = %v", err)
 	}
 	root := copyReliabilityFixtures(t)
-	path := filepath.Join(root, "scenarios", "example.yaml")
+	path := filepath.Join(root, "scenarios", "example", "example.yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read copied scenario: %v", err)
