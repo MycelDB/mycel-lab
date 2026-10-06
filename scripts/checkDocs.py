@@ -54,12 +54,14 @@ def check_scenario_docs(root: pathlib.Path) -> None:
         raise SystemExit(f"scenario YAML must live in a same-named directory: {yaml_path}")
     required_headings = [
         "## Purpose",
+        "## What this test proves",
         "## Topology",
         "## Scenario phases",
         "## Actors",
         "## Tunable parameters",
         "## Evidence and artifacts",
         "## Common failure modes",
+        "## When to run",
     ]
     for scenario_dir in sorted(p for p in scenarios.iterdir() if p.is_dir()):
         name = scenario_dir.name
@@ -79,6 +81,8 @@ def check_scenario_docs(root: pathlib.Path) -> None:
             raise SystemExit(f"scenario doc {md_path} missing headings: {', '.join(missing)}")
         if "```mermaid" not in text:
             raise SystemExit(f"scenario doc {md_path} must include a Mermaid diagram")
+        if "This document explains the scenario intent" in text:
+            raise SystemExit(f"scenario doc {md_path} still contains generated boilerplate")
 
 
 def main(argv: list[str]) -> int:

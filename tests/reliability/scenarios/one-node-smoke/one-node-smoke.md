@@ -2,9 +2,13 @@
 
 ## Purpose
 
-One-node no-op smoke scenario for local deployment plumbing.
+Validates one-node deployment plumbing with no-op actors. It is a low-risk k3d smoke test for manifest rendering, pod readiness, environment capture, phase execution, and cleanup without graph or raft workload complexity.
 
-This document explains the scenario intent, runtime topology, tunable parameters, and evidence to inspect when the test passes or fails.
+## What this test proves
+
+- The smallest deployment can be created and observed by the k3d driver.
+- No-op actors and phases complete successfully against a live environment.
+- Artifact capture works for simple runs.
 
 ## Topology
 
@@ -22,41 +26,47 @@ flowchart LR
 
 ## Scenario phases
 
-1. **smoke**. Duration: `1s`.
+1. **smoke**. Duration: `1s`. This phase keeps the workload intentionally small while proving the path is functional.
 
 ## Actors
 
-| Actor group | Profile | Count | Rate knobs |
-|---|---|---:|---|
-| `noop-users` | `noop` | `1` | commitsPerSecond=1 |
+| Actor group | Profile | Count | Rate knobs | Role in this scenario |
+|---|---|---:|---|---|
+| `noop-users` | `noop` | `1` | `commitsPerSecond` = `1` | exercises scheduler/runtime behavior |
 
 ## Tunable parameters
 
-| Parameter | Default/source | Effect |
+| Parameter | Current value/source | Why tune it |
 |---|---|---|
-| `seed` | `13579` | Reproducible scheduling and actor randomness. |
-| `environment.driver` | `k3d` | Selects the environment driver used by the scenario. |
-| `environment.namespace` | `mycel-lab` | Kubernetes namespace or logical environment scope. |
-| `clusterRef` | `raft-3-node` | Cluster profile used as the base topology. |
-| `actorGroups[].count` | YAML actor group values | Number of concurrent actors per group. |
-| `actorGroups[].rate` | YAML actor group rates | Workload throughput for commit/query actors. |
-| `phases[].duration` | YAML phase durations | How long each workload/disruption phase runs. |
+| `seed` | `13579` | Change only when intentionally exploring a different deterministic schedule. |
+| `environment.driver` | `k3d` | Selects the infrastructure backend; changing it changes failure semantics. |
+| `environment.namespace` | `mycel-lab` | Use a unique namespace/project when running concurrent destructive tests. |
+| `clusterRef` | `raft-3-node` | Changes node count, raft placement, image, resources, and storage defaults. |
+| `actorGroups[].count` | YAML actor group values | Increase for more concurrency pressure; decrease for faster local debugging. |
+| `actorGroups[].rate` | YAML actor group rates | Increase to stress write/read paths; decrease to isolate environment failures. |
+| `phases[].duration` | YAML phase durations | Lengthen to catch timing-sensitive bugs; shorten for smoke/debug loops. |
 | `clusterOverrides` | YAML overrides | Scenario-specific cluster settings layered on the referenced profile. |
 
 ## Evidence and artifacts
 
-- `result.json` records phase status and terminal pass/fail state.
-- `events.jsonl` records phase events, disruption operations, and correctness failures.
-- `summary.md` gives a human-readable run summary.
-- `resolved-scenario.json` captures the fully resolved scenario, including profile overrides.
-- Environment-specific captures under `environment/` show Kubernetes/Compose state, logs, and endpoints when enabled.
+- `result.json` is the first stop: it records phase status, duration, and terminal pass/fail state.
+- `events.jsonl` shows disruption/backup/snapshot events and their structured payloads.
+- `resolved-scenario.json` confirms the exact cluster profile, actor profiles, and overrides used for the run.
+- `summary.md` gives a short human-readable run report suitable for PR comments.
+- `manifests/myceld.yaml`, `environment/kubernetes-resources.txt`, `environment/pods-describe.txt`, and pod logs explain k3d/Kubernetes failures.
+- `oracle/` artifacts, when present, contain final consistency and cluster-health evidence.
 
 ## Common failure modes
 
-- Environment setup failures usually indicate missing local prerequisites or stale Kubernetes/Compose resources.
-- Actor failures usually indicate data-plane, authentication, or endpoint-routing issues.
-- Final assertion failures should be debugged with `events.jsonl`, `oracle/`, and environment captures before rerunning.
-- For destructive scenarios, confirm the namespace/project is disposable before using `--confirm-destructive`.
+- Missing k3d/kubectl prerequisites, stale clusters, or namespace cleanup problems prevent environment creation.
+- Pod readiness, PVC, or service rendering errors appear in `environment/kubernetes-resources.txt` and `environment/pods-describe.txt`.
+- Actor authentication or provisioning failures usually point to bootstrap credentials, principal setup, or endpoint routing.
+- Graph correctness failures should be debugged from `actors/`, `events.jsonl`, and `oracle/` before rerunning.
+- If a destructive run fails during cleanup, confirm disposable resources were removed before starting another run.
+
+## When to run
+
+Run first after local environment, manifest rendering, or k3d driver changes.
 
 ## Related files
 
