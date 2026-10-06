@@ -7,6 +7,21 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 )
 
+func TestRenderKubernetesManifestsIncludesClusterEnvOverrides(t *testing.T) {
+	scenario, err := catalog.ResolveScenarioFile("../../../tests/reliability/scenarios/k3d-raft-snapshot-pvc-rejoin.yaml", catalog.ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveScenarioFile() error = %v", err)
+	}
+	manifests, err := RenderKubernetesManifests(scenario)
+	if err != nil {
+		t.Fatalf("RenderKubernetesManifests() error = %v", err)
+	}
+	check := `MYCELD_CLUSTER_RAFT_EMPTY_STORAGE_REJOIN_RECOVERY: "true"`
+	if !strings.Contains(manifests.YAML, check) {
+		t.Fatalf("manifest missing %q\n%s", check, manifests.YAML)
+	}
+}
+
 func TestRenderKubernetesManifestsReflectClusterProfile(t *testing.T) {
 	scenario, err := catalog.ResolveScenarioFile("../../../tests/reliability/scenarios/raft-3-node-short-outage.yaml", catalog.ResolveOptions{})
 	if err != nil {

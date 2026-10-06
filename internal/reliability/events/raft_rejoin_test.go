@@ -58,6 +58,18 @@ func TestRaftPVCReplaceNodeCanSnapshotWhileNodeIsOffline(t *testing.T) {
 	}
 }
 
+func TestRaftSnapshotVerifyRejoinedRequiresExpectedPartitionGroups(t *testing.T) {
+	driver := &raftRejoinDriver{execStdout: `{"groups":[{"group_id":"system","kind":"system","health":"healthy","snapshot_index":1}]}`}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3, Raft: spec.RaftSpec{PartitionCount: 8, ReplicaFactor: 3}}}
+	result, err := executeRaftSnapshotVerifyRejoined(context.Background(), driver, env.Environment{}, scenario, map[string]any{"ordinal": 2, "verifyTimeout": "0s"})
+	if err == nil || !strings.Contains(err.Error(), "did not report expected raft groups") || !strings.Contains(err.Error(), "space-partition-7") {
+		t.Fatalf("executeRaftSnapshotVerifyRejoined() error=%v, want missing expected partition groups", err)
+	}
+	if result.RejoinedNode == nil || len(result.RejoinedNode.Groups) != 1 {
+		t.Fatalf("expected parsed groups in result: %#v", result)
+	}
+}
+
 func TestRaftSnapshotVerifyRejoinedRequiresNonzeroSnapshotIndexes(t *testing.T) {
 	driver := &raftRejoinDriver{execStdout: `{"groups":[{"group_id":"system","kind":"system","health":"healthy","snapshot_index":1},{"group_id":"space-partition-0","kind":"partition","health":"healthy","snapshot_index":0}]}`}
 	result, err := executeRaftSnapshotVerifyRejoined(context.Background(), driver, env.Environment{}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3}}, map[string]any{"ordinal": 2, "verifyTimeout": "0s"})
@@ -65,6 +77,18 @@ func TestRaftSnapshotVerifyRejoinedRequiresNonzeroSnapshotIndexes(t *testing.T) 
 		t.Fatalf("executeRaftSnapshotVerifyRejoined() error=%v, want zero snapshot_index", err)
 	}
 	if result.RejoinedNode == nil || len(result.RejoinedNode.Groups) != 2 {
+		t.Fatalf("expected parsed groups in result: %#v", result)
+	}
+}
+
+func TestRaftSnapshotVerifyRejoinedPassesWhenExpectedGroupsHaveSnapshots(t *testing.T) {
+	driver := &raftRejoinDriver{execStdout: `{"groups":[{"group_id":"system","kind":"system","health":"healthy","snapshot_index":1},{"group_id":"space-partition-0","kind":"partition","health":"healthy","snapshot_index":4},{"group_id":"space-partition-1","kind":"partition","health":"healthy","snapshot_index":5}]}`}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3, Raft: spec.RaftSpec{PartitionCount: 2, ReplicaFactor: 3}}}
+	result, err := executeRaftSnapshotVerifyRejoined(context.Background(), driver, env.Environment{}, scenario, map[string]any{"ordinal": 2, "verifyTimeout": "0s"})
+	if err != nil {
+		t.Fatalf("executeRaftSnapshotVerifyRejoined() error=%v", err)
+	}
+	if result.RejoinedNode == nil || len(result.RejoinedNode.Groups) != 3 {
 		t.Fatalf("expected parsed groups in result: %#v", result)
 	}
 }

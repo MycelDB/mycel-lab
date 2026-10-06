@@ -76,12 +76,13 @@ type ClusterProfile struct {
 }
 
 type ClusterSpec struct {
-	Nodes     int            `yaml:"nodes" json:"nodes"`
-	Image     string         `yaml:"image" json:"image"`
-	Raft      RaftSpec       `yaml:"raft" json:"raft"`
-	Resources ResourceSpec   `yaml:"resources,omitempty" json:"resources,omitempty"`
-	Storage   StorageSpec    `yaml:"storage,omitempty" json:"storage,omitempty"`
-	Extra     map[string]any `yaml:",inline" json:"-"`
+	Nodes     int               `yaml:"nodes" json:"nodes"`
+	Image     string            `yaml:"image" json:"image"`
+	Raft      RaftSpec          `yaml:"raft" json:"raft"`
+	Env       map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	Resources ResourceSpec      `yaml:"resources,omitempty" json:"resources,omitempty"`
+	Storage   StorageSpec       `yaml:"storage,omitempty" json:"storage,omitempty"`
+	Extra     map[string]any    `yaml:",inline" json:"-"`
 }
 
 type RaftSpec struct {

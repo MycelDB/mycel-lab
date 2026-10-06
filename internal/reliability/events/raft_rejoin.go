@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -197,7 +198,7 @@ func executeRaftSnapshotVerifyRejoined(ctx context.Context, driver env.Environme
 		}
 		res, err := driver.Exec(attemptCtx, environment, env.NodeRef{Ordinal: ordinal}, env.ExecRequest{Command: cmd})
 		cancel()
-		out, verifyErr := verifyRaftSnapshotGroups(ordinal, res.Stdout)
+		out, verifyErr := verifyRaftSnapshotGroups(ordinal, res.Stdout, expectedRejoinedGroupIDs(scenario, target, ordinal, nodeCount))
 		lastOut = out
 		if err == nil && verifyErr == nil {
 			return out, nil
@@ -216,7 +217,7 @@ func executeRaftSnapshotVerifyRejoined(ctx context.Context, driver env.Environme
 	}
 }
 
-func verifyRaftSnapshotGroups(ordinal int, raw string) (RaftSnapshotOperationResult, error) {
+func verifyRaftSnapshotGroups(ordinal int, raw string, expectedGroupIDs []string) (RaftSnapshotOperationResult, error) {
 	out := RaftSnapshotOperationResult{Operation: "raft-snapshot-verify-rejoined", Ordinal: ordinal}
 	groups, err := parseRaftGroupsOutput(raw)
 	if err != nil {
@@ -225,18 +226,67 @@ func verifyRaftSnapshotGroups(ordinal int, raw string) (RaftSnapshotOperationRes
 	if len(groups) == 0 {
 		return out, fmt.Errorf("no raft groups reported by ordinal %d", ordinal)
 	}
+	byID := map[string]RaftSnapshotGroupInfo{}
 	missing := []string{}
+	zero := []string{}
+	for _, group := range groups {
+		byID[group.GroupID] = group
+	}
 	for _, group := range groups {
 		if group.SnapshotIndex == 0 {
-			missing = append(missing, group.GroupID)
+			zero = append(zero, group.GroupID)
+		}
+	}
+	for _, groupID := range expectedGroupIDs {
+		if _, ok := byID[groupID]; !ok {
+			missing = append(missing, groupID)
 		}
 	}
 	verification := RaftSnapshotNodeVerification{NodeName: fmt.Sprintf("myceld-%d", ordinal), Ordinal: ordinal, Groups: groups}
 	out.RejoinedNode = &verification
 	if len(missing) > 0 {
-		return out, fmt.Errorf("rejoined node myceld-%d has zero snapshot_index for raft groups: %s", ordinal, strings.Join(missing, ", "))
+		return out, fmt.Errorf("rejoined node myceld-%d did not report expected raft groups: %s", ordinal, strings.Join(missing, ", "))
+	}
+	if len(zero) > 0 {
+		return out, fmt.Errorf("rejoined node myceld-%d has zero snapshot_index for raft groups: %s", ordinal, strings.Join(zero, ", "))
 	}
 	return out, nil
+}
+
+func expectedRejoinedGroupIDs(scenario spec.ResolvedScenario, target map[string]any, ordinal int, nodeCount int) []string {
+	if groupIDs := stringSliceTarget(target, "expectedGroupIds"); len(groupIDs) > 0 {
+		return sortedStrings(groupIDs)
+	}
+	partitionCount := scenario.Cluster.Raft.PartitionCount
+	if partitionCount <= 0 {
+		partitionCount = intTarget(target, "partitionCount", 0)
+	}
+	replicaFactor := scenario.Cluster.Raft.ReplicaFactor
+	if replicaFactor <= 0 {
+		replicaFactor = intTarget(target, "replicaFactor", 0)
+	}
+	if nodeCount <= 0 {
+		nodeCount = intTarget(target, "nodeCount", 0)
+	}
+	groups := []string{"system"}
+	if partitionCount <= 0 || replicaFactor <= 0 || nodeCount <= 0 || ordinal < 0 || ordinal >= nodeCount {
+		return groups
+	}
+	for p := 0; p < partitionCount; p++ {
+		for i := 0; i < replicaFactor; i++ {
+			if (p+i)%nodeCount == ordinal {
+				groups = append(groups, fmt.Sprintf("space-partition-%d", p))
+				break
+			}
+		}
+	}
+	return groups
+}
+
+func sortedStrings(values []string) []string {
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	return out
 }
 
 func parseRaftSnapshotOutput(raw string) ([]RaftSnapshotResult, error) {

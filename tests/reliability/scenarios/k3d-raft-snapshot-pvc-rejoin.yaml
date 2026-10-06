@@ -25,6 +25,8 @@ clusterRef: raft-3-node
 clusterOverrides:
   raft:
     partitionCount: 8
+  env:
+    MYCELD_CLUSTER_RAFT_EMPTY_STORAGE_REJOIN_RECOVERY: "true"
 actorGroups:
   - name: graph-writers
     profileRef: graph-committer
