@@ -1,0 +1,7 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-raft-snapshot-pvc-rejoin
+  description: Native k3d forced raft snapshot catch-up validation after same-ID PVC replacement.
+scenarios:
+  - path: ../scenarios/k3d-raft-snapshot-pvc-rejoin.yaml

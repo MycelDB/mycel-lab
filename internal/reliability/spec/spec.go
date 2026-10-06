@@ -76,12 +76,13 @@ type ClusterProfile struct {
 }
 
 type ClusterSpec struct {
-	Nodes     int            `yaml:"nodes" json:"nodes"`
-	Image     string         `yaml:"image" json:"image"`
-	Raft      RaftSpec       `yaml:"raft" json:"raft"`
-	Resources ResourceSpec   `yaml:"resources,omitempty" json:"resources,omitempty"`
-	Storage   StorageSpec    `yaml:"storage,omitempty" json:"storage,omitempty"`
-	Extra     map[string]any `yaml:",inline" json:"-"`
+	Nodes     int               `yaml:"nodes" json:"nodes"`
+	Image     string            `yaml:"image" json:"image"`
+	Raft      RaftSpec          `yaml:"raft" json:"raft"`
+	Env       map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	Resources ResourceSpec      `yaml:"resources,omitempty" json:"resources,omitempty"`
+	Storage   StorageSpec       `yaml:"storage,omitempty" json:"storage,omitempty"`
+	Extra     map[string]any    `yaml:",inline" json:"-"`
 }
 
 type RaftSpec struct {
@@ -441,7 +442,7 @@ func validateEnvironmentSpec(environment EnvironmentSpec) error {
 
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify":
+	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined":
 		return true
 	default:
 		return false

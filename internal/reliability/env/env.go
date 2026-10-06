@@ -123,6 +123,7 @@ type VolumeReplacementDriver interface {
 	ResetNamespace(context.Context, Environment) error
 	ApplyYAML(context.Context, Environment, string) (ExecResult, error)
 	ScaleStatefulSet(context.Context, Environment, string, int) error
+	DeletePVC(context.Context, Environment, string) error
 	RestoreArchiveToPVC(context.Context, Environment, string, string) error
 }
 
@@ -561,7 +562,29 @@ func (d K3DDriver) ScaleStatefulSet(ctx context.Context, environment Environment
 		_, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "pods", "-l", "app=myceld", "--for=delete", "--timeout=5m")
 		return err
 	}
-	return d.WaitReady(ctx, environment)
+	timeout := d.WaitTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Minute
+	}
+	timeoutArg := fmt.Sprintf("--timeout=%s", timeout.Round(time.Second))
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "rollout", "status", "statefulset/"+statefulSet, timeoutArg); err != nil {
+		return err
+	}
+	for ordinal := 0; ordinal < replicas; ordinal++ {
+		pod := fmt.Sprintf("%s-%d", statefulSet, ordinal)
+		if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "pod/"+pod, "--for=condition=Ready", timeoutArg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d K3DDriver) DeletePVC(ctx context.Context, environment Environment, pvcName string) error {
+	if strings.TrimSpace(pvcName) == "" {
+		return errors.New("pvc name is required")
+	}
+	_, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "delete", "pvc", pvcName, "--wait=true", "--timeout=5m")
+	return err
 }
 
 func (d K3DDriver) RestoreArchiveToPVC(ctx context.Context, environment Environment, pvcName, archivePath string) error {
