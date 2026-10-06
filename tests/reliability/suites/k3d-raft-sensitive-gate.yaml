@@ -4,8 +4,8 @@ metadata:
   name: k3d-raft-sensitive-gate
   description: Destructive Mycel Lab raft-sensitive gate covering restart smoke and edge workload disruption.
 scenarios:
-  - path: ../scenarios/k3d-raft-disruption-smoke.yaml
-  - path: ../scenarios/k3d-raft-disruption-edges.yaml
+  - path: ../scenarios/k3d-raft-disruption-smoke/k3d-raft-disruption-smoke.yaml
+  - path: ../scenarios/k3d-raft-disruption-edges/k3d-raft-disruption-edges.yaml
 execution:
   mode: sequential
   stopOnFailure: true

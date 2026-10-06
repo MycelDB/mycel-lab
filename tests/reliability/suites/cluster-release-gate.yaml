@@ -4,9 +4,9 @@ metadata:
   name: cluster-release-gate
   description: Destructive Mycel Lab release-gate suite for migrated system validation flows.
 scenarios:
-  - path: ../scenarios/compose-cluster-validation.yaml
-  - path: ../scenarios/k3d-cluster-validation.yaml
-  - path: ../scenarios/k3d-system-backup-restore.yaml
+  - path: ../scenarios/compose-cluster-validation/compose-cluster-validation.yaml
+  - path: ../scenarios/k3d-cluster-validation/k3d-cluster-validation.yaml
+  - path: ../scenarios/k3d-system-backup-restore/k3d-system-backup-restore.yaml
 execution:
   mode: sequential
   stopOnFailure: true

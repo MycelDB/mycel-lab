@@ -8,7 +8,7 @@ import (
 )
 
 func TestRenderKubernetesManifestsIncludesClusterEnvOverrides(t *testing.T) {
-	scenario, err := catalog.ResolveScenarioFile("../../../tests/reliability/scenarios/k3d-raft-snapshot-pvc-rejoin.yaml", catalog.ResolveOptions{})
+	scenario, err := catalog.ResolveScenarioFile("../../../tests/reliability/scenarios/k3d-raft-snapshot-pvc-rejoin/k3d-raft-snapshot-pvc-rejoin.yaml", catalog.ResolveOptions{})
 	if err != nil {
 		t.Fatalf("ResolveScenarioFile() error = %v", err)
 	}
@@ -23,7 +23,7 @@ func TestRenderKubernetesManifestsIncludesClusterEnvOverrides(t *testing.T) {
 }
 
 func TestRenderKubernetesManifestsReflectClusterProfile(t *testing.T) {
-	scenario, err := catalog.ResolveScenarioFile("../../../tests/reliability/scenarios/raft-3-node-short-outage.yaml", catalog.ResolveOptions{})
+	scenario, err := catalog.ResolveScenarioFile("../../../tests/reliability/scenarios/raft-3-node-short-outage/raft-3-node-short-outage.yaml", catalog.ResolveOptions{})
 	if err != nil {
 		t.Fatalf("ResolveScenarioFile() error = %v", err)
 	}

@@ -7,10 +7,10 @@ seed: 7
 environment:
   driver: k3d
   namespace: mycel-lab
-clusterRef: ../clusters/raft-3-node.yaml
+clusterRef: raft-3-node
 actorGroups:
   - name: writers
-    profileRef: ../actor-profiles/graph-committer.yaml
+    profileRef: graph-committer
     count: 1
     rate:
       commitsPerSecond: 1

@@ -4,10 +4,10 @@ metadata:
   name: raft-reliability-baseline
   description: Baseline reliability suite for graph, raft, and named-pod disruption smoke coverage.
 scenarios:
-  - path: ../scenarios/one-node-graph-smoke.yaml
-  - path: ../scenarios/three-node-graph-smoke.yaml
-  - path: ../scenarios/three-node-short-outage.yaml
-  - path: ../scenarios/five-node-long-outage.yaml
+  - path: ../scenarios/one-node-graph-smoke/one-node-graph-smoke.yaml
+  - path: ../scenarios/three-node-graph-smoke/three-node-graph-smoke.yaml
+  - path: ../scenarios/three-node-short-outage/three-node-short-outage.yaml
+  - path: ../scenarios/five-node-long-outage/five-node-long-outage.yaml
 execution:
   mode: sequential
   stopOnFailure: true

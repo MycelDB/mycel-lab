@@ -50,7 +50,14 @@ Definition lifecycle rules:
 Run a scenario by file path:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/one-node-graph-smoke.yaml --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/one-node-graph-smoke/one-node-graph-smoke.yaml --dry-run
+```
+
+Scenarios live in same-named directories with a YAML spec and Markdown guide:
+
+```text
+tests/reliability/scenarios/<name>/<name>.yaml
+tests/reliability/scenarios/<name>/<name>.md
 ```
 
 Run a baseline scenario by name from `tests/reliability/scenarios/`:
@@ -68,7 +75,7 @@ Mycel Lab supports three initial environment drivers:
 A run request can override the scenario default without editing YAML:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml \
+mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke/compose-smoke.yaml \
   --dry-run \
   --environment-driver compose \
   --environment-option composeFiles=../mycel/tests/compose/cluster/compose.yml,tests/compose/ports.yml
@@ -129,8 +136,8 @@ A Compose-backed smoke scenario is available for planning and local destructive
 validation:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --dry-run
-mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --confirm-destructive
+mycel-lab run scenario compose-smoke --dry-run
+mycel-lab run scenario compose-smoke --confirm-destructive
 ```
 
 Migrated system-integration validation suites are available for Compose and

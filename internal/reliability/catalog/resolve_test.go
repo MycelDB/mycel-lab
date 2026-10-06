@@ -31,6 +31,28 @@ func TestResolveScenarioFileByName(t *testing.T) {
 	}
 }
 
+func TestResolveScenarioFileAcceptsScenarioDirectory(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage")
+	resolved, err := ResolveScenarioFile(path, ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveScenarioFile() error = %v", err)
+	}
+	if resolved.Metadata.Name != "raft-3-node-short-outage" {
+		t.Fatalf("name = %q", resolved.Metadata.Name)
+	}
+}
+
+func TestResolveScenarioFileSupportsLegacyFlatPathFallback(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml")
+	resolved, err := ResolveScenarioFile(path, ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveScenarioFile() error = %v", err)
+	}
+	if resolved.Metadata.Name != "raft-3-node-short-outage" {
+		t.Fatalf("name = %q", resolved.Metadata.Name)
+	}
+}
+
 func TestResolveScenarioFileByPathAndActorOverride(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "example.yaml")
 	resolved, err := ResolveScenarioFile(path, ResolveOptions{})

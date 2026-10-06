@@ -45,8 +45,15 @@ Kubernetes pod, restarting a Compose service, or only recording a dry-run plan.
 Typical file location:
 
 ```text
-tests/reliability/scenarios/<name>.yaml
+tests/reliability/scenarios/<name>/<name>.yaml
+tests/reliability/scenarios/<name>/<name>.md
 ```
+
+Each scenario directory contains the executable YAML and a same-named Markdown
+guide. The Markdown guide documents the scenario purpose, topology, phase flow,
+tunable parameters, evidence artifacts, common failure modes, and related
+issues. It should include at least one Mermaid topology diagram so destructive
+or long-running tests can be reviewed before execution.
 
 Minimal shape:
 
@@ -88,8 +95,8 @@ kind: Suite
 metadata:
   name: raft-reliability-baseline
 scenarios:
-  - path: ../scenarios/one-node-smoke.yaml
-  - path: ../scenarios/three-node-short-outage.yaml
+  - path: ../scenarios/one-node-smoke/one-node-smoke.yaml
+  - path: ../scenarios/three-node-short-outage/three-node-short-outage.yaml
 execution:
   mode: sequential
   stopOnFailure: true

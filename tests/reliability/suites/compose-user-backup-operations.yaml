@@ -4,7 +4,7 @@ metadata:
   name: compose-user-backup-operations
   description: Native Compose user backup export, validate, and import operation smoke.
 scenarios:
-  - path: ../scenarios/compose-user-backup-operations.yaml
+  - path: ../scenarios/compose-user-backup-operations/compose-user-backup-operations.yaml
 execution:
   mode: sequential
   stopOnFailure: true
