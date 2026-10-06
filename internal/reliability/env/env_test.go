@@ -161,6 +161,24 @@ func TestK3DDriverWaitPVCsChecksEveryOrdinalPVC(t *testing.T) {
 	}
 }
 
+func TestK3DDriverScaleStatefulSetWaitsOnlyDesiredOrdinals(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test"}
+	if err := driver.ScaleStatefulSet(context.Background(), environment, "myceld", 2); err != nil {
+		t.Fatalf("ScaleStatefulSet() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"scale statefulset/myceld --replicas 2", "rollout status statefulset/myceld", "wait pod/myceld-0", "wait pod/myceld-1"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("ScaleStatefulSet commands missing %q\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "wait pod/myceld-2") || strings.Contains(joined, "wait pods -l app=myceld") {
+		t.Fatalf("ScaleStatefulSet waited on stale/broad pods during downscale:\n%s", joined)
+	}
+}
+
 type fakeRunner struct{ commands []string }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {

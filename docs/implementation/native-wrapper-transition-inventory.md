@@ -245,7 +245,8 @@ A wrapper suite can be retired when all of the following are true:
 10. NT3b: implement cluster backup metadata assertions. Done.
 11. NT3c: implement native system restore operation and restored workload checks. Done.
 12. NT3d: replace k3d system backup/restore wrapper. Done.
-13. NT4: update compatibility targets and retire wrapper scenarios. Done for Mycel Lab suite routing; legacy daemon harnesses remain manual fallbacks until destructive evidence is recorded.
+13. NT3e: add native forced-snapshot same-raft-ID PVC rejoin validation suite. Done via `k3d-raft-snapshot-pvc-rejoin`.
+14. NT4: update compatibility targets and retire wrapper scenarios. Done for Mycel Lab suite routing; legacy daemon harnesses remain manual fallbacks until destructive evidence is recorded.
 
 ## Tracking checklist
 
@@ -253,4 +254,5 @@ A wrapper suite can be retired when all of the following are true:
 - [x] NT1 native k3d restart-soak suites.
 - [x] NT2 native Compose user backup/restore suite.
 - [x] NT3 native k3d system backup/restore suite.
+- [x] NT3e native k3d forced-snapshot PVC rejoin suite.
 - [x] NT4 wrapper retirement/deprecation in Mycel Lab suite routing.

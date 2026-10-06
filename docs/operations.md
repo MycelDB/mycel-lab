@@ -154,6 +154,7 @@ mycel-lab run suite k3d-raft-sensitive-gate --dry-run
 mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
+mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run
 mycel-lab run suite cluster-release-gate --dry-run
 ```
@@ -168,11 +169,12 @@ backup/restore suite with fixture creation, archive staging across a fresh reset
 restored-data checks, and safety assertions. `k3d-system-backup-restore` is the
 native k3d full-system backup/restore suite with cluster backup metadata checks,
 PVC replacement evidence, ordinal archive restore, and restored workload
-verification. The completed wrapper transition is tracked in the [native wrapper
-transition inventory](implementation/native-wrapper-transition-inventory.md).
-The k3d cluster-validation suite intentionally does not yet include the legacy
-one-PVC replacement/rejoin step; that remains blocked on a dedicated
-volume-replacement capability.
+verification. `k3d-raft-snapshot-pvc-rejoin` is the native k3d forced-snapshot
+same-raft-ID PVC replacement drill: it forces raft snapshots on active quorum
+nodes, deletes and recreates the highest ordinal PVC, validates graph/data-plane
+recovery, and fails if the rejoined node reports any raft group with a zero
+`snapshot_index`. The completed wrapper transition is tracked in the [native
+wrapper transition inventory](implementation/native-wrapper-transition-inventory.md).
 
 ## Running suites
 

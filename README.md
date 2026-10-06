@@ -39,6 +39,7 @@ mycel-lab run suite k3d-raft-disruption --dry-run
 mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
+mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run
 mycel-lab run suite cluster-release-gate --dry-run
 # Compose runs require Docker Compose and a local mycel image compatible with the fixture.
@@ -46,6 +47,7 @@ mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke.yaml --con
 mycel-lab run suite compose-cluster-validation --confirm-destructive
 mycel-lab run suite k3d-cluster-validation --confirm-destructive
 mycel-lab run suite k3d-raft-disruption --confirm-destructive
+mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --confirm-destructive
 mycel-lab run suite compose-cluster-soak --confirm-destructive
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```

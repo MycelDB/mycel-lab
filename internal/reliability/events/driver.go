@@ -109,6 +109,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 			r.systemBackups[systemBackupKey(event.Target)] = result
 		}
 		return map[string]any{"systemBackup": result}, err
+	case "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined":
+		result, err := executeRaftRejoinEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Type, event.Target)
+		return map[string]any{"raftSnapshot": result}, err
 	default:
 		return nil, fmt.Errorf("unsupported event type %q", event.Type)
 	}

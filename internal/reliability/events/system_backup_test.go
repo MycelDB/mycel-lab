@@ -304,6 +304,11 @@ func (d *restoreApplyDriver) ScaleStatefulSet(_ context.Context, _ env.Environme
 	d.ops = append(d.ops, "scale:"+statefulSet+":"+strconv.Itoa(replicas))
 	return nil
 }
+func (d *restoreApplyDriver) DeletePVC(_ context.Context, _ env.Environment, pvcName string) error {
+	d.ops = append(d.ops, "delete-pvc:"+pvcName)
+	return nil
+}
+
 func (d *restoreApplyDriver) RestoreArchiveToPVC(_ context.Context, _ env.Environment, pvcName, archivePath string) error {
 	d.ops = append(d.ops, "restore:"+pvcName+":"+archivePath)
 	return nil
