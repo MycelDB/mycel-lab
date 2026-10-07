@@ -97,11 +97,20 @@ func TestClusterRestoreVerifyRetriesUntilRestoredAuthIsReady(t *testing.T) {
 	}
 }
 
-func TestClusterRestoreApplyWaitsForReplacementPVCsBeforeScaleDown(t *testing.T) {
+func TestRestoreCLICompatibilityErrorExplainsStaleImage(t *testing.T) {
+	err := restoreCLICompatibilityError(errors.New("kubectl exec failed"), env.ExecResult{Stderr: "unknown flag: --backup-set"})
+	if err == nil || !strings.Contains(err.Error(), "rebuild/import an image") || !strings.Contains(err.Error(), "MycelDB/mycel#156") {
+		t.Fatalf("restoreCLICompatibilityError() = %v, want stale image hint", err)
+	}
+}
+
+func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.T) {
 	driver := &restoreApplyDriver{}
-	backup := SystemBackupOperationResult{Artifacts: []SystemBackupArtifact{
-		{PodName: "myceld-0", Ordinal: 0, LocalArchive: "/tmp/node-0.tar"},
-		{PodName: "myceld-1", Ordinal: 1, LocalArchive: "/tmp/node-1.tar"},
+	hostDir := t.TempDir()
+	writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"complete":true,"state":"succeeded","nodes":[{"applied_indexes":{"system":1}}]}`)
+	backup := SystemBackupOperationResult{BackupDir: "/tmp/mycel-system-backups", HostDir: hostDir, Artifacts: []SystemBackupArtifact{
+		{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", ManifestName: "node-0.manifest.json", LocalArchive: "/tmp/node-0.tar", LocalManifest: "/tmp/node-0.manifest.json"},
+		{PodName: "myceld-1", Ordinal: 1, ArchiveName: "node-1.tar", ManifestName: "node-1.manifest.json", LocalArchive: "/tmp/node-1.tar", LocalManifest: "/tmp/node-1.manifest.json"},
 	}}
 	scenario := spec.ResolvedScenario{
 		Environment: spec.EnvironmentSpec{Namespace: "test-ns"},
@@ -114,15 +123,19 @@ func TestClusterRestoreApplyWaitsForReplacementPVCsBeforeScaleDown(t *testing.T)
 	if len(result.OldPVCUIDs) != 2 || len(result.NewPVCUIDs) != 2 {
 		t.Fatalf("result PVC evidence old=%v new=%v", result.OldPVCUIDs, result.NewPVCUIDs)
 	}
+	if !strings.Contains(result.RestorePlan, "restore plan") || len(result.RestoreResults) != 2 {
+		t.Fatalf("missing restore-plan/results evidence: plan=%q results=%+v", result.RestorePlan, result.RestoreResults)
+	}
 	joined := strings.Join(driver.ops, "\n")
 	for _, want := range []string{
+		"exec:mycel --output json admin backup cluster restore-plan --backup-set /tmp/mycel-system-backups",
 		"pvcuids:myceld:2",
 		"reset-namespace",
 		"apply-yaml",
 		"wait-pvcs:myceld:2",
 		"scale:myceld:0",
-		"restore:data-myceld-0:/tmp/node-0.tar",
-		"restore:data-myceld-1:/tmp/node-1.tar",
+		"restore-local:data-myceld-0:0:myceldb/mycel:latest:2",
+		"restore-local:data-myceld-1:1:myceldb/mycel:latest:2",
 		"scale:myceld:2",
 	} {
 		if !strings.Contains(joined, want) {
@@ -263,8 +276,13 @@ func (d *restoreApplyDriver) Nodes(context.Context, env.Environment) ([]env.Node
 func (d *restoreApplyDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
 	return nil, nil
 }
-func (d *restoreApplyDriver) Exec(context.Context, env.Environment, env.NodeRef, env.ExecRequest) (env.ExecResult, error) {
-	return env.ExecResult{}, nil
+func (d *restoreApplyDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
+	cmd := strings.Join(req.Command, " ")
+	d.ops = append(d.ops, "exec:"+cmd)
+	if strings.Contains(cmd, "admin backup cluster restore-plan") {
+		return env.ExecResult{Command: cmd, Stdout: `{"backup_set_id":"backup-set-test","warnings":["restore plan"],"nodes":[]}`}, nil
+	}
+	return env.ExecResult{Command: cmd}, nil
 }
 func (d *restoreApplyDriver) RestartNode(context.Context, env.Environment, env.NodeRef) error {
 	return nil
@@ -310,8 +328,13 @@ func (d *restoreApplyDriver) DeletePVC(_ context.Context, _ env.Environment, pvc
 }
 
 func (d *restoreApplyDriver) RestoreArchiveToPVC(_ context.Context, _ env.Environment, pvcName, archivePath string) error {
-	d.ops = append(d.ops, "restore:"+pvcName+":"+archivePath)
+	d.ops = append(d.ops, "restore-archive:"+pvcName+":"+archivePath)
 	return nil
+}
+
+func (d *restoreApplyDriver) RestoreBackupSetOrdinalToPVC(_ context.Context, _ env.Environment, req env.RestoreBackupSetRequest) (env.ExecResult, error) {
+	d.ops = append(d.ops, "restore-local:"+req.PVCName+":"+strconv.Itoa(req.Ordinal)+":"+req.Image+":"+strconv.Itoa(len(req.Artifacts)))
+	return env.ExecResult{Stdout: `{"data_dir":"/data/mycel"}`}, nil
 }
 
 type backupValidationDriver struct {

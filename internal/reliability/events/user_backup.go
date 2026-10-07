@@ -320,6 +320,10 @@ func adminCLIBase() []string {
 	return []string{"mycel", "--daemon-addr", "127.0.0.1:9091", "--username", provision.DefaultAdminUsername, "--password", provision.DefaultAdminPassword, "--output", "json"}
 }
 
+func offlineCLIBase() []string {
+	return []string{"mycel", "--output", "json"}
+}
+
 func principalCLIBase(username, password string) []string {
 	return []string{"mycel", "--daemon-addr", "127.0.0.1:9091", "--username", username, "--password", password, "--output", "json"}
 }
