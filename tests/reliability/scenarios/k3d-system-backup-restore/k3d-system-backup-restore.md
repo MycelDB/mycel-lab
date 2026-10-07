@@ -2,12 +2,13 @@
 
 ## Purpose
 
-Validates full-system backup and restore in Kubernetes. It creates live graph data, requests a daemon-owned cluster backup, replaces/restores PVCs for StatefulSet ordinals, and verifies restored authentication and data access. This scenario guards the disaster-recovery contract for k3d deployments.
+Validates full-system backup and restore in Kubernetes. It creates live graph data, requests a daemon-owned cluster backup, validates the backup set, runs the daemon CLI offline `restore-plan`, replaces/restores PVCs for StatefulSet ordinals with `restore-local`, and verifies restored authentication and data access. This scenario guards the disaster-recovery contract for k3d deployments.
 
 ## What this test proves
 
 - Cluster backup operations reach a completed daemon state before restore begins.
-- PVC restore mounts data at the daemon's expected path and restarts cleanly.
+- Offline restore planning maps every ordinal to the recorded archive before PVC replacement.
+- PVC restore mounts data at the daemon's expected path, intentionally wipes the replacement mount, and uses `mycel admin backup cluster restore-local` rather than ad hoc archive extraction.
 - Restored users can authenticate and query data written before the backup.
 
 ## Topology
@@ -53,7 +54,7 @@ flowchart LR
 ## Evidence and artifacts
 
 - `result.json` is the first stop: it records phase status, duration, and terminal pass/fail state.
-- `events.jsonl` shows disruption/backup/snapshot events and their structured payloads.
+- `events.jsonl` shows disruption/backup/snapshot events and their structured payloads, including restore-plan output and per-ordinal restore-local command results.
 - `resolved-scenario.json` confirms the exact cluster profile, actor profiles, and overrides used for the run.
 - `summary.md` gives a short human-readable run report suitable for PR comments.
 - `manifests/myceld.yaml`, `environment/kubernetes-resources.txt`, `environment/pods-describe.txt`, and pod logs explain k3d/Kubernetes failures.
@@ -70,6 +71,15 @@ flowchart LR
 ## When to run
 
 Run before backup/restore releases and after changes to backup orchestration, PVC rendering, restore verification, auth, or graph durability.
+
+Before a destructive run, rebuild the local image used by the k3d scenario from a `mycel` checkout that includes the offline restore CLI primitives:
+
+```sh
+cd /Users/martinbeauvais/Projects/knotbase/Knotbase/myceldb
+docker build -f mycel/Dockerfile -t myceldb/mycel:latest .
+```
+
+The k3d driver imports this local image into the disposable test cluster. A stale image will fail in the restore phase because `mycel admin backup cluster restore-plan --backup-set ...` is unavailable.
 
 ## Related files
 

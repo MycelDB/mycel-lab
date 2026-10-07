@@ -117,6 +117,23 @@ type NodeFileStager interface {
 	CopyToNode(context.Context, Environment, NodeRef, string, string) (ExecResult, error)
 }
 
+type RestoreArtifact struct {
+	Ordinal       int
+	PodName       string
+	ArchiveName   string
+	ManifestName  string
+	LocalArchive  string
+	LocalManifest string
+}
+
+type RestoreBackupSetRequest struct {
+	PVCName       string
+	BackupSetPath string
+	Artifacts     []RestoreArtifact
+	Ordinal       int
+	Image         string
+}
+
 type VolumeReplacementDriver interface {
 	PVCUIDs(context.Context, Environment, string, int) (map[string]string, error)
 	WaitPVCs(context.Context, Environment, string, int) error
@@ -125,6 +142,10 @@ type VolumeReplacementDriver interface {
 	ScaleStatefulSet(context.Context, Environment, string, int) error
 	DeletePVC(context.Context, Environment, string) error
 	RestoreArchiveToPVC(context.Context, Environment, string, string) error
+}
+
+type ClusterRestoreDriver interface {
+	RestoreBackupSetOrdinalToPVC(context.Context, Environment, RestoreBackupSetRequest) (ExecResult, error)
 }
 
 type EnvironmentDriver interface {
@@ -629,6 +650,78 @@ spec:
 	}
 	_, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", "find /data/mycel -mindepth 1 -maxdepth 1 -exec rm -rf {} + && tar -xf /restore/backup.tar -C /data/mycel")
 	return err
+}
+
+func (d K3DDriver) RestoreBackupSetOrdinalToPVC(ctx context.Context, environment Environment, req RestoreBackupSetRequest) (ExecResult, error) {
+	if strings.TrimSpace(req.PVCName) == "" || strings.TrimSpace(req.BackupSetPath) == "" {
+		return ExecResult{}, errors.New("pvc name and backup-set path are required")
+	}
+	if req.Ordinal < 0 {
+		return ExecResult{}, errors.New("restore ordinal must be non-negative")
+	}
+	image := strings.TrimSpace(req.Image)
+	if image == "" {
+		image = "myceldb/mycel:latest"
+	}
+	restorePod := "restore-" + strings.ReplaceAll(req.PVCName, "_", "-")
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  restartPolicy: Never
+  containers:
+    - name: restore
+      image: %s
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-ec", "sleep 3600"]
+      volumeMounts:
+        - name: data
+          mountPath: /data/mycel
+        - name: restore
+          mountPath: /restore
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: %s
+    - name: restore
+      emptyDir: {}
+`, restorePod, environment.Namespace, image, req.PVCName)
+	if _, err := d.ApplyYAML(ctx, environment, manifest); err != nil {
+		return ExecResult{}, err
+	}
+	defer func() {
+		_, _ = d.runner().Run(context.Background(), "kubectl", "--context", environment.Context, "-n", environment.Namespace, "delete", "pod", restorePod, "--ignore-not-found=true", "--wait=true", "--timeout=3m")
+	}()
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "--for=condition=Ready", "pod/"+restorePod, "--timeout=5m"); err != nil {
+		return ExecResult{}, err
+	}
+	backupDir := "/tmp/mycel-system-backups"
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", "rm -rf "+shellQuote(backupDir)+" && mkdir -p "+shellQuote(backupDir)); err != nil {
+		return ExecResult{}, err
+	}
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "cp", req.BackupSetPath, restorePod+":"+backupDir+"/backup-set.json"); err != nil {
+		return ExecResult{}, err
+	}
+	for _, artifact := range req.Artifacts {
+		if strings.TrimSpace(artifact.LocalArchive) == "" || strings.TrimSpace(artifact.ArchiveName) == "" {
+			return ExecResult{}, fmt.Errorf("restore artifact ordinal %d missing archive evidence", artifact.Ordinal)
+		}
+		if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "cp", artifact.LocalArchive, restorePod+":"+backupDir+"/"+artifact.ArchiveName); err != nil {
+			return ExecResult{}, err
+		}
+		if strings.TrimSpace(artifact.ManifestName) != "" {
+			if strings.TrimSpace(artifact.LocalManifest) == "" {
+				return ExecResult{}, fmt.Errorf("restore artifact ordinal %d missing local manifest evidence", artifact.Ordinal)
+			}
+			if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "cp", artifact.LocalManifest, restorePod+":"+backupDir+"/"+artifact.ManifestName); err != nil {
+				return ExecResult{}, err
+			}
+		}
+	}
+	cmd := fmt.Sprintf("find /data/mycel -mindepth 1 -maxdepth 1 -exec rm -rf {} + && test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-local --backup-set %s --ordinal %d --data-dir /data/mycel", shellQuote(backupDir), req.Ordinal)
+	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
 }
 
 func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, sink *artifacts.Sink) error {
@@ -1202,6 +1295,10 @@ func ordinalFromName(name string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func writeTempManifest(clusterName, yaml string) (string, error) {

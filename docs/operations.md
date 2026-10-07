@@ -175,8 +175,9 @@ environment driver. `compose-user-backup-restore` is the full native Compose
 backup/restore suite with fixture creation, archive staging across a fresh reset,
 restored-data checks, and safety assertions. `k3d-system-backup-restore` is the
 native k3d full-system backup/restore suite with cluster backup metadata checks,
-PVC replacement evidence, ordinal archive restore, and restored workload
-verification. `k3d-raft-snapshot-pvc-rejoin` is the native k3d forced-snapshot
+offline `restore-plan` evidence, PVC replacement evidence, per-ordinal
+`restore-local` execution, and restored workload verification.
+`k3d-raft-snapshot-pvc-rejoin` is the native k3d forced-snapshot
 same-raft-ID PVC replacement drill: it forces raft snapshots on active quorum
 nodes, deletes and recreates the highest ordinal PVC, validates graph/data-plane
 recovery, and fails if the rejoined node reports any raft group with a zero

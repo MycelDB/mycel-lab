@@ -20,16 +20,28 @@ import (
 )
 
 type SystemBackupOperationResult struct {
-	Operation    string                 `json:"operation"`
-	BackupSetID  string                 `json:"backupSetId,omitempty"`
-	BackupDir    string                 `json:"backupDir,omitempty"`
-	HostDir      string                 `json:"hostDir,omitempty"`
-	Artifacts    []SystemBackupArtifact `json:"artifacts,omitempty"`
-	OldPVCUIDs   map[string]string      `json:"oldPvcUids,omitempty"`
-	NewPVCUIDs   map[string]string      `json:"newPvcUids,omitempty"`
-	VerifiedPods int                    `json:"verifiedPods,omitempty"`
-	Stdout       string                 `json:"stdout,omitempty"`
-	Stderr       string                 `json:"stderr,omitempty"`
+	Operation      string                      `json:"operation"`
+	BackupSetID    string                      `json:"backupSetId,omitempty"`
+	BackupDir      string                      `json:"backupDir,omitempty"`
+	HostDir        string                      `json:"hostDir,omitempty"`
+	Artifacts      []SystemBackupArtifact      `json:"artifacts,omitempty"`
+	OldPVCUIDs     map[string]string           `json:"oldPvcUids,omitempty"`
+	NewPVCUIDs     map[string]string           `json:"newPvcUids,omitempty"`
+	RestorePlan    string                      `json:"restorePlan,omitempty"`
+	RestoreResults []SystemBackupRestoreResult `json:"restoreResults,omitempty"`
+	VerifiedPods   int                         `json:"verifiedPods,omitempty"`
+	Stdout         string                      `json:"stdout,omitempty"`
+	Stderr         string                      `json:"stderr,omitempty"`
+}
+
+const backupSetManifestName = "backup-set.json"
+
+// SystemBackupRestoreResult captures one restore-local invocation for an ordinal PVC.
+type SystemBackupRestoreResult struct {
+	Ordinal int    `json:"ordinal"`
+	PVCName string `json:"pvcName"`
+	Stdout  string `json:"stdout,omitempty"`
+	Stderr  string `json:"stderr,omitempty"`
 }
 
 type SystemBackupArtifact struct {
@@ -263,7 +275,17 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 	if !ok {
 		return result, fmt.Errorf("driver %q does not support volume replacement", driver.Name())
 	}
+	clusterRestore, ok := driver.(env.ClusterRestoreDriver)
+	if !ok {
+		return result, fmt.Errorf("driver %q does not support cluster restore CLI primitives", driver.Name())
+	}
 	statefulSet := firstNonEmpty(stringTarget(target, "statefulSet"), "myceld")
+	planNode := env.NodeRef{Ordinal: intTarget(target, "planOrdinal", intTarget(target, "ordinal", 0))}
+	if plan, err := executeClusterRestorePlan(ctx, driver, environment, backup, planNode); err != nil {
+		return result, err
+	} else {
+		result.RestorePlan = plan
+	}
 	oldUIDs, err := vr.PVCUIDs(ctx, environment, statefulSet, scenario.Cluster.Nodes)
 	if err != nil {
 		return result, err
@@ -293,9 +315,12 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 	if err := verifyPVCReplacement(oldUIDs, newUIDs); err != nil {
 		return result, err
 	}
+	backupSetPath := filepath.Join(backup.HostDir, backupSetManifestName)
 	for _, artifact := range backup.Artifacts {
 		pvcName := fmt.Sprintf("data-%s-%d", statefulSet, artifact.Ordinal)
-		if err := vr.RestoreArchiveToPVC(ctx, environment, pvcName, artifact.LocalArchive); err != nil {
+		restoreResult, err := clusterRestore.RestoreBackupSetOrdinalToPVC(ctx, environment, env.RestoreBackupSetRequest{PVCName: pvcName, BackupSetPath: backupSetPath, Artifacts: restoreArtifactsForEnv(backup.Artifacts), Ordinal: artifact.Ordinal, Image: scenario.Cluster.Image})
+		result.RestoreResults = append(result.RestoreResults, SystemBackupRestoreResult{Ordinal: artifact.Ordinal, PVCName: pvcName, Stdout: bounded(restoreResult.Stdout, 8192), Stderr: bounded(restoreResult.Stderr, 8192)})
+		if err != nil {
 			return result, err
 		}
 	}
@@ -305,6 +330,37 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 	result.BackupSetID = backup.BackupSetID
 	result.Artifacts = backup.Artifacts
 	return result, nil
+}
+
+func executeClusterRestorePlan(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, backup SystemBackupOperationResult, node env.NodeRef) (string, error) {
+	if backup.BackupDir == "" {
+		return "", fmt.Errorf("backup dir is required for restore planning")
+	}
+	if err := stageClusterBackupForValidation(ctx, driver, environment, backup, node); err != nil {
+		return "", err
+	}
+	cmd := append(offlineCLIBase(), "admin", "backup", "cluster", "restore-plan", "--backup-set", backup.BackupDir)
+	execResult, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: cmd})
+	if err != nil {
+		return bounded(execResult.Stdout, 8192), restoreCLICompatibilityError(err, execResult)
+	}
+	return bounded(execResult.Stdout, 32768), nil
+}
+
+func restoreCLICompatibilityError(err error, execResult env.ExecResult) error {
+	combined := strings.ToLower(execResult.Stdout + "\n" + execResult.Stderr + "\n" + err.Error())
+	if strings.Contains(combined, "unknown flag: --backup-set") || strings.Contains(combined, "unknown command") || strings.Contains(combined, "unknown shorthand flag") {
+		return fmt.Errorf("offline cluster restore CLI is unavailable in the deployed mycel image; rebuild/import an image from mycel develop containing MycelDB/mycel#156, then rerun: %w", err)
+	}
+	return err
+}
+
+func restoreArtifactsForEnv(artifacts []SystemBackupArtifact) []env.RestoreArtifact {
+	out := make([]env.RestoreArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		out = append(out, env.RestoreArtifact{Ordinal: artifact.Ordinal, PodName: artifact.PodName, ArchiveName: artifact.ArchiveName, ManifestName: artifact.ManifestName, LocalArchive: artifact.LocalArchive, LocalManifest: artifact.LocalManifest})
+	}
+	return out
 }
 
 func executeClusterRestoreVerify(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, state map[string]SystemBackupOperationResult, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {
