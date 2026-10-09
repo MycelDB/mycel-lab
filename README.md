@@ -7,6 +7,7 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 
 ## Documents
 
+- [Changelog](CHANGELOG.md)
 - [Structured reliability harness design](docs/design/reliability-harness.md)
 - [Mycel Lab model](docs/design/model.md)
 - [Environment driver abstraction design](docs/design/environment-drivers.md)

@@ -189,7 +189,9 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 			}
 		}
 		if p, ok := principalByActor[sp.ActorID]; ok {
-			_, _ = admin.GrantSpacePrincipal(ctx, createdSpace.SpaceID, p.PrincipalID, "writer")
+			if _, err := admin.SetPrincipalRolesForScope(ctx, p.PrincipalID, "space", createdSpace.SpaceID, "", []string{"space.editor"}, "mycel-lab writer provisioning"); err != nil {
+				return fmt.Errorf("grant writer access for %s on space %s: %w", p.Username, createdSpace.SpaceID, err)
+			}
 		}
 	}
 	for i := range resources.Assignments {
@@ -221,7 +223,9 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 			}
 		}
 		if a.BehaviorType == "gql-read" && a.SpaceID != "" && a.PrincipalID != "" {
-			_, _ = admin.GrantSpacePrincipal(ctx, a.SpaceID, a.PrincipalID, "reader")
+			if _, err := admin.SetPrincipalRolesForScope(ctx, a.PrincipalID, "space", a.SpaceID, "", []string{"space.viewer"}, "mycel-lab reader provisioning"); err != nil {
+				return fmt.Errorf("grant reader access for %s on space %s: %w", a.Username, a.SpaceID, err)
+			}
 		}
 	}
 	for i := range resources.Assignments {
