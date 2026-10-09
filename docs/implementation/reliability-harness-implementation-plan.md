@@ -203,7 +203,7 @@ ActorProfile, Scenario, and Suite. No database yet.
 
 ```sh
 go test ./internal/reliability/spec ./internal/reliability/catalog -count=1
-go run ./cmd/mycel-lab run scenario-file tests/reliability/scenarios/example.yaml --dry-run
+go run ./cmd/mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml --dry-run
 git diff --check
 ```
 
@@ -355,7 +355,7 @@ summary generation.
 
 ```sh
 go test ./internal/reliability/runner ./internal/reliability/artifacts ./internal/reliability/report -count=1
-mycel-lab run scenario-file tests/reliability/scenarios/example.yaml --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml --dry-run
 mycel-lab run suite <suite-name> --dry-run
 git diff --check
 ```
@@ -411,7 +411,7 @@ profile.
 
 ```sh
 go test ./internal/reliability/env ./internal/reliability/deploy -count=1
-mycel-lab run scenario-file tests/reliability/scenarios/one-node-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/one-node-smoke/one-node-smoke.yaml --confirm-destructive
 # Manual when k3d is available:
 kubectl --context <context> -n <namespace> get pods
 git diff --check
@@ -463,7 +463,7 @@ start with a no-op/test actor before graph transactions.
 
 ```sh
 go test ./internal/reliability/actors ./internal/reliability/runner -count=1
-mycel-lab run scenario-file tests/reliability/scenarios/actor-noop.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/actor-noop/actor-noop.yaml --confirm-destructive
 git diff --check
 ```
 
@@ -505,7 +505,7 @@ weighted operation mix, bounded retries, and structured operation logging.
 
 ```sh
 go test ./internal/reliability/actors ./internal/reliability/oracle -count=1
-mycel-lab run scenario-file tests/reliability/scenarios/graph-actor-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/graph-actor-smoke/graph-actor-smoke.yaml --confirm-destructive
 git diff --check
 ```
 
@@ -546,7 +546,7 @@ acknowledged graph transaction counts.
 
 ```sh
 go test ./internal/reliability/oracle ./internal/reliability/actors -count=1
-mycel-lab run scenario-file tests/reliability/scenarios/graph-convergence-smoke.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/graph-convergence-smoke/graph-convergence-smoke.yaml --confirm-destructive
 git diff --check
 ```
 
@@ -582,8 +582,8 @@ expected-degradation phases.
 
 ```sh
 go test ./internal/reliability/events ./internal/reliability/runner -count=1
-mycel-lab run scenario-file tests/reliability/scenarios/three-node-short-outage.yaml --confirm-destructive
-mycel-lab run scenario-file tests/reliability/scenarios/five-node-long-outage.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/three-node-short-outage/three-node-short-outage.yaml --confirm-destructive
+mycel-lab run scenario-file tests/reliability/scenarios/five-node-long-outage/five-node-long-outage.yaml --confirm-destructive
 git diff --check
 ```
 

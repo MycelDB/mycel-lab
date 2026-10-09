@@ -1,0 +1,80 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-cluster-soak
+  description: Compose cluster repeated write/read validation with restarts.
+seed: 22222
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+    projectNamePrefix: mycel-lab
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - rolling-restart
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 3
+    rate:
+      mode: group-total
+      commitsPerSecond: 9
+  - name: readers
+    profileRef: gql-reader
+    count: 3
+    target:
+      actorGroups:
+        - graph-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 6
+phases:
+  - name: iteration-1
+    duration: 3s
+  - name: restart-1
+    duration: 1s
+    events:
+      - type: rolling-restart
+        target:
+          scope: cluster
+    outcome:
+      availability: expected-degradation
+  - name: iteration-2
+    duration: 3s
+  - name: restart-2
+    duration: 1s
+    events:
+      - type: rolling-restart
+        target:
+          scope: cluster
+    outcome:
+      availability: expected-degradation
+  - name: iteration-3
+    duration: 3s
+    assertions:
+      requireConvergedCounts: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

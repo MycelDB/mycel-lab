@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-raft-restart-soak
+  description: Native one-hour raft restart/write soak with rotating single-node restarts.
+scenarios:
+  - path: ../scenarios/k3d-raft-restart-soak/k3d-raft-restart-soak.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

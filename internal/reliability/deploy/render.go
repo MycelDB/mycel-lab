@@ -39,6 +39,9 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_PARTITION_COUNT: %q\n", fmt.Sprint(cluster.Raft.PartitionCount))
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: %q\n", fmt.Sprint(cluster.Raft.ReplicaFactor))
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_NODE_ADDRS: %q\n", strings.Join(raftNodeAddrs, ","))
+	for _, key := range sortedResourceKeys(cluster.Env) {
+		fmt.Fprintf(&b, "  %s: %q\n", key, cluster.Env[key])
+	}
 	fmt.Fprintf(&b, "---\napiVersion: v1\nkind: Service\nmetadata:\n  name: myceld\n  namespace: %s\nspec:\n  clusterIP: None\n  selector:\n    app: myceld\n  ports:\n    - name: grpc\n      port: 9091\n      targetPort: 9091\n    - name: raft\n      port: 7000\n      targetPort: 7000\n---\n", namespace)
 	fmt.Fprintf(&b, "apiVersion: v1\nkind: Service\nmetadata:\n  name: myceld-client\n  namespace: %s\nspec:\n  selector:\n    app: myceld\n  ports:\n    - name: grpc\n      port: 9091\n      targetPort: 9091\n---\n", namespace)
 	for i := 0; i < cluster.Nodes; i++ {
@@ -61,7 +64,7 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 			}
 		}
 	}
-	fmt.Fprintf(&b, "          volumeMounts:\n            - name: data\n              mountPath: /var/lib/myceld\n  volumeClaimTemplates:\n    - metadata:\n        name: data\n      spec:\n        accessModes: [\"ReadWriteOnce\"]\n")
+	fmt.Fprintf(&b, "          volumeMounts:\n            - name: data\n              mountPath: /data/mycel\n  volumeClaimTemplates:\n    - metadata:\n        name: data\n      spec:\n        accessModes: [\"ReadWriteOnce\"]\n")
 	if cluster.Storage.ClassName != "" {
 		fmt.Fprintf(&b, "        storageClassName: %s\n", cluster.Storage.ClassName)
 	}

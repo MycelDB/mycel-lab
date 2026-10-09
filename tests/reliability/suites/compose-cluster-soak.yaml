@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-cluster-soak
+  description: Compose-backed repeated cluster validation with restarts.
+scenarios:
+  - path: ../scenarios/compose-cluster-soak/compose-cluster-soak.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

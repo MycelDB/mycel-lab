@@ -1,0 +1,65 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-raft-disruption-all-nodes
+  description: k3d raft workload with every node restarted sequentially.
+seed: 20202
+environment:
+  driver: k3d
+  namespace: mycel-lab
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - node-restart
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 2
+    rate:
+      mode: group-total
+      commitsPerSecond: 20
+phases:
+  - name: warmup
+    duration: 2s
+  - name: restart-node-0
+    duration: 1s
+    events:
+      - type: node-restart
+        target:
+          ordinal: 0
+    outcome:
+      availability: expected-degradation
+  - name: restart-node-1
+    duration: 1s
+    events:
+      - type: node-restart
+        target:
+          ordinal: 1
+    outcome:
+      availability: expected-degradation
+  - name: restart-node-2
+    duration: 1s
+    events:
+      - type: node-restart
+        target:
+          ordinal: 2
+    outcome:
+      availability: expected-degradation
+  - name: recovery
+    duration: 2s
+    assertions:
+      requireConvergedCounts: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: true

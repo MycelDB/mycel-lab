@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-cluster-validation
+  description: Compose-backed cluster identity, graph data-plane, and rolling restart validation.
+scenarios:
+  - path: ../scenarios/compose-cluster-validation/compose-cluster-validation.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

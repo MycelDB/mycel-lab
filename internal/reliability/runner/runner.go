@@ -74,6 +74,7 @@ type Options struct {
 	KeepEnvironmentOnFailure bool
 	ConsoleEndpoints         bool
 	ConsolePortBase          int
+	EnvironmentOverride      *spec.EnvironmentSpec
 	ProgressWriter           io.Writer
 	EnvironmentDriver        env.EnvironmentDriver
 	EventRuntime             events.Runtime
@@ -124,6 +125,21 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	for _, phase := range scenario.Phases {
 		result.Phases = append(result.Phases, PhaseState{Name: phase.Name, Status: PhasePending, Duration: phase.Duration.Duration})
 	}
+	if opts.EnvironmentOverride != nil {
+		scenario.Environment = mergeEnvironmentOverride(scenario.Environment, *opts.EnvironmentOverride)
+	}
+	driver := opts.EnvironmentDriver
+	effectiveEnvironment := scenario.Environment
+	if driver == nil {
+		var selectErr error
+		driver, effectiveEnvironment, selectErr = env.SelectDriver(scenario.Environment, env.DriverSelectionOptions{DryRun: opts.DryRun, ConfirmDestructive: opts.ConfirmDestructive})
+		if selectErr != nil {
+			return finalize(ctx, opts.Store, sink, result, RunFailed, selectErr)
+		}
+	} else if opts.DryRun {
+		effectiveEnvironment.Driver = "dry-run"
+	}
+	scenario.Environment = effectiveEnvironment
 	if err := writeInitialArtifacts(sink, scenario); err != nil {
 		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 	}
@@ -138,20 +154,19 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 		}
 	}
-	driver := opts.EnvironmentDriver
-	if driver == nil {
-		driver = defaultEnvironmentDriver(scenario, opts)
-	}
 	if !opts.DryRun {
 		if err := env.RequireDestructiveConfirmation(env.Options{ConfirmDestructive: opts.ConfirmDestructive}); err != nil {
 			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 		}
 	}
-	if err := driver.Preflight(ctx); err != nil {
+	if err := driver.Preflight(ctx, effectiveEnvironment); err != nil {
 		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 	}
-	environment, err := driver.Create(ctx, scenario)
+	environment, err := driver.Create(ctx, scenario, effectiveEnvironment)
 	if err != nil {
+		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+	}
+	if err := driver.WaitReady(ctx, environment); err != nil {
 		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 	}
 	cleanupEnvironment := true
@@ -163,12 +178,27 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}()
 	failAfterEnvironmentCreate := func(status RunStatus, err error) (Result, error) {
 		runFailedAfterEnvironmentCreate = true
+		captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_ = driver.CaptureState(captureCtx, environment, sink)
+		cancel()
+		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "error": err.Error()}))
 		return finalize(ctx, opts.Store, sink, result, status, err)
+	}
+	nodes, err := driver.Nodes(ctx, environment)
+	if err != nil {
+		return failAfterEnvironmentCreate(RunFailed, err)
+	}
+	driverEndpoints, err := driver.Endpoints(ctx, environment)
+	if err != nil {
+		return failAfterEnvironmentCreate(RunFailed, err)
+	}
+	if err := env.WriteEnvironmentArtifacts(sink, environment, driver, nodes, driverEndpoints); err != nil {
+		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	if err := driver.CaptureState(ctx, environment, sink); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
-	endpoints := env.ConsoleEndpointsForNodeCount(scenario.Cluster.Nodes, opts.ConsolePortBase)
+	endpoints := consoleEndpointsFromDriver(driverEndpoints)
 	endpointAddrs := endpointAddresses(endpoints)
 	resources, err := provision.PlanScenario(scenario, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: opts.DryRun})
 	if err != nil {
@@ -178,22 +208,24 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	needsActorEndpoints := len(resources.Assignments) > 0
-	realKubernetesEnvironment := environment.Driver == "k3d" || environment.Driver == "kubernetes"
-	if (opts.ConsoleEndpoints || needsActorEndpoints) && !opts.DryRun && realKubernetesEnvironment {
+	portForwardEnvironment := environment.Driver == "k3d"
+	if (opts.ConsoleEndpoints || needsActorEndpoints) && !opts.DryRun {
 		if _, err := sink.WriteJSON("environment/console-endpoints.json", endpoints); err != nil {
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
-		session, err := env.StartConsolePortForwards(ctx, environment, endpoints)
-		if err != nil {
-			return failAfterEnvironmentCreate(RunFailed, err)
+		if portForwardEnvironment {
+			session, err := env.StartConsolePortForwards(ctx, environment, endpoints)
+			if err != nil {
+				return failAfterEnvironmentCreate(RunFailed, err)
+			}
+			defer session.Stop(context.Background())
 		}
-		defer session.Stop(context.Background())
 		if opts.ConsoleEndpoints {
 			writeConsoleEndpoints(opts.ProgressWriter, endpoints)
 		}
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("console-endpoints-ready", "", "", map[string]any{"endpoints": endpoints}))
 	}
-	provisionDryRun := opts.DryRun || !realKubernetesEnvironment
+	provisionDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
 	if err := provision.ProvisionScenario(ctx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun}); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
@@ -206,7 +238,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	recorder := &runRecorder{store: opts.Store, sink: sink, runID: runID}
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
-		eventRuntime = defaultEventRuntime(opts, environment)
+		eventRuntime = defaultEventRuntime(opts, driver, environment, scenario, &resources)
 	}
 	assignmentMap := provision.AssignmentMap(resources)
 	if provisionDryRun {
@@ -268,6 +300,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	schedulerStopped = true
+	if err := runFinalClusterAssertions(ctx, sink, scenario, driver, environment, nodes, !provisionDryRun); err != nil {
+		return failAfterEnvironmentCreate(RunFailed, err)
+	}
 	if err := writeFinalOracleReport(ctx, sink, recorder, resources, !provisionDryRun); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
@@ -279,12 +314,56 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	return finalize(ctx, opts.Store, sink, result, RunPassed, nil)
 }
 
+func mergeEnvironmentOverride(base spec.EnvironmentSpec, override spec.EnvironmentSpec) spec.EnvironmentSpec {
+	out := base
+	if override.Driver != "" {
+		out.Driver = override.Driver
+	}
+	if override.Namespace != "" {
+		out.Namespace = override.Namespace
+	}
+	if override.KeepOnFailure {
+		out.KeepOnFailure = true
+	}
+	if len(override.Options) > 0 {
+		if out.Options == nil {
+			out.Options = map[string]any{}
+		}
+		for key, value := range override.Options {
+			out.Options[key] = value
+		}
+	}
+	if len(override.Capabilities.Required) > 0 {
+		out.Capabilities.Required = append([]string(nil), override.Capabilities.Required...)
+	}
+	return out
+}
+
+func consoleEndpointsFromDriver(endpoints []env.Endpoint) []env.ConsoleEndpoint {
+	out := make([]env.ConsoleEndpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		out = append(out, env.ConsoleEndpoint{NodeName: endpoint.NodeName, ServiceName: endpoint.ServiceName, LocalAddress: firstNonEmpty(endpoint.LocalAddress, "127.0.0.1"), LocalPort: endpoint.LocalPort, RemotePort: endpoint.RemotePort, DaemonAddr: endpoint.DaemonAddr})
+	}
+	return out
+}
+
 func endpointAddresses(endpoints []env.ConsoleEndpoint) []string {
 	out := make([]string, 0, len(endpoints))
 	for _, endpoint := range endpoints {
-		out = append(out, endpoint.DaemonAddr)
+		if endpoint.DaemonAddr != "" {
+			out = append(out, endpoint.DaemonAddr)
+		}
 	}
 	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func writeConsoleEndpoints(w io.Writer, endpoints []env.ConsoleEndpoint) {
@@ -297,26 +376,11 @@ func writeConsoleEndpoints(w io.Writer, endpoints []env.ConsoleEndpoint) {
 	}
 }
 
-func defaultEnvironmentDriver(scenario spec.ResolvedScenario, opts Options) env.EnvironmentDriver {
-	if opts.DryRun {
-		return env.DryRunDriver{}
-	}
-	switch scenario.Environment.Driver {
-	case "", "k3d", "kubernetes":
-		return env.K3DDriver{Confirmed: opts.ConfirmDestructive}
-	default:
-		return env.DryRunDriver{}
-	}
-}
-
-func defaultEventRuntime(opts Options, environment env.Environment) events.Runtime {
+func defaultEventRuntime(opts Options, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, resources *provision.ScenarioResources) events.Runtime {
 	if opts.DryRun {
 		return events.LocalRuntime{}
 	}
-	if environment.Driver == "k3d" || environment.Driver == "kubernetes" {
-		return events.NewKubernetesRuntime(environment.Context, environment.Namespace, nil)
-	}
-	return events.LocalRuntime{}
+	return events.NewDriverRuntimeWithScenario(driver, environment, scenario, resources)
 }
 
 func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, error) {

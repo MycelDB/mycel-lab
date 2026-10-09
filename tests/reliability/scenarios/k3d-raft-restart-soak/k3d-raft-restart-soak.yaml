@@ -1,0 +1,60 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-raft-restart-soak
+  description: Native one-hour k3d raft restart/write soak with rotating single-node restarts.
+seed: 25252
+environment:
+  driver: k3d
+  namespace: mycel-lab
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - node-restart
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 4
+    rate:
+      mode: group-total
+      commitsPerSecond: 2
+  - name: readers
+    profileRef: gql-reader
+    count: 2
+    target:
+      actorGroups:
+        - graph-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 2
+phases:
+  - name: warmup
+    duration: 1m
+  - name: rotating-restarts
+    duration: 1s
+    events:
+      - type: node-restart
+        target:
+          ordinalSequence: [0, 1, 2]
+        repeat: 20
+        interval: 3m
+    outcome:
+      availability: expected-degradation
+  - name: recovery
+    duration: 2m
+    assertions:
+      requireConvergedCounts: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: true

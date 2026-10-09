@@ -15,7 +15,9 @@ availability, and reliability trends over time.
 The harness is scenario-driven. A scenario creates exactly one MycelDB cluster,
 starts one or more simulated actor groups through the public SDK/gRPC API,
 executes deterministic phase-based events such as pod outages or restarts, and
-records structured events, metrics, artifacts, and assertion results.
+records structured events, metrics, artifacts, and assertion results. See
+[Mycel Lab model](model.md) for the full concept glossary covering scenarios,
+suites, cluster profiles, actor profiles, phases, events, runs, and artifacts.
 
 YAML is the portable authoring and import/export format. Postgres is the
 operational source of truth for definitions, runs, events, metrics, trends, and
@@ -481,9 +483,9 @@ metadata:
   description: Baseline raft reliability scenarios.
 
 scenarios:
-  - path: ../scenarios/one-node-smoke.yaml
-  - path: ../scenarios/three-node-short-outage.yaml
-  - path: ../scenarios/five-node-long-outage.yaml
+  - path: ../scenarios/one-node-smoke/one-node-smoke.yaml
+  - path: ../scenarios/three-node-short-outage/three-node-short-outage.yaml
+  - path: ../scenarios/five-node-long-outage/five-node-long-outage.yaml
 
 execution:
   mode: sequential
@@ -529,15 +531,34 @@ conditions.
 
 ## Event model
 
-Initial event types:
+Supported event types include:
 
 ```yaml
 type: pod-stop
 type: pod-restart
+type: node-stop
+type: node-restart
 type: rolling-restart
+type: environment-reset
+type: user-backup-fixture
+type: user-backup-export
+type: user-backup-validate
+type: user-backup-import
+type: user-backup-verify-restored
+type: user-backup-assert-safety
+type: system-backup-fixture
+type: cluster-backup-create
+type: cluster-backup-validate
+type: cluster-restore-apply
+type: cluster-restore-verify
 ```
 
-Initial targeting is deterministic pod-name targeting:
+`cluster-backup-create` uses the daemon async cluster backup API through
+`mycel admin backup cluster start --wait`. Targets may set `backupDir`,
+`hostDir`, `archiveFormat`, `reason`, `convergenceTimeout`, `waitTimeout`, and
+`idempotencyKey`.
+
+Pod and node events use deterministic pod/name/ordinal targeting:
 
 ```yaml
 target:
@@ -867,7 +888,7 @@ mycel-lab import tests/reliability/
 mycel-lab import --dry-run tests/reliability/
 
 mycel-lab run scenario raft-5-node-long-outage --version latest
-mycel-lab run scenario-file tests/reliability/scenarios/raft-5-node-long-outage.yaml
+mycel-lab run scenario-file tests/reliability/scenarios/raft-5-node-long-outage/raft-5-node-long-outage.yaml
 mycel-lab run suite raft-reliability-baseline --version latest
 
 mycel-lab export scenario raft-5-node-long-outage --version 3 > scenario.yaml
@@ -892,7 +913,7 @@ internal/reliability/
   migrations/    # DB schema migrations
   catalog/       # import/export/versioning/profile resolution
   runner/        # scenario/suite execution
-  env/           # k3d/k8s drivers
+  env/           # dry-run, k3d, compose, and future environment drivers
   deploy/        # manifests and cluster deployment
   actors/        # actor profiles and runtime actor instances
   events/        # pod-stop, pod-restart, rolling-restart
@@ -922,10 +943,12 @@ internal/reliability/
 
 ### Phase 3: cluster environment and deployment
 
-- Implement k3d/k8s environment driver.
-- Render/deploy MycelDB StatefulSet for arbitrary initial node count.
+See [Environment driver abstraction](environment-drivers.md) for the current driver model.
+
+- Implement dry-run, k3d, and Compose environment drivers behind one runner abstraction.
+- Render/deploy MycelDB StatefulSet for k3d and Compose-equivalent resources for Compose.
 - Support raft settings from cluster profile.
-- Collect pod logs and Kubernetes state snapshots.
+- Collect backend-specific logs and environment state snapshots.
 
 ### Phase 4: graph actor and oracle
 

@@ -80,7 +80,7 @@ kind: Suite
 metadata:
   name: baseline
 scenarios:
-  - path: ../scenarios/example.yaml
+  - path: ../scenarios/example/example.yaml
 execution:
   stopOnFailure: true
 `))
@@ -132,5 +132,75 @@ behavior:
 `))
 	if err == nil || !strings.Contains(err.Error(), "behavior.type") {
 		t.Fatalf("Load() error = %v, want behavior.type", err)
+	}
+}
+
+func TestScenarioEnvironmentOptionsAndCapabilities(t *testing.T) {
+	loaded, err := Load([]byte(`
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-example
+seed: 99
+environment:
+  driver: compose
+  namespace: lab
+  options:
+    composeFile: ../mycel/tests/compose/cluster/compose.yml
+    serviceNames:
+      - myceld-a
+      - myceld-b
+  capabilities:
+    required:
+      - per-node-endpoints
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: writers
+    profileRef: graph-committer
+    count: 2
+    rate:
+      commitsPerSecond: 5
+phases:
+  - name: warmup
+    duration: 1m
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	scenario := loaded.(Scenario)
+	if scenario.Environment.Driver != "compose" || scenario.Environment.Namespace != "lab" {
+		t.Fatalf("environment=%+v", scenario.Environment)
+	}
+	if got := scenario.Environment.Options["composeFile"]; got != "../mycel/tests/compose/cluster/compose.yml" {
+		t.Fatalf("composeFile option=%v", got)
+	}
+	if len(scenario.Environment.Capabilities.Required) != 2 || scenario.Environment.Capabilities.Required[1] != "logs" {
+		t.Fatalf("capabilities=%+v", scenario.Environment.Capabilities.Required)
+	}
+}
+
+func TestScenarioRejectsGenericKubernetesDriver(t *testing.T) {
+	_, err := Load([]byte(`
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: bad-driver
+seed: 1
+environment:
+  driver: kubernetes
+clusterRef: raft-3-node
+actorGroups:
+  - name: writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      commitsPerSecond: 1
+phases:
+  - name: warmup
+    duration: 1m
+`))
+	if err == nil || !strings.Contains(err.Error(), "environment.driver") || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("Load() error=%v, want unsupported environment.driver", err)
 	}
 }

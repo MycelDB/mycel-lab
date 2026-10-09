@@ -1,0 +1,12 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-raft-disruption
+  description: k3d raft disruption validation with restart smoke, all-node restart, and edge workload scenarios.
+scenarios:
+  - path: ../scenarios/k3d-raft-disruption-smoke/k3d-raft-disruption-smoke.yaml
+  - path: ../scenarios/k3d-raft-disruption-all-nodes/k3d-raft-disruption-all-nodes.yaml
+  - path: ../scenarios/k3d-raft-disruption-edges/k3d-raft-disruption-edges.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

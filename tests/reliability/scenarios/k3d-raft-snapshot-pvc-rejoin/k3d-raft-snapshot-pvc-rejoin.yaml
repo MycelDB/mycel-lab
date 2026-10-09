@@ -1,0 +1,87 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-raft-snapshot-pvc-rejoin
+  description: Native k3d forced raft snapshot catch-up after same-raft-ID PVC replacement.
+seed: 30303
+environment:
+  driver: k3d
+  namespace: mycel-raft-snapshot-pvc-rejoin
+  options:
+    clusterNamePrefix: mlab-rspr
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
+    consolePortBase: 19291
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - logs
+      - volume-replacement
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 8
+  env:
+    MYCELD_CLUSTER_RAFT_EMPTY_STORAGE_REJOIN_RECOVERY: "true"
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 8
+  - name: readers
+    profileRef: gql-reader
+    count: 1
+    target:
+      actorGroups:
+        - graph-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 4
+phases:
+  - name: bootstrap-and-write
+    duration: 5s
+  - name: replace-last-pvc
+    duration: 1s
+    events:
+      - type: raft-pvc-replace-node
+        target:
+          statefulSet: myceld
+          ordinal: 2
+          snapshotOrdinals:
+            - 0
+            - 1
+          compact: true
+    outcome:
+      availability: expected-degradation
+  - name: post-rejoin-validation
+    duration: 5s
+    assertions:
+      requireConvergedCounts: true
+  - name: verify-rejoined-snapshot-indexes
+    duration: 1s
+    events:
+      - type: raft-snapshot-verify-rejoined
+        target:
+          ordinal: 2
+          verifyTimeout: 5m
+          verifyInterval: 5s
+          execTimeout: 60s
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 10m
+    healthConvergenceInterval: 5s
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: true

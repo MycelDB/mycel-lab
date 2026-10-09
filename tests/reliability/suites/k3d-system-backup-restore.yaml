@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-system-backup-restore
+  description: Native k3d full-system backup, offline restore-plan, per-ordinal restore-local, PVC replacement, and workload verification.
+scenarios:
+  - path: ../scenarios/k3d-system-backup-restore/k3d-system-backup-restore.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

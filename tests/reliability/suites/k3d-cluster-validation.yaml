@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-cluster-validation
+  description: k3d-backed cluster identity, graph data-plane, and rolling restart validation.
+scenarios:
+  - path: ../scenarios/k3d-cluster-validation/k3d-cluster-validation.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

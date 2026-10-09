@@ -1,8 +1,12 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
@@ -75,11 +79,53 @@ func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec,
 
 func validateEvent(event spec.EventSpec) error {
 	switch event.Type {
-	case "pod-stop", "pod-restart":
+	case "pod-stop", "pod-restart", "pod-delete":
 		if PodName(event.Target) == "" {
 			return fmt.Errorf("%s requires target.pod", event.Type)
 		}
-	case "rolling-restart":
+	case "node-stop", "node-restart":
+		if PodName(event.Target) == "" && nodeTargetName(event.Target) == "" && nodeTargetOrdinal(event.Target) < 0 && len(nodeTargetOrdinalSequence(event.Target)) == 0 {
+			return fmt.Errorf("%s requires target.node, target.service, target.pod, target.ordinal, or target.ordinalSequence", event.Type)
+		}
+	case "rolling-restart", "environment-reset":
+		return nil
+	case "host-command":
+		if len(hostCommandTarget(event.Target)) == 0 {
+			return fmt.Errorf("%s requires target.command", event.Type)
+		}
+	case "user-backup-fixture":
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
+			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
+		}
+	case "user-backup-export":
+		if stringTarget(event.Target, "file") == "" {
+			return fmt.Errorf("%s requires target.file", event.Type)
+		}
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" && stringTarget(event.Target, "username") == "" && stringTarget(event.Target, "sourceUsername") == "" {
+			return fmt.Errorf("%s requires target.actorId, target.sourceActorId, target.username, or target.sourceUsername", event.Type)
+		}
+	case "user-backup-validate", "user-backup-assert-safety":
+		if stringTarget(event.Target, "file") == "" {
+			return fmt.Errorf("%s requires target.file", event.Type)
+		}
+	case "user-backup-import":
+		if stringTarget(event.Target, "file") == "" {
+			return fmt.Errorf("%s requires target.file", event.Type)
+		}
+		if stringTarget(event.Target, "targetUsername") == "" && stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" && stringTarget(event.Target, "username") == "" && stringTarget(event.Target, "sourceUsername") == "" {
+			return fmt.Errorf("%s requires target.targetUsername or a source user target", event.Type)
+		}
+	case "user-backup-verify-restored":
+		if stringTarget(event.Target, "file") == "" && stringTarget(event.Target, "backup") == "" && stringTarget(event.Target, "name") == "" {
+			return fmt.Errorf("%s requires target.file, target.backup, or target.name", event.Type)
+		}
+	case "system-backup-fixture", "cluster-restore-verify":
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
+			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
+		}
+	case "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply":
+		return nil
+	case "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined":
 		return nil
 	default:
 		return fmt.Errorf("unsupported event type %q", event.Type)
@@ -90,6 +136,134 @@ func validateEvent(event spec.EventSpec) error {
 func PodName(target map[string]any) string {
 	pod, _ := target["pod"].(string)
 	return pod
+}
+
+func nodeTargetName(target map[string]any) string {
+	if node, _ := target["node"].(string); node != "" {
+		return node
+	}
+	service, _ := target["service"].(string)
+	return service
+}
+
+func nodeTargetOrdinal(target map[string]any) int {
+	for _, key := range []string{"ordinal", "nodeOrdinal"} {
+		switch v := target[key].(type) {
+		case int:
+			return v
+		case int64:
+			return int(v)
+		case float64:
+			return int(v)
+		}
+	}
+	return -1
+}
+
+func nodeTargetOrdinalSequence(target map[string]any) []int {
+	if target == nil {
+		return nil
+	}
+	value, ok := target["ordinalSequence"]
+	if !ok {
+		value = target["ordinals"]
+	}
+	switch v := value.(type) {
+	case []int:
+		return append([]int(nil), v...)
+	case []any:
+		out := make([]int, 0, len(v))
+		for _, item := range v {
+			switch n := item.(type) {
+			case int:
+				out = append(out, n)
+			case int64:
+				out = append(out, int(n))
+			case float64:
+				out = append(out, int(n))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func hostCommandTarget(target map[string]any) []string {
+	if target == nil {
+		return nil
+	}
+	switch value := target["command"].(type) {
+	case []string:
+		return append([]string(nil), value...)
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			part := strings.TrimSpace(fmt.Sprint(item))
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+		return out
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		return []string{value}
+	default:
+		return nil
+	}
+}
+
+type HostCommandResult struct {
+	Command          string `json:"command"`
+	WorkingDirectory string `json:"workingDirectory,omitempty"`
+	Stdout           string `json:"stdout,omitempty"`
+	Stderr           string `json:"stderr,omitempty"`
+	Truncated        bool   `json:"truncated,omitempty"`
+}
+
+func ExecuteHostCommand(ctx context.Context, target map[string]any) (HostCommandResult, error) {
+	command := hostCommandTarget(target)
+	if len(command) == 0 {
+		return HostCommandResult{}, fmt.Errorf("host-command requires target.command")
+	}
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	if cwd, _ := target["workingDirectory"].(string); strings.TrimSpace(cwd) != "" {
+		cmd.Dir = cwd
+	}
+	if envMap, ok := target["env"].(map[string]any); ok && len(envMap) > 0 {
+		env := os.Environ()
+		for key, value := range envMap {
+			if strings.TrimSpace(key) != "" {
+				env = append(env, key+"="+fmt.Sprint(value))
+			}
+		}
+		cmd.Env = env
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	result := HostCommandResult{Command: strings.Join(command, " "), WorkingDirectory: cmd.Dir}
+	err := cmd.Run()
+	result.Stdout, result.Stderr, result.Truncated = boundedOutput(stdout.String(), stderr.String(), 8192)
+	if err != nil {
+		return result, fmt.Errorf("host-command %s: %w", result.Command, err)
+	}
+	return result, nil
+}
+
+func boundedOutput(stdout, stderr string, limit int) (string, string, bool) {
+	truncated := false
+	if len(stdout) > limit {
+		stdout = stdout[len(stdout)-limit:]
+		truncated = true
+	}
+	if len(stderr) > limit {
+		stderr = stderr[len(stderr)-limit:]
+		truncated = true
+	}
+	return stdout, stderr, truncated
 }
 
 func IsExpectedDegradation(phase spec.PhaseSpec) bool {

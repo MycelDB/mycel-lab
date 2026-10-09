@@ -4,7 +4,7 @@ metadata:
   name: raft-baseline
   description: Baseline raft reliability scenarios.
 scenarios:
-  - path: ../scenarios/raft-3-node-short-outage.yaml
+  - path: ../scenarios/raft-3-node-short-outage/raft-3-node-short-outage.yaml
 execution:
   mode: sequential
   stopOnFailure: true

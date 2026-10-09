@@ -1,0 +1,82 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-system-backup-restore
+  description: Native k3d full-system backup, PVC replacement, ordinal restore, and restored workload verification.
+seed: 29292
+environment:
+  driver: k3d
+  namespace: mycel-system-backup-restore
+  options:
+    clusterNamePrefix: mlab-sbr
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
+    consolePortBase: 19191
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - logs
+      - volume-replacement
+clusterRef: raft-3-node
+actorGroups:
+  - name: system-backup-writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 0.0001
+phases:
+  - name: create-workload-fixture
+    duration: 1s
+    events:
+      - type: system-backup-fixture
+        target:
+          actorId: system-backup-writers-0
+          label: nt3-system-backup-fixture
+          blobPayload: mycel-lab nt3 system backup restore blob payload
+          ordinal: 0
+  - name: capture-and-validate-backup
+    duration: 1s
+    events:
+      - type: cluster-backup-create
+        target:
+          backupDir: /tmp/mycel-system-backups
+          hostDir: /tmp/{runID}-system-backup
+          archiveFormat: tar
+          reason: native mycel-lab k3d system backup restore test
+          convergenceTimeout: 10m
+          waitTimeout: 15m
+      - type: cluster-backup-validate
+        target:
+          backupDir: /tmp/mycel-system-backups
+          ordinal: 0
+  - name: restore-into-fresh-pvcs
+    duration: 1s
+    events:
+      - type: cluster-restore-apply
+        target:
+          backup: default
+          statefulSet: myceld
+  - name: verify-restored-cluster
+    duration: 1s
+    events:
+      - type: cluster-restore-verify
+        target:
+          actorId: system-backup-writers-0
+          verifyTimeout: 5m
+          verifyInterval: 5s
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 10m
+    healthConvergenceInterval: 5s
+    requireSharedClusterIdentity: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

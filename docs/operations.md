@@ -50,7 +50,14 @@ Definition lifecycle rules:
 Run a scenario by file path:
 
 ```sh
-mycel-lab run scenario-file tests/reliability/scenarios/one-node-graph-smoke.yaml --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/one-node-graph-smoke/one-node-graph-smoke.yaml --dry-run
+```
+
+Scenarios live in same-named directories with a YAML spec and Markdown guide:
+
+```text
+tests/reliability/scenarios/<name>/<name>.yaml
+tests/reliability/scenarios/<name>/<name>.md
 ```
 
 Run a baseline scenario by name from `tests/reliability/scenarios/`:
@@ -59,19 +66,36 @@ Run a baseline scenario by name from `tests/reliability/scenarios/`:
 mycel-lab run scenario one-node-graph-smoke --confirm-destructive
 ```
 
+Mycel Lab supports three initial environment drivers:
+
+- `dry-run` — validate planning, rendering, phases, actors, and artifacts without external mutation;
+- `k3d` — create a disposable local k3d/Kubernetes cluster;
+- `compose` — create/reset a local Docker Compose project.
+
+A run request can override the scenario default without editing YAML:
+
+```sh
+mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke/compose-smoke.yaml \
+  --dry-run \
+  --environment-driver compose \
+  --environment-option composeFiles=../mycel/tests/compose/cluster/compose.yml,tests/compose/ports.yml
+```
+
 Non-dry-run execution for `environment.driver: k3d` creates a disposable k3d
 cluster, applies the rendered MycelDB Kubernetes manifests, waits for the
-StatefulSet pods to become ready, runs phase events through `kubectl`, captures
-Kubernetes state/log artifacts, and deletes the cluster during cleanup. The
-rendered daemons run in `MYCELD_MODE=mesh` with recognized raft node addresses
-and per-pod raft local node IDs derived from StatefulSet ordinals.
+StatefulSet pods to become ready, runs phase events through the environment
+driver, captures Kubernetes state/log artifacts, and deletes the cluster during
+cleanup. The rendered daemons run in `MYCELD_MODE=mesh` with recognized raft
+node addresses and per-pod raft local node IDs derived from StatefulSet
+ordinals.
 
-Use `--console-endpoints` to expose every StatefulSet pod as a stable local
-Mycel Console endpoint for the duration of a run. The lab renders one
+Use `--console-endpoints` to expose every daemon node as a stable local Mycel
+Console endpoint for the duration of a run. For `k3d`, the lab renders one
 Kubernetes service per pod (`myceld-0-client`, `myceld-1-client`, ...), starts
 `kubectl port-forward` processes, prints the connection table, and writes
-`environment/console-endpoints.json` into the run artifacts. The default local
-ports start at `19091`; override the base with `--console-port-base`.
+`environment/console-endpoints.json` into the run artifacts. For `compose`, the
+driver uses the configured/published host ports. The default local ports start
+at `19091`; override the base with `--console-port-base` where supported.
 
 ```sh
 mycel-lab run scenario raft-3-node-short-outage \
@@ -95,12 +119,70 @@ username: admin
 password: admin-password
 ```
 
-Required local tools:
+Required local tools for `k3d`:
 
 ```sh
 k3d version
 kubectl version --client=true
 ```
+
+Required local tool for `compose`:
+
+```sh
+docker compose version
+```
+
+A Compose-backed smoke scenario is available for planning and local destructive
+validation:
+
+```sh
+mycel-lab run scenario compose-smoke --dry-run
+mycel-lab run scenario compose-smoke --confirm-destructive
+```
+
+Migrated system-integration validation suites are available for Compose and
+k3d-backed local clusters:
+
+```sh
+mycel-lab run suite compose-cluster-validation --dry-run
+mycel-lab run suite k3d-cluster-validation --dry-run
+
+mycel-lab run suite compose-cluster-validation --confirm-destructive
+mycel-lab run suite k3d-cluster-validation --confirm-destructive
+```
+
+These suites validate shared cluster identity/health, graph data-plane behavior,
+and rolling restart recovery. Additional migrated suites cover disruption,
+backup/restore, and soak/release-gate entrypoints:
+
+```sh
+mycel-lab run suite k3d-raft-disruption --dry-run
+mycel-lab run suite k3d-raft-sensitive-gate --dry-run
+mycel-lab run suite compose-user-backup-operations --dry-run
+mycel-lab run suite compose-user-backup-restore --dry-run
+mycel-lab run suite k3d-system-backup-restore --dry-run
+mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
+mycel-lab run suite compose-cluster-soak --dry-run
+mycel-lab run suite cluster-release-gate --dry-run
+```
+
+Destructive/operator variants use the same suite names with
+`--confirm-destructive`. Restart-soak suites are native Mycel Lab k3d scenarios
+with repeated rotating `node-restart` events. `compose-user-backup-operations`
+is a native Compose smoke suite for `user-backup-export`,
+`user-backup-validate`, and `user-backup-import` operations through the
+environment driver. `compose-user-backup-restore` is the full native Compose
+backup/restore suite with fixture creation, archive staging across a fresh reset,
+restored-data checks, and safety assertions. `k3d-system-backup-restore` is the
+native k3d full-system backup/restore suite with cluster backup metadata checks,
+offline `restore-plan` evidence, PVC replacement evidence, per-ordinal
+`restore-local` execution, and restored workload verification.
+`k3d-raft-snapshot-pvc-rejoin` is the native k3d forced-snapshot
+same-raft-ID PVC replacement drill: it forces raft snapshots on active quorum
+nodes, deletes and recreates the highest ordinal PVC, validates graph/data-plane
+recovery, and fails if the rejoined node reports any raft group with a zero
+`snapshot_index`. The completed wrapper transition is tracked in the [native
+wrapper transition inventory](implementation/native-wrapper-transition-inventory.md).
 
 ## Running suites
 
@@ -122,7 +204,10 @@ Each run writes a filesystem artifact directory containing:
 - `metrics.jsonl` — metric samples such as commits and latency placeholders;
 - `manifests/myceld.yaml` — rendered Kubernetes manifests;
 - `environment/state.json` — captured environment state;
-- `environment/console-endpoints.json` — per-pod Console endpoints when `--console-endpoints` is enabled;
+- `environment/capabilities.json` — selected driver capabilities;
+- `environment/nodes.json` — logical daemon nodes discovered by the driver;
+- `environment/endpoints.json` — per-node daemon endpoints discovered by the driver;
+- `environment/console-endpoints.json` — per-node Console endpoints when `--console-endpoints` is enabled;
 - `result.json` — terminal run status and phase status;
 - `summary.md` — human-readable summary.
 
@@ -141,13 +226,21 @@ environment after a failed run. Destructive environment operations require
 `--confirm-destructive`; this prevents accidental mutation while preserving a
 safe dry-run mode.
 
-The generated cluster name starts with `mycel-lab-`, and the Kubernetes context
-is `k3d-<cluster-name>`. If a process is interrupted before cleanup, inspect and
-remove clusters manually with:
+For `k3d`, the generated cluster name starts with `mycel-lab-`, and the
+Kubernetes context is `k3d-<cluster-name>`. If a process is interrupted before
+cleanup, inspect and remove clusters manually with:
 
 ```sh
 k3d cluster list
 k3d cluster delete <cluster-name>
+```
+
+For `compose`, the generated Compose project name starts with `mycel-lab-` by
+default. If cleanup is interrupted, inspect and remove the project with:
+
+```sh
+docker compose -p <project-name> ps
+docker compose -p <project-name> down --volumes --remove-orphans
 ```
 
 ## Safety notes
