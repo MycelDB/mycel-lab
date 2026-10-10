@@ -125,7 +125,7 @@ func validateEvent(event spec.EventSpec) error {
 		}
 	case "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply":
 		return nil
-	case "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined":
+	case "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "identity-duplicate-principal-replay":
 		return nil
 	default:
 		return fmt.Errorf("unsupported event type %q", event.Type)
