@@ -112,6 +112,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined":
 		result, err := executeRaftRejoinEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Type, event.Target)
 		return map[string]any{"raftSnapshot": result}, err
+	case "identity-duplicate-principal-replay":
+		result, err := executeIdentityReplayEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Target)
+		return map[string]any{"identityReplay": result}, err
 	default:
 		return nil, fmt.Errorf("unsupported event type %q", event.Type)
 	}

@@ -6,6 +6,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [v0.19.1] - 2026-10-10
+
+### Added
+
+- Added `k3d-identity-raft-replay-recovery`, a focused k3d regression suite for identity Raft snapshot replay recovery after a duplicate-principal application-error tail entry (#36).
+
+### Changed
+
+- K3d runs now start daemon endpoint port-forwards whenever provisioning needs daemon endpoints, allowing system-event/noop scenarios to provision admin resources without requiring `--console-endpoints` (#36).
+
+### Compatibility
+
+- Best used with Mycel daemon `v0.19.2` or later for the identity Raft replay recovery fix validated by this regression suite.
+
 ## [v0.19.0] - 2026-10-09
 
 ### Added
