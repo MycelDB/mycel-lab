@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-identity-raft-replay-recovery
+  description: Regression suite for identity principal duplicate application-error raft replay across snapshot restore.
+scenarios:
+  - path: ../scenarios/k3d-identity-raft-replay-recovery/k3d-identity-raft-replay-recovery.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

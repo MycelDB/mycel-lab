@@ -1,0 +1,58 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-identity-raft-replay-recovery
+  description: Reproduces identity principal duplicate application-error tail replay across raft snapshot restore and node restart.
+seed: 40404
+environment:
+  driver: k3d
+  namespace: mycel-identity-raft-replay
+  options:
+    clusterNamePrefix: mlab-irr
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
+    consolePortBase: 19491
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - node-restart
+      - logs
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 4
+actorGroups:
+  - name: idle
+    profileRef: noop
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 1
+phases:
+  - name: bootstrap
+    duration: 2s
+  - name: duplicate-principal-tail-and-restart
+    duration: 1s
+    events:
+      - type: identity-duplicate-principal-replay
+        target:
+          username: admin
+          newPassword: mycel-lab-duplicate-admin-password
+          settle: 2s
+    outcome:
+      availability: expected-degradation
+  - name: post-restart-health
+    duration: 2s
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 10m
+    healthConvergenceInterval: 5s
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectKubernetesState: true

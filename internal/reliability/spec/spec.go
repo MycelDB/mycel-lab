@@ -442,7 +442,7 @@ func validateEnvironmentSpec(environment EnvironmentSpec) error {
 
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined":
+	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "identity-duplicate-principal-replay":
 		return true
 	default:
 		return false
