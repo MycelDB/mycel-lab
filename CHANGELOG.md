@@ -6,6 +6,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [v0.19.2] - 2026-10-13
+
+### Added
+
+- Added `k3d-commonfolio-upgrade-replay`, a CommonFolio-style k3d reliability suite that provisions graph users/spaces/domains, installs page-summary-like automation procedures and bindings, runs graph/read workloads, restarts a pod, performs a StatefulSet image upgrade, and checks replay-blocker log patterns (#39, #40).
+- Added CommonFolio automation seeding/diagnostics and log assertion events for scenario-level replay diagnostics (#40).
+- Added a reusable StatefulSet image upgrade event with k3d local-image import support for testing locally built daemon images (#40).
+
+### Compatibility
+
+- Best used with Mycel daemon `v0.19.4` or later for the automation and graph replay/idempotency fixes validated by the CommonFolio upgrade replay scenario.
+
 ## [v0.19.1] - 2026-10-10
 
 ### Added
