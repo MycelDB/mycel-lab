@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-commonfolio-upgrade-replay
+  description: CommonFolio-style automation and graph replay guardrail across k3d restart and image upgrade.
+scenarios:
+  - path: ../scenarios/k3d-commonfolio-upgrade-replay/k3d-commonfolio-upgrade-replay.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

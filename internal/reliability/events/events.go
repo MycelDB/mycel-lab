@@ -89,6 +89,12 @@ func validateEvent(event spec.EventSpec) error {
 		}
 	case "rolling-restart", "environment-reset":
 		return nil
+	case "statefulset-image-upgrade":
+		if stringTarget(event.Target, "image") == "" {
+			return fmt.Errorf("%s requires target.image", event.Type)
+		}
+	case "commonfolio-automation-seed", "commonfolio-automation-diagnostics", "log-assert-absent":
+		return nil
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {
 			return fmt.Errorf("%s requires target.command", event.Type)

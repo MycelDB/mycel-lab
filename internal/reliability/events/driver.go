@@ -88,6 +88,15 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 		return nil, r.Driver.RestartNode(ctx, r.Environment, env.NodeRef{Name: nodeName(event.Target), Ordinal: nodeOrdinal(event.Target)})
 	case "rolling-restart":
 		return nil, r.Driver.RollingRestart(ctx, r.Environment)
+	case "statefulset-image-upgrade":
+		result, err := executeStatefulSetImageUpgradeEvent(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"statefulSetImageUpgrade": result}, err
+	case "commonfolio-automation-seed", "commonfolio-automation-diagnostics":
+		result, err := executeCommonFolioAutomationEvent(ctx, r.Driver, r.Environment, r.Resources, event.Type, event.Target)
+		return map[string]any{"commonfolioAutomation": result}, err
+	case "log-assert-absent":
+		result, err := executeLogAssertAbsentEvent(ctx, r.Environment, event.Target)
+		return map[string]any{"logAssertAbsent": result}, err
 	case "host-command":
 		result, err := ExecuteHostCommand(ctx, event.Target)
 		return map[string]any{"hostCommand": result}, err
