@@ -30,6 +30,7 @@ const (
 	CapabilityLogs               Capability = "logs"
 	CapabilityObjectStoreFixture Capability = "object-store-fixture"
 	CapabilityVolumeReplacement  Capability = "volume-replacement"
+	CapabilityImageUpgrade       Capability = "image-upgrade"
 )
 
 type CapabilitySet map[Capability]struct{}
@@ -142,6 +143,17 @@ type VolumeReplacementDriver interface {
 	ScaleStatefulSet(context.Context, Environment, string, int) error
 	DeletePVC(context.Context, Environment, string) error
 	RestoreArchiveToPVC(context.Context, Environment, string, string) error
+}
+
+type StatefulSetImageUpdateRequest struct {
+	StatefulSet string
+	Container   string
+	Image       string
+	Timeout     time.Duration
+}
+
+type StatefulSetImageUpdater interface {
+	UpdateStatefulSetImage(context.Context, Environment, StatefulSetImageUpdateRequest) (ExecResult, error)
 }
 
 type ClusterRestoreDriver interface {
@@ -311,7 +323,7 @@ type K3DDriver struct {
 func (d K3DDriver) Name() string { return "k3d" }
 
 func (d K3DDriver) Capabilities() CapabilitySet {
-	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityVolumeReplacement)
+	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityVolumeReplacement, CapabilityImageUpgrade)
 }
 
 func (d K3DDriver) Validate(environment spec.EnvironmentSpec) error {
@@ -479,6 +491,43 @@ func (d K3DDriver) RollingRestart(ctx context.Context, environment Environment) 
 		return err
 	}
 	return d.WaitReady(ctx, environment)
+}
+
+func (d K3DDriver) UpdateStatefulSetImage(ctx context.Context, environment Environment, req StatefulSetImageUpdateRequest) (ExecResult, error) {
+	statefulSet := strings.TrimSpace(req.StatefulSet)
+	if statefulSet == "" {
+		statefulSet = "myceld"
+	}
+	container := strings.TrimSpace(req.Container)
+	if container == "" {
+		container = "myceld"
+	}
+	image := strings.TrimSpace(req.Image)
+	if image == "" {
+		return ExecResult{}, errors.New("image is required")
+	}
+	if err := d.importLocalImageIfPresent(ctx, environment, image); err != nil {
+		return ExecResult{}, err
+	}
+	result, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "set", "image", "statefulset/"+statefulSet, container+"="+image)
+	if err != nil {
+		return result, err
+	}
+	timeout := req.Timeout
+	if timeout == 0 {
+		timeout = d.WaitTimeout
+	}
+	if timeout == 0 {
+		timeout = 10 * time.Minute
+	}
+	timeoutArg := fmt.Sprintf("--timeout=%s", timeout.Round(time.Second))
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "rollout", "status", "statefulset/"+statefulSet, timeoutArg); err != nil {
+		return result, err
+	}
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "pods", "-l", "app=myceld", "--for=condition=Ready", timeoutArg); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (d K3DDriver) CopyFromNode(ctx context.Context, environment Environment, node NodeRef, containerPath, hostPath string) (ExecResult, error) {

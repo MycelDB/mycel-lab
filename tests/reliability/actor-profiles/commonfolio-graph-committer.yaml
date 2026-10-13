@@ -1,0 +1,65 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: commonfolio-graph-committer
+  description: Creates CommonFolio-like page and page-entry graph data that can trigger page-summary automations.
+behavior:
+  type: graph-transaction
+  identity:
+    mode: per-instance
+    principalPrefix: commonfolio-user
+  dataScope:
+    space:
+      mode: per-instance
+      prefix: commonfolio-space
+    domain:
+      mode: per-instance
+      schema: commonfolio-pkm
+      prefix: commonfolio-domain
+  transaction:
+    commitUnit: graph-transaction
+    operationsPerTransaction:
+      min: 2
+      max: 18
+    operationMix:
+      createNode:
+        weight: 65
+        maxPerTransaction: 10
+      updateNode:
+        weight: 25
+        maxPerTransaction: 5
+        requiresExistingNode: true
+      createEdge:
+        weight: 10
+        maxPerTransaction: 6
+        requiresExistingNodes: 2
+    fallbackOperation: createNode
+    dataModel:
+      nodeLabels: [pkm.page_entry, pkm.page, Note, Page]
+      edgeTypes: [contains, REFERENCES]
+      properties:
+        text:
+          mode: generated-text
+          minBytes: 64
+          maxBytes: 768
+        title:
+          mode: generated-text
+          minBytes: 16
+          maxBytes: 96
+        actor:
+          mode: actor-id
+        transactionSeq:
+          mode: transaction-seq
+  retry:
+    maxAttempts: 5
+    initialBackoff: 100ms
+    maxBackoff: 2s
+    retryOn: [transient, unavailable]
+  checks:
+    readAfterWrite:
+      enabled: true
+      sampleEveryCommits: 8
+      maxAttempts: 5
+      backoff: 100ms
+    countConvergence:
+      enabled: true

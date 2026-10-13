@@ -111,6 +111,41 @@ func TestDriverRuntimeRepeatsNodeRestartWithOrdinalSequence(t *testing.T) {
 	}
 }
 
+func TestDriverRuntimeExecutesStatefulSetImageUpgrade(t *testing.T) {
+	driver := &recordingDriver{}
+	runtime := NewDriverRuntime(driver, env.Environment{Name: "test", Driver: "test"})
+	phase := spec.PhaseSpec{Name: "upgrade", Events: []spec.EventSpec{{Type: "statefulset-image-upgrade", Target: map[string]any{"statefulSet": "myceld", "container": "myceld", "image": "myceldb/mycel:v0.19.3", "rolloutTimeout": "10m"}}}}
+	if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, nil); err != nil {
+		t.Fatalf("ExecutePhaseEvents() error=%v", err)
+	}
+	if driver.imageUpdate.Image != "myceldb/mycel:v0.19.3" || driver.imageUpdate.StatefulSet != "myceld" || driver.imageUpdate.Container != "myceld" || driver.imageUpdate.Timeout.String() != "10m0s" {
+		t.Fatalf("imageUpdate=%+v", driver.imageUpdate)
+	}
+}
+
+func TestStatefulSetImageUpgradeRequiresImage(t *testing.T) {
+	phase := spec.PhaseSpec{Name: "upgrade", Events: []spec.EventSpec{{Type: "statefulset-image-upgrade", Target: map[string]any{}}}}
+	if err := (LocalRuntime{}).ExecutePhaseEvents(context.Background(), phase, true, nil); err == nil {
+		t.Fatal("ExecutePhaseEvents() error=nil, want missing image target")
+	}
+}
+
+func TestDriverRuntimeSeedsCommonFolioAutomation(t *testing.T) {
+	driver := &recordingDriver{}
+	resources := &provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "graph-writers-0", GroupName: "graph-writers", BehaviorType: "graph-transaction", SpaceID: "space-1", DomainID: "11111111-1111-4111-8111-111111111111", PrincipalID: "22222222-2222-4222-8222-222222222222"}}}
+	runtime := NewDriverRuntimeWithResources(driver, env.Environment{Name: "test", Driver: "test"}, resources)
+	phase := spec.PhaseSpec{Name: "seed", Events: []spec.EventSpec{{Type: "commonfolio-automation-seed", Target: map[string]any{"limit": 1}}}}
+	if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, nil); err != nil {
+		t.Fatalf("ExecutePhaseEvents() error=%v", err)
+	}
+	joined := strings.Join(driver.execCommands, "\n")
+	for _, want := range []string{"automation procedure put", "automation binding put", "commonfolio.page-summary.graph-writers-0", "11111111-1111-4111-8111-111111111111"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commonfolio seed command missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
 func TestExecuteHostCommandCapturesOutput(t *testing.T) {
 	command := []any{"sh", "-c", "printf hello"}
 	if runtime.GOOS == "windows" {
@@ -139,7 +174,11 @@ func (r *recordingEventRecorder) RecordRuntimeEvent(_ context.Context, record Re
 	return nil
 }
 
-type recordingDriver struct{ restarted []int }
+type recordingDriver struct {
+	restarted    []int
+	imageUpdate  env.StatefulSetImageUpdateRequest
+	execCommands []string
+}
 
 func (d *recordingDriver) Name() string { return "test" }
 func (d *recordingDriver) Capabilities() env.CapabilitySet {
@@ -157,14 +196,19 @@ func (d *recordingDriver) Nodes(context.Context, env.Environment) ([]env.Node, e
 func (d *recordingDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
 	return nil, nil
 }
-func (d *recordingDriver) Exec(context.Context, env.Environment, env.NodeRef, env.ExecRequest) (env.ExecResult, error) {
-	return env.ExecResult{}, nil
+func (d *recordingDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
+	d.execCommands = append(d.execCommands, strings.Join(req.Command, " "))
+	return env.ExecResult{Stdout: "{}\n"}, nil
 }
 func (d *recordingDriver) RestartNode(_ context.Context, _ env.Environment, node env.NodeRef) error {
 	d.restarted = append(d.restarted, node.Ordinal)
 	return nil
 }
 func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error { return nil }
+func (d *recordingDriver) UpdateStatefulSetImage(_ context.Context, _ env.Environment, req env.StatefulSetImageUpdateRequest) (env.ExecResult, error) {
+	d.imageUpdate = req
+	return env.ExecResult{Stdout: "updated\n"}, nil
+}
 func (d *recordingDriver) CaptureState(context.Context, env.Environment, *artifacts.Sink) error {
 	return nil
 }
