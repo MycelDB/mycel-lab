@@ -77,6 +77,19 @@ func (r KubernetesRuntime) applyEvent(ctx context.Context, event spec.EventSpec)
 			return err
 		}
 		return r.waitRolloutReady(ctx)
+	case "statefulset-image-upgrade":
+		statefulSet := firstStringTarget(event.Target, "statefulSet", "statefulset", "resource")
+		if statefulSet == "" {
+			statefulSet = "myceld"
+		}
+		container := firstStringTarget(event.Target, "container", "containerName")
+		if container == "" {
+			container = "myceld"
+		}
+		if _, err := r.runKubectl(ctx, "set", "image", "statefulset/"+statefulSet, container+"="+stringTarget(event.Target, "image")); err != nil {
+			return err
+		}
+		return r.waitRolloutReady(ctx)
 	default:
 		return fmt.Errorf("unsupported event type %q", event.Type)
 	}

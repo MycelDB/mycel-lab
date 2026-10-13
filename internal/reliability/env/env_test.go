@@ -179,6 +179,22 @@ func TestK3DDriverScaleStatefulSetWaitsOnlyDesiredOrdinals(t *testing.T) {
 	}
 }
 
+func TestK3DDriverUpdateStatefulSetImageWaitsForRollout(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test"}
+	_, err := driver.UpdateStatefulSetImage(context.Background(), environment, StatefulSetImageUpdateRequest{StatefulSet: "myceld", Container: "myceld", Image: "myceldb/mycel:v0.19.3", Timeout: 2 * time.Minute})
+	if err != nil {
+		t.Fatalf("UpdateStatefulSetImage() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"set image statefulset/myceld myceld=myceldb/mycel:v0.19.3", "rollout status statefulset/myceld --timeout=2m0s", "wait pods -l app=myceld --for=condition=Ready --timeout=2m0s"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("UpdateStatefulSetImage commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
 type fakeRunner struct{ commands []string }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {

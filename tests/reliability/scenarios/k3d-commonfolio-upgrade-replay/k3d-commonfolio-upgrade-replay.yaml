@@ -1,0 +1,126 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-commonfolio-upgrade-replay
+  description: CommonFolio-style automation and graph workload across restart and StatefulSet image upgrade.
+seed: 39139
+environment:
+  driver: k3d
+  namespace: mycel-commonfolio-replay
+  options:
+    clusterNamePrefix: mlab-cfr
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
+    consolePortBase: 19531
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - node-restart
+      - image-upgrade
+      - logs
+clusterRef: raft-3-node
+clusterOverrides:
+  image: myceldb/mycel:v0.19.2
+  raft:
+    partitionCount: 8
+actorGroups:
+  - name: graph-writers
+    profileRef: commonfolio-graph-committer
+    count: 3
+    rate:
+      mode: group-total
+      commitsPerSecond: 3
+  - name: readers
+    profileRef: gql-reader
+    count: 3
+    target:
+      actorGroups:
+        - graph-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 3
+phases:
+  - name: configure-commonfolio-automation
+    duration: 4s
+    events:
+      - type: commonfolio-automation-seed
+        target:
+          writerGroup: graph-writers
+          limit: 3
+          debounce: 2s
+  - name: seed-commonfolio-graph-and-invocations
+    duration: 20s
+    actorGroupOverrides:
+      graph-writers:
+        rate:
+          mode: group-total
+          commitsPerSecond: 12
+      readers:
+        rate:
+          mode: group-total
+          queriesPerSecond: 6
+  - name: restart-with-commonfolio-state
+    duration: 6s
+    events:
+      - type: node-restart
+        target:
+          ordinal: 0
+    outcome:
+      availability: expected-degradation
+  - name: commonfolio-style-db-image-upgrade
+    duration: 8s
+    events:
+      - type: statefulset-image-upgrade
+        target:
+          statefulSet: myceld
+          container: myceld
+          image: myceldb/mycel:v0.19.3
+          rolloutTimeout: 10m
+    outcome:
+      availability: expected-degradation
+  - name: post-upgrade-commonfolio-validation
+    duration: 20s
+    actorGroupOverrides:
+      graph-writers:
+        rate:
+          mode: group-total
+          commitsPerSecond: 9
+      readers:
+        rate:
+          mode: group-total
+          queriesPerSecond: 6
+    assertions:
+      requireConvergedCounts: true
+  - name: collect-replay-diagnostics
+    duration: 2s
+    events:
+      - type: commonfolio-automation-diagnostics
+        target:
+          writerGroup: graph-writers
+          limit: 3
+          runLimit: 50
+      - type: log-assert-absent
+        target:
+          resource: statefulset/myceld
+          tail: 1000
+          patterns:
+            - stale automation invocation update
+            - 'handler=graph: graph conflict'
+            - restore raft snapshot and replay committed entries
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 10m
+    healthConvergenceInterval: 5s
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: true
