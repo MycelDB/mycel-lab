@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
@@ -159,7 +160,7 @@ func TestDriverRuntimeWaitsForAllClusterRaftGroupLeaders(t *testing.T) {
 			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
 		}
 		if strings.Contains(command, "cluster raft-groups") {
-			return env.ExecResult{Stdout: `{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy"},{"group_id":"partition-0","leader_node_id":2,"health":"healthy"}]}`}, nil
+			return env.ExecResult{Stdout: `{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy"},{"group_id":"space-partition-0","leader_node_id":2,"health":"healthy"}]}`}, nil
 		}
 		return env.ExecResult{Stdout: `{}`}, nil
 	}}
@@ -173,6 +174,38 @@ func TestDriverRuntimeWaitsForAllClusterRaftGroupLeaders(t *testing.T) {
 	payload, ok := recorder.records[1].Payload["clusterRecovery"].(ClusterRecoveryWaitResult)
 	if !ok || !payload.Ready || payload.ExpectedGroups != 2 || len(payload.Nodes) != 1 || !payload.Nodes[0].RaftGroupsReady {
 		t.Fatalf("cluster recovery payload=%+v", recorder.records[1].Payload)
+	}
+}
+
+func TestClusterRecoveryRequiresExactRaftGroupIdentities(t *testing.T) {
+	expected := requiredRaftGroupIDs(1)
+	for _, tc := range []struct {
+		name   string
+		groups []clusterRaftGroup
+		check  func(ClusterRecoveryNodeResult) bool
+	}{
+		{
+			name:   "missing system replaced by extra group",
+			groups: []clusterRaftGroup{{GroupID: "space-partition-0", LeaderNodeID: 1, Health: "healthy"}, {GroupID: "other", LeaderNodeID: 1, Health: "healthy"}},
+			check: func(result ClusterRecoveryNodeResult) bool {
+				return len(result.MissingGroups) == 1 && result.MissingGroups[0] == "system" && len(result.UnexpectedGroups) == 1 && result.UnexpectedGroups[0] == "other"
+			},
+		},
+		{
+			name:   "missing partition replaced by duplicate system",
+			groups: []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy"}, {GroupID: "system", LeaderNodeID: 1, Health: "healthy"}},
+			check: func(result ClusterRecoveryNodeResult) bool {
+				return len(result.MissingGroups) == 1 && result.MissingGroups[0] == "space-partition-0" && len(result.DuplicateGroups) == 1 && result.DuplicateGroups[0] == "system"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ClusterRecoveryNodeResult{}
+			evaluateClusterRaftGroups(&result, tc.groups, expected)
+			if result.RaftGroupsReady || result.RaftGroupsError == "" || !tc.check(result) {
+				t.Fatalf("result=%+v, want exact identity failure", result)
+			}
+		})
 	}
 }
 
@@ -199,6 +232,23 @@ func TestDriverRuntimeRecordsPartialClusterRecoveryDiagnosticsOnFailure(t *testi
 	payload, ok := recorder.records[1].Payload["clusterRecovery"].(ClusterRecoveryWaitResult)
 	if !ok || payload.Ready || len(payload.Nodes) != 1 || payload.Nodes[0].GroupCount != 1 || payload.Nodes[0].RaftGroupsError == "" {
 		t.Fatalf("partial cluster recovery payload=%+v", recorder.records[1].Payload)
+	}
+}
+
+func TestClusterRecoveryTimeoutCancelsBlockedInspection(t *testing.T) {
+	driver := &recordingDriver{execWithContext: func(ctx context.Context, _ string) (env.ExecResult, error) {
+		<-ctx.Done()
+		return env.ExecResult{Stderr: ctx.Err().Error()}, ctx.Err()
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 1}}}
+	runtime := NewDriverRuntimeWithScenario(driver, env.Environment{Name: "test", Driver: "test"}, scenario, nil)
+	phase := spec.PhaseSpec{Name: "recovery", Events: []spec.EventSpec{{Type: "cluster-recovery-wait", Target: map[string]any{"ordinals": []any{0}, "timeout": "10ms", "interval": "1ms"}}}}
+	started := time.Now()
+	if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, &recordingEventRecorder{}); err == nil || !strings.Contains(err.Error(), "within 10ms") {
+		t.Fatalf("ExecutePhaseEvents() error=%v, want bounded recovery timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("recovery timeout elapsed=%s, want <=1s", elapsed)
 	}
 }
 
@@ -247,10 +297,11 @@ func (r *recordingEventRecorder) RecordRuntimeEvent(_ context.Context, record Re
 }
 
 type recordingDriver struct {
-	restarted    []int
-	imageUpdate  env.StatefulSetImageUpdateRequest
-	execCommands []string
-	execResult   func(command string) (env.ExecResult, error)
+	restarted       []int
+	imageUpdate     env.StatefulSetImageUpdateRequest
+	execCommands    []string
+	execResult      func(command string) (env.ExecResult, error)
+	execWithContext func(context.Context, string) (env.ExecResult, error)
 }
 
 func (d *recordingDriver) Name() string { return "test" }
@@ -269,9 +320,12 @@ func (d *recordingDriver) Nodes(context.Context, env.Environment) ([]env.Node, e
 func (d *recordingDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
 	return nil, nil
 }
-func (d *recordingDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
+func (d *recordingDriver) Exec(ctx context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	command := strings.Join(req.Command, " ")
 	d.execCommands = append(d.execCommands, command)
+	if d.execWithContext != nil {
+		return d.execWithContext(ctx, command)
+	}
 	if d.execResult != nil {
 		return d.execResult(command)
 	}

@@ -94,6 +94,7 @@ phases:
           expectedGroups: 17
           timeout: 15m
           interval: 5s
+          commandTimeout: 10s
     outcome:
       availability: expected-degradation
   - name: post-recovery-workload
@@ -108,7 +109,7 @@ phases:
           mode: group-total
           queriesPerSecond: 6
     assertions:
-      requireConvergedCounts: true
+      requireWorkloadProgress: true
   - name: collect-recovery-diagnostics
     duration: 2s
     events:
@@ -120,7 +121,8 @@ phases:
       - type: log-assert-absent
         target:
           selector: app=myceld
-          tail: 5000
+          tail: -1
+          since: 20m
           patterns:
             - stale automation invocation update
             - 'handler=graph: graph conflict'

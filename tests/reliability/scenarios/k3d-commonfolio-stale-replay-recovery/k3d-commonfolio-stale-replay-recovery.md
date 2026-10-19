@@ -22,9 +22,12 @@ is the operational shape that exposed the stale replay defect.
 - Authenticated readiness recovers on every replica.
 - The system group and all 16 partition groups are present, healthy, and have a
   leader on every replica.
-- Graph reads and writes continue after recovery, acknowledged transactions are
-  retained, and final counts converge.
-- Candidate logs contain none of the known stale-replay blocker signatures.
+- At least one graph transaction is acknowledged and one graph read succeeds in
+  the post-recovery phase.
+- Final live node and edge counts exactly match the operations in acknowledged
+  transactions for every writer assignment.
+- Candidate logs contain none of the known stale-replay blocker signatures over
+  the complete bounded replay window, rather than only a trailing line sample.
 
 ## Topology
 
@@ -58,9 +61,10 @@ mycel-lab run suite k3d-commonfolio-stale-replay-recovery \
   --image myceldb/mycel:v0.19.4
 ```
 
-The positive run must recover all replicas, report leaders and healthy status
-for all 17 Raft groups, retain acknowledged graph writes, and contain no
-replay-blocker log signature.
+The positive run must recover all replicas, report the exact `system` plus
+`space-partition-0` through `space-partition-15` identity set with healthy
+leaders, retain acknowledged graph nodes and edges, make post-recovery workload
+progress, and contain no replay-blocker log signature.
 
 Do not treat a TCP listener or Kubernetes `Running` state as recovery. The
 `cluster-recovery-wait` event invokes the daemon's authenticated readiness check
@@ -73,9 +77,14 @@ and inspects all local Raft group diagnostics on every ordinal.
 3. Require at least one durable terminal invocation per writer assignment.
 4. Restart ordinals 0 and 1 sequentially with retained PVCs; ordinal 2 remains
    untouched.
-5. Allow up to 15 minutes for all three nodes and all 17 Raft groups to recover.
-6. Continue graph reads and writes and require convergence.
-7. Collect invocation diagnostics and reject replay-blocker log signatures.
+5. Allow up to 15 minutes for all three nodes and the exact 17-group identity
+   set to recover.
+6. Continue graph reads and writes and require acknowledged-write/successful-read
+   progress.
+7. Collect invocation diagnostics, scan all current pod logs from the bounded
+   20-minute replay window, and reject replay-blocker signatures.
+8. Stop actors, compare live node and edge counts with acknowledged operations,
+   and fail on any convergence or acknowledged-loss mismatch.
 
 ## Actors
 
@@ -92,7 +101,9 @@ and inspects all local Raft group diagnostics on every ordinal.
 | `clusterOverrides.image` | `myceldb/mycel:v0.19.3` | Broken negative control; use `--image` for a positive candidate run. |
 | `clusterOverrides.raft.partitionCount` | `16` | Matches the affected deployment shape. |
 | `commonfolio-automation-await-terminal.target.minimumPerAssignment` | `1` | Raises the required durable terminal-state fixture strength. |
-| `cluster-recovery-wait.target.timeout` | `15m` | Accommodates the observed slow system-Raft startup while still bounding failure. |
+| `cluster-recovery-wait.target.timeout` | `15m` | Accommodates the observed slow system-Raft startup while strictly bounding failure. |
+| `cluster-recovery-wait.target.commandTimeout` | `10s` | Prevents one stuck ordinal inspection from consuming the complete recovery window. |
+| `log-assert-absent.target.since` | `20m` | Covers the complete retained-PVC replay window, including a full 15-minute recovery wait. |
 | `actorGroups[].rate` | YAML actor group rates | Increase to generate more replayable automation history. |
 
 ## Evidence and artifacts
@@ -107,7 +118,11 @@ and inspects all local Raft group diagnostics on every ordinal.
   `environment/pod-logs-all.txt`, and best-effort previous-container logs
   preserve Kubernetes evidence.
 - `oracle/cluster-report.json` and `oracle/final-report.json` are collected even
-  after an event-driven failure once the environment has been provisioned.
+  after an event-driven failure once the environment has been provisioned. The
+  final report records gating `assertionsOk` status plus expected and actual node
+  and edge counts per writer. Its legacy `ok` observation also includes
+  historical operation failures during expected degradation and is diagnostic,
+  not the declared final-assertion verdict.
 
 No private staging data or PVC content is used.
 

@@ -15,7 +15,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - Added `--image` to override the daemon image in resolved scenarios and suites for exact A/B candidate validation.
 - Event-driven failures now preserve partial event diagnostics, cluster/oracle reports, all-pod logs, and best-effort previous-container logs.
-- Log absence assertions can select all matching pods instead of inspecting only one StatefulSet pod.
+- Declared final graph convergence/loss assertions now compare live node and edge counts and fail the run; phases can require acknowledged-write and successful-read progress.
+- All-replica recovery now requires the exact system-plus-partition Raft group identity set, with missing, duplicate, and unexpected groups reported.
+- Log absence assertions can select all matching pods, scan a complete time-bounded log window with bounded retained output, and inspect lines older than the captured artifact tail.
 
 ### Compatibility
 

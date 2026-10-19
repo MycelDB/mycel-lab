@@ -13,6 +13,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
@@ -176,6 +177,60 @@ func TestFinalClusterAssertionsFailOnClusterIDMismatch(t *testing.T) {
 	driver := &clusterAssertionDriver{clusterIDs: []string{"cluster-a", "cluster-b"}}
 	if err := runFinalClusterAssertions(context.Background(), sink, scenario, driver, env.Environment{Name: "test", Driver: "test"}, nodes, true); err == nil {
 		t.Fatal("runFinalClusterAssertions() error=nil, want mismatch error")
+	}
+}
+
+func TestFinalOracleAssertionsEnforceNodeAndEdgeCounts(t *testing.T) {
+	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space", DomainID: "domain", DaemonAddr: "daemon"}}}
+	options := finalOracleAssertionOptions{RequireConvergedCounts: true, RequireNoAcknowledgedGraphTransactionLoss: true}
+	for _, tc := range []struct {
+		name   string
+		actual graphCounts
+		ok     bool
+	}{
+		{name: "converged", actual: graphCounts{Nodes: 2, Edges: 1}, ok: true},
+		{name: "node loss", actual: graphCounts{Nodes: 1, Edges: 1}},
+		{name: "edge loss", actual: graphCounts{Nodes: 2, Edges: 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := finalOracleReport{RequiredAssertions: options, LiveChecks: []finalOracleLiveCheck{{ActorID: "writer-0", Expected: graphCounts{Nodes: 2, Edges: 1}, Actual: tc.actual, OK: true}}}
+			evaluateFinalOracleAssertions(&report, resources, true)
+			if report.AssertionsOK != tc.ok {
+				t.Fatalf("AssertionsOK=%t errors=%v, want %t", report.AssertionsOK, report.AssertionErrors, tc.ok)
+			}
+		})
+	}
+}
+
+func TestFinalOracleAssertionsFailWithoutGraphChecks(t *testing.T) {
+	report := finalOracleReport{RequiredAssertions: finalOracleAssertionOptions{RequireConvergedCounts: true}}
+	evaluateFinalOracleAssertions(&report, provision.ScenarioResources{}, true)
+	if report.AssertionsOK || len(report.AssertionErrors) == 0 {
+		t.Fatalf("report=%+v, want missing-check failure", report)
+	}
+}
+
+func TestFinalOracleAssertionsSkipDryRunLiveChecks(t *testing.T) {
+	report := finalOracleReport{RequiredAssertions: finalOracleAssertionOptions{RequireConvergedCounts: true}}
+	evaluateFinalOracleAssertions(&report, provision.ScenarioResources{}, false)
+	if !report.AssertionsOK || !report.AssertionsSkipped {
+		t.Fatalf("report=%+v, want skipped successful dry-run assertions", report)
+	}
+}
+
+func TestPhaseOracleProgressRequiresAcknowledgedWriteAndSuccessfulRead(t *testing.T) {
+	assertions := map[string]any{"requireWorkloadProgress": true}
+	before := phaseOracleSnapshot{AcknowledgedTransactions: 4, SuccessfulReads: 7}
+	if err := assertPhaseOracleProgress(assertions, before, phaseOracleSnapshot{AcknowledgedTransactions: 5, SuccessfulReads: 8}, true); err != nil {
+		t.Fatalf("assertPhaseOracleProgress() error=%v", err)
+	}
+	for _, after := range []phaseOracleSnapshot{{AcknowledgedTransactions: 4, SuccessfulReads: 8}, {AcknowledgedTransactions: 5, SuccessfulReads: 7}, {AcknowledgedTransactions: 4, SuccessfulReads: 7}} {
+		if err := assertPhaseOracleProgress(assertions, before, after, true); err == nil {
+			t.Fatalf("assertPhaseOracleProgress(%+v) error=nil", after)
+		}
+	}
+	if err := assertPhaseOracleProgress(assertions, before, before, false); err != nil {
+		t.Fatalf("dry-run progress assertion error=%v", err)
 	}
 }
 
