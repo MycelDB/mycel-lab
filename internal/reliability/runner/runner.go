@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,15 @@ type PhaseState struct {
 	Duration   time.Duration `json:"duration"`
 	StartedAt  time.Time     `json:"startedAt,omitempty"`
 	FinishedAt time.Time     `json:"finishedAt,omitempty"`
+}
+
+type harnessBuildIdentity struct {
+	BuildInfoAvailable bool              `json:"buildInfoAvailable"`
+	GoVersion          string            `json:"goVersion,omitempty"`
+	ModulePath         string            `json:"modulePath,omitempty"`
+	ModuleVersion      string            `json:"moduleVersion,omitempty"`
+	ModuleSum          string            `json:"moduleSum,omitempty"`
+	VCS                map[string]string `json:"vcs,omitempty"`
 }
 
 type Result struct {
@@ -450,6 +460,9 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 }
 
 func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario) error {
+	if _, err := sink.WriteJSON("harness-build.json", currentHarnessBuildIdentity()); err != nil {
+		return err
+	}
 	if _, err := sink.WriteJSON("resolved-scenario.json", scenario); err != nil {
 		return err
 	}
@@ -462,6 +475,29 @@ func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario)
 	}
 	_, err = sink.AppendJSONL("events.jsonl", artifacts.EventNow("run-created", "", "", map[string]any{"scenario": scenario.Metadata.Name}))
 	return err
+}
+
+func currentHarnessBuildIdentity() harnessBuildIdentity {
+	identity := harnessBuildIdentity{}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return identity
+	}
+	identity.BuildInfoAvailable = true
+	identity.GoVersion = info.GoVersion
+	identity.ModulePath = info.Main.Path
+	identity.ModuleVersion = info.Main.Version
+	identity.ModuleSum = info.Main.Sum
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs", "vcs.revision", "vcs.time", "vcs.modified":
+			if identity.VCS == nil {
+				identity.VCS = map[string]string{}
+			}
+			identity.VCS[setting.Key] = setting.Value
+		}
+	}
+	return identity
 }
 
 func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder *runRecorder, resources provision.ScenarioResources, assertions map[string]any, live bool) error {

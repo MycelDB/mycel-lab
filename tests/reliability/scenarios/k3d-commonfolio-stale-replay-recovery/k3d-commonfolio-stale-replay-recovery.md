@@ -108,7 +108,8 @@ and inspects all local Raft group diagnostics on every ordinal.
 
 ## Evidence and artifacts
 
-- `resolved-scenario.json` records the exact image, seed, partition count, and
+- `harness-build.json` records the harness module and embedded VCS revision;
+  `resolved-scenario.json` records the exact image, seed, partition count, and
   phases.
 - `events.jsonl` records terminal invocation IDs/statuses and per-node
   readiness/Raft diagnostics, including partial diagnostics on event failure.

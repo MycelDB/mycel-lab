@@ -154,6 +154,23 @@ func TestDriverRuntimeAwaitsTerminalCommonFolioAutomationFixture(t *testing.T) {
 	}
 }
 
+func TestCommonFolioTerminalFixtureTimeoutCancelsBlockedInspection(t *testing.T) {
+	driver := &recordingDriver{execWithContext: func(ctx context.Context, _ string) (env.ExecResult, error) {
+		<-ctx.Done()
+		return env.ExecResult{Stderr: ctx.Err().Error()}, ctx.Err()
+	}}
+	resources := &provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "graph-writers-0", GroupName: "graph-writers", BehaviorType: "graph-transaction", SpaceID: "space-1", DomainID: "11111111-1111-4111-8111-111111111111", PrincipalID: "22222222-2222-4222-8222-222222222222"}}}
+	runtime := NewDriverRuntimeWithResources(driver, env.Environment{Name: "test", Driver: "test"}, resources)
+	phase := spec.PhaseSpec{Name: "fixture", Events: []spec.EventSpec{{Type: "commonfolio-automation-await-terminal", Target: map[string]any{"limit": 1, "timeout": "10ms", "interval": "1ms"}}}}
+	started := time.Now()
+	if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, &recordingEventRecorder{}); err == nil || !strings.Contains(err.Error(), "within 10ms") {
+		t.Fatalf("ExecutePhaseEvents() error=%v, want bounded terminal fixture timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("terminal fixture timeout elapsed=%s, want <=1s", elapsed)
+	}
+}
+
 func TestDriverRuntimeWaitsForAllClusterRaftGroupLeaders(t *testing.T) {
 	driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
 		if strings.Contains(command, "cluster readiness check") {

@@ -115,6 +115,18 @@ func TestRunOptionsParseEnvironmentOverride(t *testing.T) {
 	}
 }
 
+func TestRunOptionsRejectInvalidImageOverride(t *testing.T) {
+	for _, args := range [][]string{{"--image"}, {"--image="}, {"--image", "--dry-run"}, {"--image=--dry-run"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			_, ok := runOptionsFromArgs(args, &stdout, &stderr)
+			if ok || !strings.Contains(stderr.String(), "invalid --image") {
+				t.Fatalf("runOptionsFromArgs(%v) ok=%t stderr=%q", args, ok, stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunOptionsRejectInvalidEnvironmentOption(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	_, ok := runOptionsFromArgs([]string{"--environment-option", "not-a-pair"}, &stdout, &stderr)

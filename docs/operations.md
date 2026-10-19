@@ -208,6 +208,7 @@ mycel-lab run suite k3d-commonfolio-stale-replay-recovery \
 
 Each run writes a filesystem artifact directory containing:
 
+- `harness-build.json` — Go module and VCS build identity, when embedded by the build;
 - `resolved-scenario.json` — full resolved scenario snapshot;
 - `events.jsonl` — run, phase, actor, and pod lifecycle events;
 - `metrics.jsonl` — metric samples such as commits and latency placeholders;

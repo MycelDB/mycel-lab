@@ -43,7 +43,7 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	if result.Status != RunPassed {
 		t.Fatalf("status=%s, want passed", result.Status)
 	}
-	for _, name := range []string{"resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json")} {
+	for _, name := range []string{"harness-build.json", "resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json")} {
 		if _, err := os.Stat(filepath.Join(result.ArtifactRoot, name)); err != nil {
 			t.Fatalf("artifact %s missing: %v", name, err)
 		}

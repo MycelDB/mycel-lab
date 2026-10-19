@@ -140,7 +140,14 @@ func executeCommonFolioAwaitTerminalEvent(ctx context.Context, driver env.Enviro
 	if len(assignments) == 0 {
 		return result, fmt.Errorf("commonfolio-automation-await-terminal found no provisioned graph writer assignments for group %q", writerGroup)
 	}
-	deadline := time.Now().Add(timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	timeoutError := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("terminal CommonFolio automation fixture did not converge within %s", timeout)
+	}
 	for {
 		result.Attempts++
 		result.Assignments = result.Assignments[:0]
@@ -151,7 +158,7 @@ func executeCommonFolioAwaitTerminalEvent(ctx context.Context, driver env.Enviro
 				ordinal = i
 			}
 			item := CommonFolioTerminalFixtureAssignment{ActorID: assignment.ActorID, Ordinal: ordinal, SpaceID: assignment.SpaceID, DomainID: assignment.DomainID}
-			stdout, stderr, listErr := listCommonFolioInvocations(ctx, driver, environment, env.NodeRef{Ordinal: ordinal}, assignment, target)
+			stdout, stderr, listErr := listCommonFolioInvocations(waitCtx, driver, environment, env.NodeRef{Ordinal: ordinal}, assignment, target)
 			item.LastResponse = bounded(stdout, 8192)
 			if listErr != nil {
 				item.LastError = bounded(strings.TrimSpace(stderr+"\n"+listErr.Error()), 4096)
@@ -175,14 +182,17 @@ func executeCommonFolioAwaitTerminalEvent(ctx context.Context, driver env.Enviro
 			}
 			result.Assignments = append(result.Assignments, item)
 		}
+		if waitCtx.Err() != nil {
+			return result, timeoutError()
+		}
 		if ready {
 			result.Ready = true
 			return result, nil
 		}
-		if !time.Now().Before(deadline) {
-			return result, fmt.Errorf("terminal CommonFolio automation fixture did not converge within %s", timeout)
-		}
-		if err := sleepContext(ctx, interval); err != nil {
+		if err := sleepContext(waitCtx, interval); err != nil {
+			if waitCtx.Err() != nil {
+				return result, timeoutError()
+			}
 			return result, err
 		}
 	}
