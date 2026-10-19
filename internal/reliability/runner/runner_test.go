@@ -13,6 +13,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
@@ -42,10 +43,34 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	if result.Status != RunPassed {
 		t.Fatalf("status=%s, want passed", result.Status)
 	}
-	for _, name := range []string{"resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json")} {
+	for _, name := range []string{"harness-build.json", "resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json")} {
 		if _, err := os.Stat(filepath.Join(result.ArtifactRoot, name)); err != nil {
 			t.Fatalf("artifact %s missing: %v", name, err)
 		}
+	}
+}
+
+func TestRunScenarioImageOverrideIsRecordedInResolvedArtifacts(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	originalImage := scenario.Cluster.Image
+	const candidateImage = "myceldb/mycel:candidate"
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), ImageOverride: candidateImage})
+	if err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(result.ArtifactRoot, "resolved-scenario.json"))
+	if err != nil {
+		t.Fatalf("read resolved scenario: %v", err)
+	}
+	var resolved spec.ResolvedScenario
+	if err := json.Unmarshal(data, &resolved); err != nil {
+		t.Fatalf("decode resolved scenario: %v", err)
+	}
+	if resolved.Cluster.Image != candidateImage {
+		t.Fatalf("resolved image=%q, want %q", resolved.Cluster.Image, candidateImage)
+	}
+	if scenario.Cluster.Image != originalImage {
+		t.Fatalf("input scenario image mutated to %q", scenario.Cluster.Image)
 	}
 }
 
@@ -152,6 +177,60 @@ func TestFinalClusterAssertionsFailOnClusterIDMismatch(t *testing.T) {
 	driver := &clusterAssertionDriver{clusterIDs: []string{"cluster-a", "cluster-b"}}
 	if err := runFinalClusterAssertions(context.Background(), sink, scenario, driver, env.Environment{Name: "test", Driver: "test"}, nodes, true); err == nil {
 		t.Fatal("runFinalClusterAssertions() error=nil, want mismatch error")
+	}
+}
+
+func TestFinalOracleAssertionsEnforceNodeAndEdgeCounts(t *testing.T) {
+	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space", DomainID: "domain", DaemonAddr: "daemon"}}}
+	options := finalOracleAssertionOptions{RequireConvergedCounts: true, RequireNoAcknowledgedGraphTransactionLoss: true}
+	for _, tc := range []struct {
+		name   string
+		actual graphCounts
+		ok     bool
+	}{
+		{name: "converged", actual: graphCounts{Nodes: 2, Edges: 1}, ok: true},
+		{name: "node loss", actual: graphCounts{Nodes: 1, Edges: 1}},
+		{name: "edge loss", actual: graphCounts{Nodes: 2, Edges: 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := finalOracleReport{RequiredAssertions: options, LiveChecks: []finalOracleLiveCheck{{ActorID: "writer-0", Expected: graphCounts{Nodes: 2, Edges: 1}, Actual: tc.actual, OK: true}}}
+			evaluateFinalOracleAssertions(&report, resources, true)
+			if report.AssertionsOK != tc.ok {
+				t.Fatalf("AssertionsOK=%t errors=%v, want %t", report.AssertionsOK, report.AssertionErrors, tc.ok)
+			}
+		})
+	}
+}
+
+func TestFinalOracleAssertionsFailWithoutGraphChecks(t *testing.T) {
+	report := finalOracleReport{RequiredAssertions: finalOracleAssertionOptions{RequireConvergedCounts: true}}
+	evaluateFinalOracleAssertions(&report, provision.ScenarioResources{}, true)
+	if report.AssertionsOK || len(report.AssertionErrors) == 0 {
+		t.Fatalf("report=%+v, want missing-check failure", report)
+	}
+}
+
+func TestFinalOracleAssertionsSkipDryRunLiveChecks(t *testing.T) {
+	report := finalOracleReport{RequiredAssertions: finalOracleAssertionOptions{RequireConvergedCounts: true}}
+	evaluateFinalOracleAssertions(&report, provision.ScenarioResources{}, false)
+	if !report.AssertionsOK || !report.AssertionsSkipped {
+		t.Fatalf("report=%+v, want skipped successful dry-run assertions", report)
+	}
+}
+
+func TestPhaseOracleProgressRequiresAcknowledgedWriteAndSuccessfulRead(t *testing.T) {
+	assertions := map[string]any{"requireWorkloadProgress": true}
+	before := phaseOracleSnapshot{AcknowledgedTransactions: 4, SuccessfulReads: 7}
+	if err := assertPhaseOracleProgress(assertions, before, phaseOracleSnapshot{AcknowledgedTransactions: 5, SuccessfulReads: 8}, true); err != nil {
+		t.Fatalf("assertPhaseOracleProgress() error=%v", err)
+	}
+	for _, after := range []phaseOracleSnapshot{{AcknowledgedTransactions: 4, SuccessfulReads: 8}, {AcknowledgedTransactions: 5, SuccessfulReads: 7}, {AcknowledgedTransactions: 4, SuccessfulReads: 7}} {
+		if err := assertPhaseOracleProgress(assertions, before, after, true); err == nil {
+			t.Fatalf("assertPhaseOracleProgress(%+v) error=nil", after)
+		}
+	}
+	if err := assertPhaseOracleProgress(assertions, before, before, false); err != nil {
+		t.Fatalf("dry-run progress assertion error=%v", err)
 	}
 }
 

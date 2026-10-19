@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
@@ -29,6 +30,42 @@ type CommonFolioAutomationAssignment struct {
 	BindingID   string `json:"bindingId,omitempty"`
 	Stdout      string `json:"stdout,omitempty"`
 	Stderr      string `json:"stderr,omitempty"`
+}
+
+type CommonFolioTerminalFixtureResult struct {
+	WriterGroup          string                                 `json:"writerGroup"`
+	MinimumPerAssignment int                                    `json:"minimumPerAssignment"`
+	Attempts             int                                    `json:"attempts"`
+	Timeout              string                                 `json:"timeout"`
+	Interval             string                                 `json:"interval"`
+	Ready                bool                                   `json:"ready"`
+	Assignments          []CommonFolioTerminalFixtureAssignment `json:"assignments"`
+}
+
+type CommonFolioTerminalFixtureAssignment struct {
+	ActorID             string                          `json:"actorId"`
+	Ordinal             int                             `json:"ordinal"`
+	SpaceID             string                          `json:"spaceId"`
+	DomainID            string                          `json:"domainId"`
+	TerminalInvocations []CommonFolioTerminalInvocation `json:"terminalInvocations,omitempty"`
+	LastError           string                          `json:"lastError,omitempty"`
+	LastResponse        string                          `json:"lastResponse,omitempty"`
+}
+
+type CommonFolioTerminalInvocation struct {
+	ID           string `json:"id"`
+	Status       string `json:"status"`
+	ClaimVersion uint64 `json:"claimVersion,omitempty"`
+	UpdatedAt    string `json:"updatedAt,omitempty"`
+}
+
+type commonFolioInvocationList struct {
+	Invocations []struct {
+		ID           string `json:"id"`
+		Status       string `json:"status"`
+		ClaimVersion uint64 `json:"claim_version"`
+		UpdatedAt    string `json:"updated_at"`
+	} `json:"invocations"`
 }
 
 func executeCommonFolioAutomationEvent(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, eventType string, target map[string]any) (CommonFolioAutomationResult, error) {
@@ -72,6 +109,118 @@ func executeCommonFolioAutomationEvent(ctx context.Context, driver env.Environme
 		result.Configured++
 	}
 	return result, nil
+}
+
+func executeCommonFolioAwaitTerminalEvent(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, target map[string]any) (CommonFolioTerminalFixtureResult, error) {
+	writerGroup := firstNonEmpty(stringTarget(target, "writerGroup"), "graph-writers")
+	limit := intTarget(target, "limit", 3)
+	if limit <= 0 {
+		limit = 1
+	}
+	minimum := intTarget(target, "minimumPerAssignment", 1)
+	if minimum <= 0 {
+		minimum = 1
+	}
+	timeout, err := targetDuration(target, "timeout")
+	if err != nil {
+		return CommonFolioTerminalFixtureResult{}, err
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	interval, err := targetDuration(target, "interval")
+	if err != nil {
+		return CommonFolioTerminalFixtureResult{}, err
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	assignments := commonFolioAssignments(resources, writerGroup, limit)
+	result := CommonFolioTerminalFixtureResult{WriterGroup: writerGroup, MinimumPerAssignment: minimum, Timeout: timeout.String(), Interval: interval.String()}
+	if len(assignments) == 0 {
+		return result, fmt.Errorf("commonfolio-automation-await-terminal found no provisioned graph writer assignments for group %q", writerGroup)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	timeoutError := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("terminal CommonFolio automation fixture did not converge within %s", timeout)
+	}
+	for {
+		result.Attempts++
+		result.Assignments = result.Assignments[:0]
+		ready := true
+		for i, assignment := range assignments {
+			ordinal := intTarget(target, "ordinal", i)
+			if ordinal < 0 {
+				ordinal = i
+			}
+			item := CommonFolioTerminalFixtureAssignment{ActorID: assignment.ActorID, Ordinal: ordinal, SpaceID: assignment.SpaceID, DomainID: assignment.DomainID}
+			stdout, stderr, listErr := listCommonFolioInvocations(waitCtx, driver, environment, env.NodeRef{Ordinal: ordinal}, assignment, target)
+			item.LastResponse = bounded(stdout, 8192)
+			if listErr != nil {
+				item.LastError = bounded(strings.TrimSpace(stderr+"\n"+listErr.Error()), 4096)
+				ready = false
+			} else {
+				var list commonFolioInvocationList
+				if err := json.Unmarshal([]byte(stdout), &list); err != nil {
+					item.LastError = "decode invocation list: " + err.Error()
+					ready = false
+				} else {
+					for _, invocation := range list.Invocations {
+						if isTerminalAutomationStatus(invocation.Status) {
+							item.TerminalInvocations = append(item.TerminalInvocations, CommonFolioTerminalInvocation{ID: invocation.ID, Status: invocation.Status, ClaimVersion: invocation.ClaimVersion, UpdatedAt: invocation.UpdatedAt})
+						}
+					}
+					if len(item.TerminalInvocations) < minimum {
+						ready = false
+						item.LastError = fmt.Sprintf("found %d terminal invocation(s), want at least %d", len(item.TerminalInvocations), minimum)
+					}
+				}
+			}
+			result.Assignments = append(result.Assignments, item)
+		}
+		if waitCtx.Err() != nil {
+			return result, timeoutError()
+		}
+		if ready {
+			result.Ready = true
+			return result, nil
+		}
+		if err := sleepContext(waitCtx, interval); err != nil {
+			if waitCtx.Err() != nil {
+				return result, timeoutError()
+			}
+			return result, err
+		}
+	}
+}
+
+func listCommonFolioInvocations(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, node env.NodeRef, assignment provision.ActorAssignment, target map[string]any) (string, string, error) {
+	cmd := []string{
+		"mycel",
+		"--daemon-addr", firstNonEmpty(stringTarget(target, "daemonAddr"), "127.0.0.1:9091"),
+		"--username", firstNonEmpty(stringTarget(target, "username"), provision.DefaultAdminUsername),
+		"--password", firstNonEmpty(stringTarget(target, "password"), provision.DefaultAdminPassword),
+		"--output", "json",
+		"automation", "runs",
+		"--domain-id", assignment.DomainID,
+		"--automation", commonFolioBindingID(target, assignment),
+		"--limit", fmt.Sprint(intTarget(target, "runLimit", 100)),
+	}
+	res, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: cmd})
+	return res.Stdout, res.Stderr, err
+}
+
+func isTerminalAutomationStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "succeeded", "failed", "skipped", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func commonFolioAssignments(resources *provision.ScenarioResources, writerGroup string, limit int) []provision.ActorAssignment {

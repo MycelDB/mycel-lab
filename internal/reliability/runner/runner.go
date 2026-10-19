@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,15 @@ type PhaseState struct {
 	FinishedAt time.Time     `json:"finishedAt,omitempty"`
 }
 
+type harnessBuildIdentity struct {
+	BuildInfoAvailable bool              `json:"buildInfoAvailable"`
+	GoVersion          string            `json:"goVersion,omitempty"`
+	ModulePath         string            `json:"modulePath,omitempty"`
+	ModuleVersion      string            `json:"moduleVersion,omitempty"`
+	ModuleSum          string            `json:"moduleSum,omitempty"`
+	VCS                map[string]string `json:"vcs,omitempty"`
+}
+
 type Result struct {
 	RunID        string       `json:"runId"`
 	ScenarioName string       `json:"scenarioName"`
@@ -75,6 +85,7 @@ type Options struct {
 	ConsoleEndpoints         bool
 	ConsolePortBase          int
 	EnvironmentOverride      *spec.EnvironmentSpec
+	ImageOverride            string
 	ProgressWriter           io.Writer
 	EnvironmentDriver        env.EnvironmentDriver
 	EventRuntime             events.Runtime
@@ -127,6 +138,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	if opts.EnvironmentOverride != nil {
 		scenario.Environment = mergeEnvironmentOverride(scenario.Environment, *opts.EnvironmentOverride)
+	}
+	if image := strings.TrimSpace(opts.ImageOverride); image != "" {
+		scenario.Cluster.Image = image
 	}
 	driver := opts.EnvironmentDriver
 	effectiveEnvironment := scenario.Environment
@@ -255,6 +269,18 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			_ = scheduler.Stop(context.Background())
 		}
 	}()
+	captureRunFailureEvidence := func() {
+		if !schedulerStopped {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_ = scheduler.Stop(stopCtx)
+			stopCancel()
+			schedulerStopped = true
+		}
+		evidenceCtx, evidenceCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer evidenceCancel()
+		_ = captureClusterAssertionsOnce(evidenceCtx, sink, scenario, driver, environment, nodes)
+		_ = writeFinalOracleReport(evidenceCtx, sink, recorder, resources, scenario.Assertions, !provisionDryRun)
+	}
 
 	for i := range result.Phases {
 		select {
@@ -267,13 +293,16 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		phaseSpec := scenario.Phases[i]
+		phaseOracleStart := recorder.oracleSnapshot()
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-started", phaseSpec.Name, "", map[string]any{"dryRun": opts.DryRun}))
 		if err := eventRuntime.ExecutePhaseEvents(ctx, phaseSpec, opts.DryRun, recorder); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if err := scheduler.ApplyPhase(ctx, phaseSpec); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if opts.DryRun {
@@ -287,6 +316,20 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 				return failAfterEnvironmentCreate(RunAborted, ctx.Err())
 			case <-timer.C:
 			}
+		}
+		phaseOracleEnd := recorder.oracleSnapshot()
+		progressErr := assertPhaseOracleProgress(phaseSpec.Assertions, phaseOracleStart, phaseOracleEnd, !provisionDryRun)
+		if boolFromMap(phaseSpec.Assertions, "requireWorkloadProgress") && !provisionDryRun {
+			_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-workload-progress", phaseSpec.Name, "", map[string]any{
+				"acknowledgedTransactions": phaseOracleEnd.AcknowledgedTransactions - phaseOracleStart.AcknowledgedTransactions,
+				"successfulReads":          phaseOracleEnd.SuccessfulReads - phaseOracleStart.SuccessfulReads,
+				"ok":                       progressErr == nil,
+			}))
+		}
+		if progressErr != nil {
+			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+			captureRunFailureEvidence()
+			return failAfterEnvironmentCreate(RunFailed, progressErr)
 		}
 		if err := scheduler.RestoreBaseRates(ctx); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
@@ -304,7 +347,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if err := runFinalClusterAssertions(ctx, sink, scenario, driver, environment, nodes, !provisionDryRun); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
-	if err := writeFinalOracleReport(ctx, sink, recorder, resources, !provisionDryRun); err != nil {
+	if err := writeFinalOracleReport(ctx, sink, recorder, resources, scenario.Assertions, !provisionDryRun); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	if err := provision.CleanupScenario(ctx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun}); err != nil {
@@ -417,6 +460,9 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 }
 
 func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario) error {
+	if _, err := sink.WriteJSON("harness-build.json", currentHarnessBuildIdentity()); err != nil {
+		return err
+	}
 	if _, err := sink.WriteJSON("resolved-scenario.json", scenario); err != nil {
 		return err
 	}
@@ -431,7 +477,30 @@ func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario)
 	return err
 }
 
-func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder *runRecorder, resources provision.ScenarioResources, live bool) error {
+func currentHarnessBuildIdentity() harnessBuildIdentity {
+	identity := harnessBuildIdentity{}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return identity
+	}
+	identity.BuildInfoAvailable = true
+	identity.GoVersion = info.GoVersion
+	identity.ModulePath = info.Main.Path
+	identity.ModuleVersion = info.Main.Version
+	identity.ModuleSum = info.Main.Sum
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs", "vcs.revision", "vcs.time", "vcs.modified":
+			if identity.VCS == nil {
+				identity.VCS = map[string]string{}
+			}
+			identity.VCS[setting.Key] = setting.Value
+		}
+	}
+	return identity
+}
+
+func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder *runRecorder, resources provision.ScenarioResources, assertions map[string]any, live bool) error {
 	if recorder == nil {
 		return nil
 	}
@@ -454,6 +523,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 		ReadChecks:               len(readChecks),
 		FailedReads:              failedReads,
 		FailedWrites:             failedWrites,
+		RequiredAssertions:       finalOracleAssertionOptionsFrom(assertions),
 	}
 	if live {
 		report.LiveChecks = runLiveFinalOracleChecks(ctx, resources, expectedByActor)
@@ -465,6 +535,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 			break
 		}
 	}
+	evaluateFinalOracleAssertions(&report, resources, live)
 	if _, err := sink.WriteJSON("oracle/final-report.json", report); err != nil {
 		return err
 	}
@@ -479,27 +550,91 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 	if len(report.LiveChecks) > 0 {
 		fmt.Fprintf(&b, "\n## Live graph checks\n\n")
 		for _, check := range report.LiveChecks {
-			fmt.Fprintf(&b, "- `%s`: expected nodes=%d, actual nodes=%d, event-derived expected edges=%d, ok=%t", check.ActorID, check.Expected.Nodes, check.Actual.Nodes, check.Expected.Edges, check.OK)
+			fmt.Fprintf(&b, "- `%s`: expected nodes=%d, actual nodes=%d, expected edges=%d, actual edges=%d, ok=%t", check.ActorID, check.Expected.Nodes, check.Actual.Nodes, check.Expected.Edges, check.Actual.Edges, check.OK)
 			if check.Error != "" {
 				fmt.Fprintf(&b, ", error=%s", check.Error)
 			}
 			fmt.Fprintf(&b, "\n")
 		}
 	}
-	fmt.Fprintf(&b, "\n- OK: %t\n", report.OK)
-	_, err := sink.WriteText("oracle/final-report.md", b.String())
-	return err
+	fmt.Fprintf(&b, "\n- Observation OK: %t\n", report.OK)
+	fmt.Fprintf(&b, "- Required assertions OK: %t\n", report.AssertionsOK)
+	if report.AssertionsSkipped {
+		fmt.Fprintf(&b, "- Required assertions skipped: live checks are disabled\n")
+	}
+	for _, assertionErr := range report.AssertionErrors {
+		fmt.Fprintf(&b, "- Assertion error: %s\n", assertionErr)
+	}
+	if _, err := sink.WriteText("oracle/final-report.md", b.String()); err != nil {
+		return err
+	}
+	if live && !report.AssertionsOK {
+		return fmt.Errorf("final oracle assertions failed: %s", strings.Join(report.AssertionErrors, "; "))
+	}
+	return nil
 }
 
 type finalOracleReport struct {
-	AcknowledgedTransactions int                    `json:"acknowledgedTransactions"`
-	ExpectedCounts           oracle.Counts          `json:"expectedCounts"`
-	ExpectedCountsByActor    map[string]graphCounts `json:"expectedCountsByActor,omitempty"`
-	LiveChecks               []finalOracleLiveCheck `json:"liveChecks,omitempty"`
-	ReadChecks               int                    `json:"readChecks"`
-	FailedReads              int                    `json:"failedReads"`
-	FailedWrites             int                    `json:"failedWrites"`
-	OK                       bool                   `json:"ok"`
+	AcknowledgedTransactions int                         `json:"acknowledgedTransactions"`
+	ExpectedCounts           oracle.Counts               `json:"expectedCounts"`
+	ExpectedCountsByActor    map[string]graphCounts      `json:"expectedCountsByActor,omitempty"`
+	LiveChecks               []finalOracleLiveCheck      `json:"liveChecks,omitempty"`
+	ReadChecks               int                         `json:"readChecks"`
+	FailedReads              int                         `json:"failedReads"`
+	FailedWrites             int                         `json:"failedWrites"`
+	OK                       bool                        `json:"ok"`
+	RequiredAssertions       finalOracleAssertionOptions `json:"requiredAssertions"`
+	AssertionsOK             bool                        `json:"assertionsOk"`
+	AssertionsSkipped        bool                        `json:"assertionsSkipped,omitempty"`
+	AssertionErrors          []string                    `json:"assertionErrors,omitempty"`
+}
+
+type finalOracleAssertionOptions struct {
+	RequireConvergedCounts                    bool `json:"requireConvergedCounts"`
+	RequireNoAcknowledgedGraphTransactionLoss bool `json:"requireNoAcknowledgedGraphTransactionLoss"`
+}
+
+func finalOracleAssertionOptionsFrom(assertions map[string]any) finalOracleAssertionOptions {
+	final, _ := assertions["final"].(map[string]any)
+	return finalOracleAssertionOptions{
+		RequireConvergedCounts:                    boolFromMap(final, "requireConvergedCounts"),
+		RequireNoAcknowledgedGraphTransactionLoss: boolFromMap(final, "requireNoAcknowledgedGraphTransactionLoss"),
+	}
+}
+
+func (o finalOracleAssertionOptions) required() bool {
+	return o.RequireConvergedCounts || o.RequireNoAcknowledgedGraphTransactionLoss
+}
+
+func evaluateFinalOracleAssertions(report *finalOracleReport, resources provision.ScenarioResources, live bool) {
+	report.AssertionsOK = true
+	if !report.RequiredAssertions.required() {
+		return
+	}
+	if !live {
+		report.AssertionsSkipped = true
+		return
+	}
+	expectedChecks := 0
+	for _, assignment := range resources.Assignments {
+		if assignment.BehaviorType == "graph-transaction" && assignment.SpaceID != "" && assignment.DomainID != "" && assignment.DaemonAddr != "" {
+			expectedChecks++
+		}
+	}
+	if len(report.LiveChecks) != expectedChecks || expectedChecks == 0 {
+		report.AssertionErrors = append(report.AssertionErrors, fmt.Sprintf("live graph checks=%d, expected graph assignments=%d", len(report.LiveChecks), expectedChecks))
+	}
+	for _, check := range report.LiveChecks {
+		if check.OK && check.Error == "" && check.Actual == check.Expected {
+			continue
+		}
+		message := fmt.Sprintf("actor %s graph counts differ: expected nodes=%d edges=%d, actual nodes=%d edges=%d", check.ActorID, check.Expected.Nodes, check.Expected.Edges, check.Actual.Nodes, check.Actual.Edges)
+		if check.Error != "" {
+			message += ": " + check.Error
+		}
+		report.AssertionErrors = append(report.AssertionErrors, message)
+	}
+	report.AssertionsOK = len(report.AssertionErrors) == 0
 }
 
 type finalOracleLiveCheck struct {
@@ -541,16 +676,74 @@ func runLiveFinalOracleChecks(ctx context.Context, resources provision.ScenarioR
 			continue
 		}
 		nodes, nodeErr := queryCount(ctx, client, assignment.SpaceID, assignment.DomainID, "MATCH (n) RETURN count(n) FETCH FIRST 1 ROW ONLY")
+		edges, edgeErr := queryEdgeCount(ctx, client, assignment.SpaceID, assignment.DomainID, expected.Edges)
 		_ = client.Close()
-		check.Actual = graphCounts{Nodes: int(nodes)}
-		if nodeErr != nil {
-			check.Error = nodeErr.Error()
-		} else {
-			check.OK = check.Actual.Nodes == check.Expected.Nodes
+		check.Actual = graphCounts{Nodes: int(nodes), Edges: int(edges)}
+		switch {
+		case nodeErr != nil && edgeErr != nil:
+			check.Error = fmt.Sprintf("node count: %v; edge count: %v", nodeErr, edgeErr)
+		case nodeErr != nil:
+			check.Error = "node count: " + nodeErr.Error()
+		case edgeErr != nil:
+			check.Error = "edge count: " + edgeErr.Error()
+		default:
+			check.OK = check.Actual == check.Expected
 		}
 		checks = append(checks, check)
 	}
 	return checks
+}
+
+func queryEdgeCount(ctx context.Context, client *mycel.Client, spaceID, domainID string, expected int) (int64, error) {
+	sessionID, err := client.OpenSession(ctx, spaceID, domainID)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = client.CloseSession(ctx, sessionID) }()
+	txID, err := client.BeginReadOnlyTransaction(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = client.CloseTransaction(ctx, txID)
+		}
+	}()
+	var count int64
+	pageToken := ""
+	seenTokens := map[string]struct{}{}
+	for {
+		remaining := int64(expected+1) - count
+		if remaining <= 0 {
+			break
+		}
+		pageSize := int32(1000)
+		if remaining < int64(pageSize) {
+			pageSize = int32(remaining)
+		}
+		callCtx, cancel := client.AuthCallContext(ctx)
+		response, listErr := client.Graph.ListEdges(callCtx, &clientv1.ListEdgesRequest{TransactionId: txID, PageSize: pageSize, PageToken: pageToken})
+		cancel()
+		if listErr != nil {
+			return 0, listErr
+		}
+		count += int64(len(response.GetEdges()))
+		next := response.GetNextPageToken()
+		if next == "" {
+			break
+		}
+		if _, duplicate := seenTokens[next]; duplicate {
+			return 0, fmt.Errorf("list edges returned repeated page token")
+		}
+		seenTokens[next] = struct{}{}
+		pageToken = next
+	}
+	if err := client.CloseTransaction(ctx, txID); err != nil {
+		return 0, err
+	}
+	closed = true
+	return count, nil
 }
 
 func queryCount(ctx context.Context, client *mycel.Client, spaceID, domainID, gql string) (int64, error) {
@@ -647,6 +840,28 @@ func finalize(ctx context.Context, st store.Store, sink *artifacts.Sink, result 
 	return result, nil
 }
 
+type phaseOracleSnapshot struct {
+	AcknowledgedTransactions int
+	SuccessfulReads          int
+}
+
+func assertPhaseOracleProgress(assertions map[string]any, before, after phaseOracleSnapshot, live bool) error {
+	if !boolFromMap(assertions, "requireWorkloadProgress") || !live {
+		return nil
+	}
+	var failures []string
+	if delta := after.AcknowledgedTransactions - before.AcknowledgedTransactions; delta <= 0 {
+		failures = append(failures, "no graph transactions were acknowledged during the phase")
+	}
+	if delta := after.SuccessfulReads - before.SuccessfulReads; delta <= 0 {
+		failures = append(failures, "no graph reads succeeded during the phase")
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("phase workload progress assertion failed: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
 type runRecorder struct {
 	store store.Store
 	sink  *artifacts.Sink
@@ -656,7 +871,17 @@ type runRecorder struct {
 	acknowledged    []oracle.Transaction
 	expectedByActor map[string]graphCounts
 	readChecks      []map[string]any
+	successfulReads int
 	failedWrites    int
+}
+
+func (r *runRecorder) oracleSnapshot() phaseOracleSnapshot {
+	if r == nil {
+		return phaseOracleSnapshot{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return phaseOracleSnapshot{AcknowledgedTransactions: len(r.acknowledged), SuccessfulReads: r.successfulReads}
 }
 
 func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEvent) error {
@@ -693,6 +918,9 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 		}
 		r.mu.Lock()
 		r.readChecks = append(r.readChecks, payload)
+		if ok, _ := payload["ok"].(bool); ok {
+			r.successfulReads++
+		}
 		r.mu.Unlock()
 		_, _ = r.sink.AppendJSONL("actors/read-checks.jsonl", payload)
 		if ok, _ := payload["ok"].(bool); !ok {
