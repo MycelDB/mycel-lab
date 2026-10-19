@@ -10,7 +10,8 @@ import (
 )
 
 type LogAssertAbsentResult struct {
-	Resource string   `json:"resource"`
+	Resource string   `json:"resource,omitempty"`
+	Selector string   `json:"selector,omitempty"`
 	Tail     int      `json:"tail"`
 	Patterns []string `json:"patterns"`
 	Matches  []string `json:"matches,omitempty"`
@@ -19,7 +20,11 @@ type LogAssertAbsentResult struct {
 }
 
 func executeLogAssertAbsentEvent(ctx context.Context, environment env.Environment, target map[string]any) (LogAssertAbsentResult, error) {
-	resource := firstNonEmpty(stringTarget(target, "resource"), "statefulset/myceld")
+	selector := stringTarget(target, "selector")
+	resource := stringTarget(target, "resource")
+	if selector == "" && resource == "" {
+		resource = "statefulset/myceld"
+	}
 	tail := intTarget(target, "tail", 1000)
 	patterns := stringListTarget(target, "patterns")
 	if len(patterns) == 0 {
@@ -32,14 +37,22 @@ func executeLogAssertAbsentEvent(ctx context.Context, environment env.Environmen
 	if environment.Namespace != "" {
 		args = append(args, "-n", environment.Namespace)
 	}
-	args = append(args, "logs", resource, "--all-containers=true", fmt.Sprintf("--tail=%d", tail))
+	args = append(args, "logs")
+	logTarget := resource
+	if selector != "" {
+		args = append(args, "-l", selector, "--prefix=true")
+		logTarget = "selector " + selector
+	} else {
+		args = append(args, resource)
+	}
+	args = append(args, "--all-containers=true", fmt.Sprintf("--tail=%d", tail))
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
 	out, err := cmd.CombinedOutput()
 	text := string(out)
-	result := LogAssertAbsentResult{Resource: resource, Tail: tail, Patterns: patterns, Stdout: bounded(text, 8192)}
+	result := LogAssertAbsentResult{Resource: resource, Selector: selector, Tail: tail, Patterns: patterns, Stdout: bounded(text, 16384)}
 	if err != nil {
 		result.Stderr = err.Error()
-		return result, fmt.Errorf("kubectl logs %s: %w", resource, err)
+		return result, fmt.Errorf("kubectl logs %s: %w", logTarget, err)
 	}
 	lower := strings.ToLower(text)
 	for _, pattern := range patterns {
@@ -48,7 +61,7 @@ func executeLogAssertAbsentEvent(ctx context.Context, environment env.Environmen
 		}
 	}
 	if len(result.Matches) > 0 {
-		return result, fmt.Errorf("logs for %s contain forbidden replay failure pattern(s): %s", resource, strings.Join(result.Matches, ", "))
+		return result, fmt.Errorf("logs for %s contain forbidden replay failure pattern(s): %s", logTarget, strings.Join(result.Matches, ", "))
 	}
 	return result, nil
 }

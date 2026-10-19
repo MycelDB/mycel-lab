@@ -47,7 +47,7 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 		}
 	}
 	if err := validateEvent(event); err != nil {
-		return r.recordFailure(ctx, recorder, phase, event, err)
+		return r.recordFailure(ctx, recorder, phase, event, nil, err)
 	}
 	completionPayload := map[string]any{"runtime": r.Environment.Driver}
 	repeat := event.Repeat
@@ -59,7 +59,7 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 		for i := 0; i < repeat; i++ {
 			payload, err := r.applyEvent(ctx, eventForIteration(event, i))
 			if err != nil {
-				return r.recordFailure(ctx, recorder, phase, event, err)
+				return r.recordFailure(ctx, recorder, phase, event, payload, err)
 			}
 			for key, value := range payload {
 				completionPayload[key] = value
@@ -94,6 +94,12 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "commonfolio-automation-seed", "commonfolio-automation-diagnostics":
 		result, err := executeCommonFolioAutomationEvent(ctx, r.Driver, r.Environment, r.Resources, event.Type, event.Target)
 		return map[string]any{"commonfolioAutomation": result}, err
+	case "commonfolio-automation-await-terminal":
+		result, err := executeCommonFolioAwaitTerminalEvent(ctx, r.Driver, r.Environment, r.Resources, event.Target)
+		return map[string]any{"commonfolioTerminalFixture": result}, err
+	case "cluster-recovery-wait":
+		result, err := executeClusterRecoveryWaitEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Target)
+		return map[string]any{"clusterRecovery": result}, err
 	case "log-assert-absent":
 		result, err := executeLogAssertAbsentEvent(ctx, r.Environment, event.Target)
 		return map[string]any{"logAssertAbsent": result}, err
@@ -171,9 +177,13 @@ func nodeOrdinal(target map[string]any) int {
 	return nodeTargetOrdinal(target)
 }
 
-func (r *DriverRuntime) recordFailure(ctx context.Context, recorder Recorder, phase spec.PhaseSpec, event spec.EventSpec, err error) error {
+func (r *DriverRuntime) recordFailure(ctx context.Context, recorder Recorder, phase spec.PhaseSpec, event spec.EventSpec, eventPayload map[string]any, err error) error {
 	if recorder != nil {
-		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"error": err.Error(), "runtime": r.Environment.Driver}})
+		payload := map[string]any{"error": err.Error(), "runtime": r.Environment.Driver}
+		for key, value := range eventPayload {
+			payload[key] = value
+		}
+		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: payload})
 	}
 	return err
 }

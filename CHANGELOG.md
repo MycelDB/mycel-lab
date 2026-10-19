@@ -6,6 +6,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Added `k3d-commonfolio-stale-replay-recovery`, a deterministic retained-PVC reproduction and regression suite for stale automation invocation replay blocking replica admission and partition-group recovery (MycelDB/mycel#233).
+- Added terminal CommonFolio automation fixture and authenticated all-replica Raft recovery events with failure diagnostics.
+
+### Changed
+
+- Added `--image` to override the daemon image in resolved scenarios and suites for exact A/B candidate validation.
+- Event-driven failures now preserve partial event diagnostics, cluster/oracle reports, all-pod logs, and best-effort previous-container logs.
+- Log absence assertions can select all matching pods instead of inspecting only one StatefulSet pod.
+
+### Compatibility
+
+- The stale-replay scenario defaults to daemon `v0.19.3` as a negative control; use `--image myceldb/mycel:v0.19.4` or later for the positive regression.
+
 ## [v0.19.2] - 2026-10-13
 
 ### Added

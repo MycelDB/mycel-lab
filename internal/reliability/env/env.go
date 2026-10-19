@@ -785,6 +785,8 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 		{name: "environment/kubernetes-resources.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "get", "all,pvc", "-o", "wide"}},
 		{name: "environment/pods-describe.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "describe", "pods"}},
 		{name: "environment/pod-logs.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "statefulset/myceld", "--all-containers=true", "--tail=200"}},
+		{name: "environment/pod-logs-all.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "-l", "app=myceld", "--all-containers=true", "--prefix=true", "--tail=5000"}},
+		{name: "environment/pod-logs-previous.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "-l", "app=myceld", "--all-containers=true", "--prefix=true", "--previous", "--tail=5000"}},
 	}
 	for _, capture := range captures {
 		result, err := runner.Run(ctx, "kubectl", capture.args...)

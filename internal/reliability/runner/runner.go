@@ -75,6 +75,7 @@ type Options struct {
 	ConsoleEndpoints         bool
 	ConsolePortBase          int
 	EnvironmentOverride      *spec.EnvironmentSpec
+	ImageOverride            string
 	ProgressWriter           io.Writer
 	EnvironmentDriver        env.EnvironmentDriver
 	EventRuntime             events.Runtime
@@ -127,6 +128,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	if opts.EnvironmentOverride != nil {
 		scenario.Environment = mergeEnvironmentOverride(scenario.Environment, *opts.EnvironmentOverride)
+	}
+	if image := strings.TrimSpace(opts.ImageOverride); image != "" {
+		scenario.Cluster.Image = image
 	}
 	driver := opts.EnvironmentDriver
 	effectiveEnvironment := scenario.Environment
@@ -255,6 +259,18 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			_ = scheduler.Stop(context.Background())
 		}
 	}()
+	captureRunFailureEvidence := func() {
+		if !schedulerStopped {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_ = scheduler.Stop(stopCtx)
+			stopCancel()
+			schedulerStopped = true
+		}
+		evidenceCtx, evidenceCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer evidenceCancel()
+		_ = captureClusterAssertionsOnce(evidenceCtx, sink, scenario, driver, environment, nodes)
+		_ = writeFinalOracleReport(evidenceCtx, sink, recorder, resources, !provisionDryRun)
+	}
 
 	for i := range result.Phases {
 		select {
@@ -270,10 +286,12 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-started", phaseSpec.Name, "", map[string]any{"dryRun": opts.DryRun}))
 		if err := eventRuntime.ExecutePhaseEvents(ctx, phaseSpec, opts.DryRun, recorder); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if err := scheduler.ApplyPhase(ctx, phaseSpec); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if opts.DryRun {

@@ -271,7 +271,7 @@ func runDelete(args []string, stdout, stderr io.Writer) int {
 
 func runRun(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--image <tag>] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
 		return 0
 	}
 	if len(nonFlagArgs(args)) < 2 {
@@ -369,6 +369,7 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 		ConsoleEndpoints:         hasFlag(args, "--console-endpoints") || hasFlag(args, "--expose-console-ports"),
 		ConsolePortBase:          consolePortBase,
 		EnvironmentOverride:      environmentOverride,
+		ImageOverride:            strings.TrimSpace(flagValue(args, "--image")),
 		ProgressWriter:           stdout,
 	}, true
 }
@@ -517,7 +518,7 @@ func flagTakesValue(arg string) bool {
 		return false
 	}
 	switch arg {
-	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base":
+	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base", "--image":
 		return true
 	default:
 		return false

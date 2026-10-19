@@ -49,6 +49,30 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestRunScenarioImageOverrideIsRecordedInResolvedArtifacts(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	originalImage := scenario.Cluster.Image
+	const candidateImage = "myceldb/mycel:candidate"
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), ImageOverride: candidateImage})
+	if err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(result.ArtifactRoot, "resolved-scenario.json"))
+	if err != nil {
+		t.Fatalf("read resolved scenario: %v", err)
+	}
+	var resolved spec.ResolvedScenario
+	if err := json.Unmarshal(data, &resolved); err != nil {
+		t.Fatalf("decode resolved scenario: %v", err)
+	}
+	if resolved.Cluster.Image != candidateImage {
+		t.Fatalf("resolved image=%q, want %q", resolved.Cluster.Image, candidateImage)
+	}
+	if scenario.Cluster.Image != originalImage {
+		t.Fatalf("input scenario image mutated to %q", scenario.Cluster.Image)
+	}
+}
+
 func TestRunScenarioGraphMetricsAggregate(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "graph-actor-smoke.yaml")
 	st := store.NewMemoryStore()
