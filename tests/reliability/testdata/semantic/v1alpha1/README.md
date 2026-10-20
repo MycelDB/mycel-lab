@@ -8,7 +8,7 @@ This directory contains the SGT0 draft contracts for provider-neutral semantic g
 - `schemas/semantic-evidence.schema.json` defines the common sanitized JSONL evidence envelope.
 - `schemas/semantic-final-report.schema.json` defines the final gating semantic oracle report.
 - `examples/` contains non-secret synthetic examples for each schema.
-- `negative/` contains documents that must fail full schema validation, covering false success, malformed operations, unsafe classification, and a declared bound.
+- `negative/` contains documents that must fail full schema validation, including isolated true-verdict violations for every success conditional plus malformed operations, unsafe classification, and a declared bound.
 
 ## Status
 

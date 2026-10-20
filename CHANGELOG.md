@@ -9,7 +9,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 ### Added
 
 - Added the SGT0 proof/compatibility inventory and versioned corpus, semantic-evidence, and final-report schema drafts for provider-neutral semantic graph-index reliability issue #46.
-- Added Draft 2020-12 schema compilation tests plus positive and contract-negative fixtures for false-success reports, operation shapes, artifact classification, and decoder/schema bounds.
+- Added Draft 2020-12 schema compilation tests plus positive and contract-negative fixtures for isolated false-success conditions, operation shapes, artifact classification, and decoder/schema bounds.
 
 ### Changed
 

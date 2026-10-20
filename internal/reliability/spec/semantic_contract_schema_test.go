@@ -38,7 +38,13 @@ func TestSemanticContractSchemasRejectNegativeFixtures(t *testing.T) {
 		schema  string
 		fixture string
 	}{
-		{name: "false success verdict", schema: "semantic-final-report.schema.json", fixture: "false-success-report.json"},
+		{name: "combined false success verdict", schema: "semantic-final-report.schema.json", fixture: "false-success-report.json"},
+		{name: "true verdict with false gate", schema: "semantic-final-report.schema.json", fixture: "false-gate-success-report.json"},
+		{name: "true verdict with failed summary", schema: "semantic-final-report.schema.json", fixture: "nonzero-failed-summary-success-report.json"},
+		{name: "true verdict with not-run summary", schema: "semantic-final-report.schema.json", fixture: "nonzero-notrun-summary-success-report.json"},
+		{name: "true verdict with required non-pass assertion", schema: "semantic-final-report.schema.json", fixture: "required-nonpass-success-report.json"},
+		{name: "true verdict with empty required evidence", schema: "semantic-final-report.schema.json", fixture: "empty-required-evidence-success-report.json"},
+		{name: "true verdict with empty artifacts", schema: "semantic-final-report.schema.json", fixture: "empty-artifacts-success-report.json"},
 		{name: "invalid operation shape", schema: "semantic-corpus.schema.json", fixture: "invalid-operation-shape-corpus.json"},
 		{name: "unsafe artifact classification", schema: "semantic-corpus.schema.json", fixture: "unsafe-classification-corpus.json"},
 		{name: "bounded field", schema: "semantic-final-report.schema.json", fixture: "oversized-field-report.json"},

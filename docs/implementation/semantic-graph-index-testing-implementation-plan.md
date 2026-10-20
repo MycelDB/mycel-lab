@@ -891,12 +891,12 @@ Each row below names the minimum proof level, required capability, and terminal 
 
 | # | Scenario | Tranche(s) | Proof | Required capability | Terminal oracle |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | Committed node searchable | SGT4, SGT5 | 3 | embedding, direct semantic, provenance | Exact node/rank/score, `record_id`, revision, generation, and semantic source match. |
+| 1 | Committed node searchable | SGT4, SGT5 | 1; 3 after SGT5 | embedding, direct semantic; provenance for Level 3 | Level 1: exact node/rank/score, `record_id`, rule/binding, and direct semantic source match. Level 3: source revision and generation also match. |
 | 2 | Projection selects intended data | SGT4, SGT5, SGT8 | 2; 3 when versioned | projection + supported entity type | Level 2: selected values alter results, excluded values do not, and admin maintenance/index counts reach the terminal barrier. Level 3 after SGT5: the required fresh-through frontier also converges. |
-| 3 | Update replaces embedding | SGT4, SGT5 | 3 | embedding maintenance | New record/version wins; old candidate is absent at target revision. |
+| 3 | Update replaces embedding | SGT4, SGT5 | 2; 3 after SGT5 | embedding maintenance; provenance for Level 3 | Level 2: the new `record_id` wins, the old candidate is absent, and admin maintenance/index counts converge. Level 3: the replacement is attributed to the target revision/generation. |
 | 4 | Delete removes results | SGT4 | 2 | delete/tombstone maintenance | Deleted ID and stale record are absent; live count converges. |
-| 5 | Pre-existing data backfilled | SGT4, SGT5 | 3 | backfill | Every eligible entity has one active record at target revision. |
-| 6 | Transaction visibility | SGT4, SGT5 | 3 | graph transaction + maintenance provenance | No pre-commit, failed-statement-overlay, aborted, or rollback work; valid committed changes alone converge from their durable transaction/revision. |
+| 5 | Pre-existing data backfilled | SGT4, SGT5 | 2; 3 after SGT5 | backfill; provenance/freshness for Level 3 | Level 2: bounded backfill and admin maintenance/index counts show every eligible entity has one active record. Level 3: records and fresh-through are attributed to the pinned target revision/generation. |
+| 6 | Transaction visibility | SGT4, SGT5 | 2; 3 after SGT5 | graph transaction; maintenance provenance for Level 3 | Level 2: graph reads plus admin maintenance/results show no effects from pre-commit, failed-statement, aborted, or rolled-back work, while committed aggregate effects converge. Level 3: valid semantic records are attributed to the durable transaction/revision. |
 | 7 | Freshness/revision tracking | SGT5 | 3 | per-record revision + analyzed/fresh frontiers + bounded gaps | Analyzer cursor may advance, but fresh-through cannot cross unresolved work; capacity remains bounded and forces visible rebuild. |
 | 8 | Rapid/out-of-order updates | SGT2, SGT6 | 3 | scripted delay + stale-write guard | Newest revision/generation remains active after older completion. |
 | 9 | Connector failure/retry | SGT2, SGT7 | 2; 3 for revision boundary | scripted outcomes or emulator | Exact bounded attempts, degraded/dirty evidence, then convergence or terminal failure. |
@@ -912,7 +912,7 @@ Each row below names the minimum proof level, required capability, and terminal 
 | 19 | Pagination/cursor binding | SGT5, SGT8 | 3 | new direct semantic continuation API | No duplicate/skip; every changed binding field returns stale. |
 | 20 | Hydration after selection | SGT4, SGT8 | 2; 3 for pinned view | authorized hydration | Hydrated nodes match allowed revision; deleted/stale/inaccessible candidates do not leak. |
 | 21 | Dimension/model changes | SGT5, SGT8 | 3 | generation identity + rebuild/migration | Incompatible records/cursors are rejected; generations never mix. |
-| 22 | Projection/schema changes | SGT4, SGT8 | 3 | versioned projection | Affected records rebuild; old content no longer influences results. |
+| 22 | Projection/schema changes | SGT4, SGT5, SGT8 | 2; 3 after SGT5 | projection lifecycle; generation identity for Level 3 | Level 2: explicit stale/rebuild behavior converges and old content no longer influences results. Level 3: affected records rotate generation and the required fresh-through frontier converges. |
 | 23 | Empty/unsupported values | SGT8 | 2; 3 for freshness | projection value matrix | Each value has exact projection, skip, or error category and correct freshness. |
 | 24 | Large backfill with writes | SGT8 | 3 | metrics + bounded backfill/frontier state | Finite ceilings, visible rebuild-required overflow, monotonic progress, and final latest-revision convergence. |
 | 25 | Hybrid lexical/semantic | SGT8 | 2 plus source proof | hybrid diagnostics/fusion | Exact deterministic fusion order, limits, filters, sources, and pages match. |
