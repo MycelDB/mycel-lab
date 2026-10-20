@@ -440,6 +440,8 @@ Every tranche ends with focused tests, `make test`, `go vet ./...`, `make check-
 
 ### SGT0: Freeze the proof and compatibility contract
 
+Deliverable: [SGT0 semantic graph-index proof and compatibility contract](semantic-graph-index-testing-sgt0-contract.md)
+
 Repository: `mycel-lab`  
 Risk: low
 

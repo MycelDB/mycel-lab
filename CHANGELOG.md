@@ -6,6 +6,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Added the SGT0 proof/compatibility inventory and versioned corpus, semantic-evidence, and final-report schema drafts for provider-neutral semantic graph-index reliability issue #46.
+
+### Changed
+
+- Documentation checks now parse JSON contracts and examples in addition to Markdown and reliability YAML.
+
 ## [v0.20.0] - 2026-10-20
 
 ### Added

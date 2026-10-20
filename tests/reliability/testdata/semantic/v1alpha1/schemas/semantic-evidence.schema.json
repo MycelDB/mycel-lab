@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:myceldb:mycel-lab:schema:semantic-evidence:v1alpha1",
+  "title": "Mycel Lab semantic evidence record v1alpha1",
+  "description": "The common JSONL envelope for sanitized semantic reliability evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "runId",
+    "scenario",
+    "phase",
+    "sequence",
+    "startedAt",
+    "finishedAt",
+    "status",
+    "provenance",
+    "evidence"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "reliability.mycel.io/semantic-evidence/v1alpha1"
+    },
+    "kind": {
+      "enum": ["operation", "maintenance", "search", "budget", "assertion", "redaction"]
+    },
+    "runId": {"type": "string", "minLength": 1, "maxLength": 256},
+    "scenario": {"type": "string", "minLength": 1, "maxLength": 256},
+    "phase": {"type": "string", "minLength": 1, "maxLength": 256},
+    "eventId": {"type": "string", "maxLength": 256},
+    "actorId": {"type": "string", "maxLength": 256},
+    "sequence": {"type": "integer", "minimum": 0},
+    "startedAt": {"type": "string", "format": "date-time"},
+    "finishedAt": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["succeeded", "failed", "cancelled", "not-run"]},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "semanticContext": {"$ref": "#/$defs/semanticContext"},
+    "evidence": {"$ref": "#/$defs/evidence"},
+    "error": {"$ref": "#/$defs/error"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "harnessCommit",
+        "harnessDirty",
+        "daemonImage",
+        "providerProfileName",
+        "providerProfileSha256",
+        "corpusName",
+        "corpusSha256"
+      ],
+      "properties": {
+        "harnessCommit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+        "harnessDirty": {"type": "boolean"},
+        "daemonImage": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "daemonDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "apiVersion": {"type": "string", "maxLength": 128},
+        "sdkVersion": {"type": "string", "maxLength": 128},
+        "providerProfileName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "providerProfileSha256": {"$ref": "#/$defs/sha256"},
+        "corpusName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "corpusSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "semanticContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "daemonAddressId": {"type": "string", "maxLength": 256},
+        "spaceId": {"type": "string", "maxLength": 128},
+        "domainId": {"type": "string", "maxLength": 128},
+        "semanticRuleId": {"type": "string", "maxLength": 128},
+        "embeddingBindingKey": {"type": "string", "maxLength": 128},
+        "nodeId": {"type": "string", "maxLength": 128},
+        "recordId": {"type": "string", "maxLength": 128},
+        "committedRevision": {"type": "integer", "minimum": 0},
+        "sourceGraphRevision": {"type": "integer", "minimum": 0},
+        "analyzedThroughGraphRevision": {"type": "integer", "minimum": 0},
+        "freshThroughGraphRevision": {"type": "integer", "minimum": 0},
+        "generationId": {"type": "string", "maxLength": 256}
+      }
+    },
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*\\.\\.).+$"
+        },
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceKind", "proofLevel", "references", "data"],
+      "properties": {
+        "sourceKind": {
+          "enum": [
+            "graph",
+            "direct-semantic",
+            "hybrid",
+            "maintenance",
+            "provider-usage",
+            "budget",
+            "redaction"
+          ]
+        },
+        "proofLevel": {"type": "integer", "minimum": 0, "maximum": 3},
+        "references": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/artifactReference"}
+        },
+        "data": {
+          "type": "object",
+          "description": "Kind-specific sanitized data. SGT3 freezes per-kind payload schemas before execution."
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "messageSanitized", "retryable"],
+      "properties": {
+        "category": {"type": "string", "minLength": 1, "maxLength": 128},
+        "code": {"type": "string", "maxLength": 128},
+        "messageSanitized": {"type": "string", "maxLength": 4096},
+        "retryable": {"type": "boolean"}
+      }
+    }
+  }
+}
