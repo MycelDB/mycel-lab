@@ -6,6 +6,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Added `k3d-commonfolio-procedure-replay-recovery`, an artifact-backed negative control for retained-volume replay of an older `procedure.create` over an updated automation procedure (MycelDB/mycel#236).
+
+### Changed
+
+- CommonFolio automation fixtures can now generate explicit procedure and binding versions and distinct procedure definitions for deterministic create/update replay scenarios.
+
 ## [v0.20.0] - 2026-10-20
 
 ### Added
