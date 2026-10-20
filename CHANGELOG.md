@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [v0.20.0] - 2026-10-20
+
 ### Added
 
 - Added `k3d-commonfolio-stale-replay-recovery`, a deterministic retained-PVC reproduction and regression suite for stale automation invocation replay blocking replica admission and partition-group recovery (MycelDB/mycel#233).
@@ -18,10 +20,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - Declared final graph convergence/loss assertions now compare live node and edge counts and fail the run; phases can require acknowledged-write and successful-read progress.
 - All-replica recovery now requires the exact system-plus-partition Raft group identity set, with missing, duplicate, and unexpected groups reported; terminal-fixture and recovery waits enforce overall context deadlines.
 - Log absence assertions can select all matching pods, scan a complete time-bounded log window with bounded retained output, and inspect lines older than the captured artifact tail.
+- Updated Lab to use `mycel-go-sdk v0.20.1`, the wire-compatible contract documentation correction for the v0.20 API/SDK line.
 
 ### Compatibility
 
-- The stale-replay scenario defaults to daemon `v0.19.3` as a negative control; use `--image myceldb/mycel:v0.19.4` or later for the positive regression.
+- The stale-replay scenario defaults to daemon `v0.19.3` as a negative control; use `--image myceldb/mycel:v0.20.0` for the coordinated release regression.
+- Best used with Mycel daemon `v0.20.0` and API/SDK `v0.20.1`; destructive suites remain explicit and require `--confirm-destructive`.
 
 ## [v0.19.2] - 2026-10-13
 

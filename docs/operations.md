@@ -201,7 +201,7 @@ the scenario, which supports exact A/B candidate validation. For example:
 ```sh
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery \
   --confirm-destructive \
-  --image myceldb/mycel:v0.19.4
+  --image myceldb/mycel:v0.20.0
 ```
 
 ## Interpreting results
