@@ -2,7 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:myceldb:mycel-lab:schema:semantic-final-report:v1alpha1",
   "title": "Mycel Lab semantic final report v1alpha1",
-  "description": "The gating semantic oracle report. Required not-run assertions cannot produce assertionsOk=true.",
+  "description": "The gating semantic oracle report. Required failed/not-run assertions or false gates cannot produce assertionsOk=true.",
+  "x-mycel-decoder-limits": {
+    "maxDocumentBytes": 4194304,
+    "maxNestingDepth": 16,
+    "maxStringUtf8Bytes": 65536,
+    "maxAssertions": 10000,
+    "maxArtifactReferences": 10000,
+    "maxEvidenceReferencesPerAssertion": 256
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -29,13 +37,57 @@
     "assertions": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 10000,
       "items": {"$ref": "#/$defs/assertion"}
     },
     "artifacts": {
       "type": "array",
+      "maxItems": 10000,
       "items": {"$ref": "#/$defs/artifactReference"}
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"assertionsOk": {"const": true}},
+        "required": ["assertionsOk"]
+      },
+      "then": {
+        "properties": {
+          "summary": {
+            "properties": {
+              "failed": {"const": 0},
+              "notRun": {"const": 0}
+            }
+          },
+          "gates": {
+            "properties": {
+              "graph": {"const": true},
+              "semantic": {"const": true},
+              "budget": {"const": true},
+              "redaction": {"const": true},
+              "artifacts": {"const": true}
+            }
+          },
+          "assertions": {
+            "items": {
+              "if": {
+                "properties": {"required": {"const": true}},
+                "required": ["required"]
+              },
+              "then": {
+                "properties": {
+                  "status": {"const": "pass"},
+                  "evidenceRefs": {"minItems": 1}
+                }
+              }
+            }
+          },
+          "artifacts": {"minItems": 1}
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha256": {
       "type": "string",
@@ -46,10 +98,10 @@
       "additionalProperties": false,
       "required": ["required", "passed", "failed", "notRun"],
       "properties": {
-        "required": {"type": "integer", "minimum": 0},
-        "passed": {"type": "integer", "minimum": 0},
-        "failed": {"type": "integer", "minimum": 0},
-        "notRun": {"type": "integer", "minimum": 0}
+        "required": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "passed": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "failed": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "notRun": {"type": "integer", "minimum": 0, "maximum": 10000}
       }
     },
     "gates": {
@@ -84,6 +136,7 @@
         "reasonSanitized": {"type": "string", "maxLength": 4096},
         "evidenceRefs": {
           "type": "array",
+          "maxItems": 256,
           "items": {"type": "string", "minLength": 1, "maxLength": 1024}
         }
       }
@@ -97,7 +150,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024,
-          "pattern": "^(?!/)(?!.*\\.\\.).+$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.#=-]*(/[A-Za-z0-9][A-Za-z0-9_.#=-]*)*$"
         },
         "sha256": {"$ref": "#/$defs/sha256"}
       }

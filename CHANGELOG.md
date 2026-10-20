@@ -9,10 +9,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 ### Added
 
 - Added the SGT0 proof/compatibility inventory and versioned corpus, semantic-evidence, and final-report schema drafts for provider-neutral semantic graph-index reliability issue #46.
+- Added Draft 2020-12 schema compilation tests plus positive and contract-negative fixtures for false-success reports, operation shapes, artifact classification, and decoder/schema bounds.
 
 ### Changed
 
 - Documentation checks now parse JSON contracts and examples in addition to Markdown and reliability YAML.
+- Strengthened the SGT0 contract with typed graph mutation operations, node/edge fixture shapes, explicit minimum-score and artifact-capture safety, Level 1-only baseline examples, bounded decoder annotations, Admin Maintenance lifecycle ownership, direct semantic filter prerequisites, and compose artifact topology.
 
 ## [v0.20.0] - 2026-10-20
 

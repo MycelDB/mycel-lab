@@ -3,6 +3,14 @@
   "$id": "urn:myceldb:mycel-lab:schema:semantic-evidence:v1alpha1",
   "title": "Mycel Lab semantic evidence record v1alpha1",
   "description": "The common JSONL envelope for sanitized semantic reliability evidence.",
+  "x-mycel-decoder-limits": {
+    "maxDocumentBytes": 1048576,
+    "maxNestingDepth": 16,
+    "maxStringUtf8Bytes": 65536,
+    "maxObjectProperties": 256,
+    "maxNestedArrayItems": 1024,
+    "maxArtifactReferences": 256
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -99,7 +107,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024,
-          "pattern": "^(?!/)(?!.*\\.\\.).+$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.#=-]*(/[A-Za-z0-9][A-Za-z0-9_.#=-]*)*$"
         },
         "sha256": {"$ref": "#/$defs/sha256"}
       }
@@ -123,13 +131,33 @@
         "proofLevel": {"type": "integer", "minimum": 0, "maximum": 3},
         "references": {
           "type": "array",
+          "maxItems": 256,
           "items": {"$ref": "#/$defs/artifactReference"}
         },
         "data": {
-          "type": "object",
+          "$ref": "#/$defs/sanitizedObject",
           "description": "Kind-specific sanitized data. SGT3 freezes per-kind payload schemas before execution."
         }
       }
+    },
+    "sanitizedValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string", "maxLength": 65536},
+        {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/sanitizedValue"}
+        },
+        {"$ref": "#/$defs/sanitizedObject"}
+      ]
+    },
+    "sanitizedObject": {
+      "type": "object",
+      "maxProperties": 256,
+      "additionalProperties": {"$ref": "#/$defs/sanitizedValue"}
     },
     "error": {
       "type": "object",

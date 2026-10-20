@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-final-report/v1alpha1",
+  "runId": "negative-oversized-field",
+  "scenario": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "proofLevel": 1,
+  "assertionsOk": false,
+  "summary": {
+    "required": 1,
+    "passed": 0,
+    "failed": 1,
+    "notRun": 0
+  },
+  "gates": {
+    "graph": false,
+    "semantic": false,
+    "budget": true,
+    "redaction": true,
+    "artifacts": true
+  },
+  "assertions": [
+    {
+      "id": "semantic.failed",
+      "description": "Negative fixture with a scenario name longer than 256 characters.",
+      "required": true,
+      "proofLevel": 1,
+      "status": "fail",
+      "evidenceRefs": []
+    }
+  ],
+  "artifacts": []
+}

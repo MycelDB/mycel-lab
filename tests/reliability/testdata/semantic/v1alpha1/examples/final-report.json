@@ -2,7 +2,7 @@
   "schemaVersion": "reliability.mycel.io/semantic-final-report/v1alpha1",
   "runId": "semantic-contract-20261020T120000Z",
   "scenario": "semantic-graph-index-contract",
-  "proofLevel": 3,
+  "proofLevel": 1,
   "assertionsOk": true,
   "summary": {
     "required": 2,
@@ -27,22 +27,18 @@
       "evidenceRefs": ["semantic/searches.jsonl#sequence=7"]
     },
     {
-      "id": "semantic.fresh-through",
-      "description": "The semantic fresh-through frontier reaches the committed graph revision with no unresolved gap.",
+      "id": "semantic.exact-ranking",
+      "description": "The deterministic direct semantic result has the expected node, score, and rank.",
       "required": true,
-      "proofLevel": 3,
+      "proofLevel": 1,
       "status": "pass",
-      "evidenceRefs": ["semantic/maintenance.jsonl#sequence=6"]
+      "evidenceRefs": ["semantic/searches.jsonl#sequence=7"]
     }
   ],
   "artifacts": [
     {
       "path": "semantic/searches.jsonl",
       "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-    },
-    {
-      "path": "semantic/maintenance.jsonl",
-      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
   ]
 }

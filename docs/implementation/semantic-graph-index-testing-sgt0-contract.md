@@ -48,7 +48,7 @@ A Level 2 assertion adds:
 - update/delete/tombstone behavior with stale `record_id` candidates absent;
 - graph reads confirming the expected committed entity state.
 
-On the release baseline, Level 2 establishes terminal queue/index convergence but not exact graph-revision freshness.
+On the release baseline, Level 2 establishes terminal queue/index convergence but not exact graph-revision freshness. Harness lifecycle polling uses authorization-scoped Admin Semantic Maintenance status/work RPCs; client rule-summary queue counts are corroborating discovery metadata, not a substitute for maintenance authorization or work-item evidence.
 
 ### Level 3: revision/provenance proof
 
@@ -124,11 +124,15 @@ Available client summary fields include:
 - rule state;
 - binding key/purpose/intelligence-profile ID and key/vector-store ID and key;
 - physical search-index state, live-record count, last rebuild time, and last error;
-- pending/running/retryable-failed/permanent-failed queue counts and last refresh/backfill/error timestamps.
+- declared pending/running/retryable-failed/permanent-failed queue counts and last refresh/backfill/error timestamps.
+
+On daemon `v0.20.0`, the client summary mapper populates only `queue_depth_pending`; running, retryable-failed, and permanent-failed remain protobuf-default zero even when corresponding work exists. No client-summary zero is accepted as terminal evidence on this baseline.
 
 The Admin API can validate, create, update, enable/disable, and delete rules and exposes selector, projection source, embedding binding, maintenance, and storage policies.
 
-These fields prove configured intent and terminal physical state. They do not prove per-record revision, model resolution, generation, or contiguous freshness.
+These client-summary fields prove configured intent and provide only a non-authoritative status snapshot. They do not enumerate maintenance work and are not the SGT4 lifecycle-control surface. Test-side backfill control and the Level 2 terminal barrier require authorization-scoped `AdminSemanticMaintenanceService.GetSemanticMaintenanceStatus` plus targeted `ListSemanticMaintenanceWork` diagnostics from section 4.4.
+
+These fields do not prove per-record revision, model resolution, generation, or contiguous freshness.
 
 ### 4.4 Semantic maintenance
 
@@ -200,7 +204,7 @@ The SDK exposes generated clients through:
 - `AdminClient.InferencePolicies`;
 - `AdminClient.InferenceUsage`.
 
-SGT3 can provision and observe current resources without adding SDK convenience wrappers. Any new source protobuf fields/RPCs must land in `mycel-api`, then be regenerated and released in `mycel-go-sdk` before Mycel Lab consumes them.
+These are raw generated service clients; the SDK has no high-level semantic-search convenience method. SGT3 can provision and observe current resources through the generated stubs without adding SDK convenience wrappers. Any new source protobuf fields/RPCs must land in `mycel-api`, then be regenerated and released in `mycel-go-sdk` before Mycel Lab consumes them.
 
 ## 5. Released daemon implementation inventory
 
@@ -226,7 +230,7 @@ Sources are from the `v0.20.0` daemon tree.
 | Direct semantic index participated | direct RPC plus non-empty `record_id`/rule/binding | 1 | Available | None |
 | Exact deterministic ranking | direct result IDs/scores | 1 | Blocked by constant fake vector | Deterministic connector issue |
 | Physical index ready/count | binding `SearchIndexStatus` | 2 | Available | None |
-| Maintenance terminal queue state | client/admin queue counts and work statuses | 2 | Available | None |
+| Maintenance terminal queue state | admin `GetSemanticMaintenanceStatus` plus targeted `ListSemanticMaintenanceWork`; v0.20 client summary zeros are not evidence | 2 | Available | Admin maintenance authorization in SGT4 preflight |
 | Backfill result counts | `BackfillSemanticRuleResponse` | 2 | Available | None |
 | Update replaces stale record | before/after `record_id`, result set, live count | 2 | Available after SGT2 | Harness implementation |
 | Delete/tombstone removes candidate | direct results plus graph read/live count | 2 | Available after SGT2 | Harness implementation |
@@ -236,7 +240,7 @@ Sources are from the `v0.20.0` daemon tree.
 | Contiguous semantic freshness | none; analyzer checkpoint is insufficient | 3 | Missing | Fresh-through/gap product plus API issue |
 | Actual routed provider/model | none | 3 | Missing/optional by provider | Neutral inference result/storage/API extension |
 | Direct semantic pagination | none | 3 | Missing | Source-safe pagination API issue |
-| Semantic-only filters | none | 2/3 | Missing | Capability/API design before SGT8 |
+| Semantic-only filters | none | 2/3 | Missing | Direct hard-eligibility filter contract in SGT5 / `mycel-api#36`, exercised in SGT8 |
 | Supported physical rebuild | backfill only | 3 | Missing | Product/API rebuild prerequisite |
 | Hard provider budgets | partial policy/usage fields | Cross-cutting | Missing | Atomic budget product/API prerequisite |
 | Hybrid source/fusion | generic Search source/score diagnostics | 2 | Available | SGT8 harness implementation |
@@ -291,15 +295,15 @@ SGT0 adds draft contracts under `tests/reliability/testdata/semantic/v1alpha1`:
 - `schemas/semantic-corpus.schema.json`;
 - `schemas/semantic-evidence.schema.json`;
 - `schemas/semantic-final-report.schema.json`;
-- synthetic examples for each schema.
+- synthetic positive examples and contract-negative fixtures.
 
-The corpus draft includes stable logical keys, scope isolation, projection include/exclude paths, deterministic fixture tokens, mutation disposition, transaction expectations, query proof level, and exact/invariant result expectations.
+The corpus draft includes stable logical keys, scope isolation, node and edge fixtures, projection include/exclude paths, deterministic fixture tokens, discriminated node/edge create/update/delete operations, mutation disposition, graph-versus-semantic change expectations, query proof level, minimum score, and exact/invariant result expectations. `artifactCaptureSafe: true` is valid only for classified synthetic data.
 
 The evidence draft defines common provenance, run/phase sequencing, safe semantic IDs/revisions, proof source, evidence references, and sanitized errors. Kind-specific payloads remain explicitly provisional until SGT3.
 
-The final-report draft makes graph, semantic, budget, redaction, and artifact gates explicit. SGT3 must enforce the invariant that every required assertion passes and every gate is true before `assertionsOk` can be true.
+The final-report draft makes graph, semantic, budget, redaction, and artifact gates explicit. The schema already rejects `assertionsOk: true` unless every gate is true, failed/not-run summary counts are zero, every required assertion passes with evidence, and at least one artifact is referenced. SGT3 must additionally enforce cross-field summary arithmetic, evidence-reference resolution, artifact hashing, and redaction at runtime.
 
-`make check-docs` parses all JSON drafts and examples without adding a runtime dependency. SGT1–SGT3 must add full schema validation before accepting these documents as executable inputs or output contracts.
+`make check-docs` parses every JSON document and checks basic schema metadata. Go contract tests compile all three schemas with a Draft 2020-12 validator, accept the positive examples, reject false-success, malformed-operation, unsafe-classification, and bounded-field fixtures, and require explicit decoder-limit annotations. Runtime readers must enforce `x-mycel-decoder-limits` before or while decoding; schema array/string/object bounds remain defense in depth. SGT1–SGT3 still own runtime decoding and per-evidence-kind payload schemas before these documents become executable inputs or output contracts.
 
 ## 9. Cross-repository prerequisites
 
@@ -308,8 +312,8 @@ The following issues are the only SGT0 product/API prerequisites. SDK regenerati
 | Owner | Prerequisite | Blocks | Tracking |
 | --- | --- | --- | --- |
 | `mycel` | deterministic input-sensitive fake embedding and finite scripted outcomes | SGT2–SGT4 exact rankings/retries | [MycelDB/mycel#237](https://github.com/MycelDB/mycel/issues/237) |
-| `mycel` | durable per-record provenance, bounded analyzed/fresh frontiers, stale-write guard, migration, and supported rebuild | SGT5–SGT6 | [MycelDB/mycel#238](https://github.com/MycelDB/mycel/issues/238) |
-| `mycel-api` | public semantic provenance/freshness/gap diagnostics, source-safe direct pagination, and rebuild control | SGT5–SGT6 | [MycelDB/mycel-api#36](https://github.com/MycelDB/mycel-api/issues/36), blocked by daemon semantics |
+| `mycel` | durable per-record provenance, bounded analyzed/fresh frontiers, stale-write guard, direct hard-filter execution, migration, and supported rebuild | SGT5–SGT8 | [MycelDB/mycel#238](https://github.com/MycelDB/mycel/issues/238) |
+| `mycel-api` | public semantic provenance/freshness/gap diagnostics, direct hard-eligibility filters, source-safe direct pagination, and rebuild control | SGT5–SGT8 | [MycelDB/mycel-api#36](https://github.com/MycelDB/mycel-api/issues/36), blocked by daemon semantics |
 | `mycel` | atomic provider attempt/concurrency/batch/token/time/cost budgets | SGT1b and live SGT9 | [MycelDB/mycel#239](https://github.com/MycelDB/mycel/issues/239) |
 | `mycel-api` | public budget capability, reservation, denial, batching, and usage accounting | SGT1b and live SGT9 | [MycelDB/mycel-api#37](https://github.com/MycelDB/mycel-api/issues/37), blocked by daemon semantics |
 

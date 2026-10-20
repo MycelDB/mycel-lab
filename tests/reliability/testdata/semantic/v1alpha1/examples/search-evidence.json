@@ -29,15 +29,11 @@
     "embeddingBindingKey": "primary",
     "nodeId": "44444444-4444-4444-4444-444444444444",
     "recordId": "55555555-5555-5555-5555-555555555555",
-    "committedRevision": 12,
-    "sourceGraphRevision": 12,
-    "analyzedThroughGraphRevision": 12,
-    "freshThroughGraphRevision": 12,
-    "generationId": "generation-1"
+    "committedRevision": 12
   },
   "evidence": {
     "sourceKind": "direct-semantic",
-    "proofLevel": 3,
+    "proofLevel": 1,
     "references": [
       {
         "path": "semantic/searches.jsonl",

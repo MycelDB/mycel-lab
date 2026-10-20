@@ -3,6 +3,13 @@
   "$id": "urn:myceldb:mycel-lab:schema:semantic-corpus:v1alpha1",
   "title": "Mycel Lab semantic corpus v1alpha1",
   "description": "A provider-neutral synthetic graph corpus, mutation sequence, and semantic query oracle.",
+  "x-mycel-decoder-limits": {
+    "maxDocumentBytes": 4194304,
+    "maxNestingDepth": 16,
+    "maxStringUtf8Bytes": 65536,
+    "maxObjectProperties": 256,
+    "maxNestedArrayItems": 256
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -36,31 +43,47 @@
           "enum": ["synthetic", "public", "confidential"]
         },
         "artifactCaptureSafe": {"type": "boolean"}
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"artifactCaptureSafe": {"const": true}},
+            "required": ["artifactCaptureSafe"]
+          },
+          "then": {
+            "properties": {"dataClass": {"const": "synthetic"}}
+          }
+        }
+      ]
     },
     "scopes": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 64,
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/scope"}
     },
     "nodes": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 10000,
       "items": {"$ref": "#/$defs/node"}
     },
     "edges": {
       "type": "array",
+      "maxItems": 20000,
       "default": [],
       "items": {"$ref": "#/$defs/edge"}
     },
     "mutations": {
       "type": "array",
+      "maxItems": 10000,
       "items": {"$ref": "#/$defs/mutation"}
     },
     "queries": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 10000,
       "items": {"$ref": "#/$defs/query"}
     }
   },
@@ -71,8 +94,46 @@
     },
     "stringSet": {
       "type": "array",
+      "maxItems": 256,
       "uniqueItems": true,
       "items": {"type": "string", "minLength": 1, "maxLength": 512}
+    },
+    "nonEmptyStringSet": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 512}
+    },
+    "labels": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string", "maxLength": 65536},
+        {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/jsonValue"}
+        },
+        {"$ref": "#/$defs/jsonObject"}
+      ]
+    },
+    "jsonObject": {
+      "type": "object",
+      "maxProperties": 256,
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+    },
+    "nonEmptyJsonObject": {
+      "$ref": "#/$defs/jsonObject",
+      "minProperties": 1
     },
     "scope": {
       "type": "object",
@@ -102,8 +163,8 @@
       "properties": {
         "key": {"$ref": "#/$defs/key"},
         "scopeKey": {"$ref": "#/$defs/key"},
-        "labels": {"$ref": "#/$defs/stringSet"},
-        "properties": {"type": "object"},
+        "labels": {"$ref": "#/$defs/labels"},
+        "properties": {"$ref": "#/$defs/jsonObject"},
         "projection": {"$ref": "#/$defs/projectionExpectation"}
       }
     },
@@ -116,32 +177,96 @@
         "scopeKey": {"$ref": "#/$defs/key"},
         "fromNodeKey": {"$ref": "#/$defs/key"},
         "toNodeKey": {"$ref": "#/$defs/key"},
-        "labels": {"$ref": "#/$defs/stringSet"},
-        "properties": {"type": "object"}
+        "labels": {"$ref": "#/$defs/labels"},
+        "properties": {"$ref": "#/$defs/jsonObject"}
       }
     },
     "operation": {
+      "oneOf": [
+        {"$ref": "#/$defs/createNodeOperation"},
+        {"$ref": "#/$defs/updateNodeOperation"},
+        {"$ref": "#/$defs/deleteNodeOperation"},
+        {"$ref": "#/$defs/createEdgeOperation"},
+        {"$ref": "#/$defs/updateEdgeOperation"},
+        {"$ref": "#/$defs/deleteEdgeOperation"}
+      ]
+    },
+    "createNodeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "targetKey", "scopeKey", "labels", "setProperties"],
+      "properties": {
+        "type": {"const": "create-node"},
+        "targetKey": {"$ref": "#/$defs/key"},
+        "scopeKey": {"$ref": "#/$defs/key"},
+        "labels": {"$ref": "#/$defs/labels"},
+        "setProperties": {"$ref": "#/$defs/jsonObject"}
+      }
+    },
+    "updateNodeOperation": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "targetKey"],
       "properties": {
-        "type": {
-          "enum": [
-            "create-node",
-            "update-node",
-            "delete-node",
-            "create-edge",
-            "update-edge",
-            "delete-edge"
-          ]
-        },
+        "type": {"const": "update-node"},
+        "targetKey": {"$ref": "#/$defs/key"},
+        "labels": {"$ref": "#/$defs/labels"},
+        "setProperties": {"$ref": "#/$defs/nonEmptyJsonObject"},
+        "deleteProperties": {"$ref": "#/$defs/nonEmptyStringSet"}
+      },
+      "anyOf": [
+        {"required": ["labels"]},
+        {"required": ["setProperties"]},
+        {"required": ["deleteProperties"]}
+      ]
+    },
+    "deleteNodeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "targetKey"],
+      "properties": {
+        "type": {"const": "delete-node"},
+        "targetKey": {"$ref": "#/$defs/key"}
+      }
+    },
+    "createEdgeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "targetKey", "scopeKey", "fromNodeKey", "toNodeKey", "labels", "setProperties"],
+      "properties": {
+        "type": {"const": "create-edge"},
         "targetKey": {"$ref": "#/$defs/key"},
         "scopeKey": {"$ref": "#/$defs/key"},
         "fromNodeKey": {"$ref": "#/$defs/key"},
         "toNodeKey": {"$ref": "#/$defs/key"},
-        "labels": {"$ref": "#/$defs/stringSet"},
-        "setProperties": {"type": "object"},
-        "deleteProperties": {"$ref": "#/$defs/stringSet"}
+        "labels": {"$ref": "#/$defs/labels"},
+        "setProperties": {"$ref": "#/$defs/jsonObject"}
+      }
+    },
+    "updateEdgeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "targetKey"],
+      "properties": {
+        "type": {"const": "update-edge"},
+        "targetKey": {"$ref": "#/$defs/key"},
+        "labels": {"$ref": "#/$defs/labels"},
+        "setProperties": {"$ref": "#/$defs/nonEmptyJsonObject"},
+        "deleteProperties": {"$ref": "#/$defs/nonEmptyStringSet"}
+      },
+      "anyOf": [
+        {"required": ["labels"]},
+        {"required": ["setProperties"]},
+        {"required": ["deleteProperties"]}
+      ]
+    },
+    "deleteEdgeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "targetKey"],
+      "properties": {
+        "type": {"const": "delete-edge"},
+        "targetKey": {"$ref": "#/$defs/key"}
       }
     },
     "mutationExpectation": {
@@ -172,6 +297,7 @@
         "operations": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 256,
           "items": {"$ref": "#/$defs/operation"}
         },
         "expected": {"$ref": "#/$defs/mutationExpectation"}
@@ -189,15 +315,18 @@
       "properties": {
         "orderedNodeKeys": {
           "type": "array",
+          "maxItems": 10000,
           "items": {"$ref": "#/$defs/key"}
         },
         "absentNodeKeys": {
           "type": "array",
+          "maxItems": 10000,
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/key"}
         },
         "exactScores": {
           "type": "array",
+          "maxItems": 10000,
           "items": {"type": "number"}
         },
         "scoreTolerance": {"type": "number", "minimum": 0},

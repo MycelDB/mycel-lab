@@ -178,6 +178,7 @@
       "semanticRuleKey": "document-projection",
       "bindingKey": "primary",
       "limit": 3,
+      "minScore": 0.5,
       "proofLevel": 1,
       "expected": {
         "orderedNodeKeys": ["memory-note"],
@@ -195,6 +196,7 @@
       "semanticRuleKey": "document-projection",
       "bindingKey": "primary",
       "limit": 3,
+      "minScore": 0.5,
       "proofLevel": 3,
       "expected": {
         "orderedNodeKeys": [],
