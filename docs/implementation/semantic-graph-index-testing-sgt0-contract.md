@@ -329,6 +329,6 @@ Prerequisite issue bodies must link Mycel Lab issue #46 and this contract, prese
 - [x] Corpus, evidence, and final-report schemas plus synthetic examples are drafted.
 - [x] Compatibility, versioning, unsupported-capability, cursor, and artifact policies are defined.
 - [x] Cross-repository prerequisite issues are filed and linked.
-- [ ] Exact-head validation and independent review pass.
+- [x] Exact-head validation and independent review pass at `82870b67e4d6f12ea1940ea573a8725c4243b416`.
 
-SGT1 may begin only after the remaining checklist items are complete.
+SGT0 is complete. Beginning SGT1 requires separate operator authorization.
