@@ -818,7 +818,7 @@ func (d ComposeDriver) Capabilities() CapabilitySet {
 }
 
 func (d ComposeDriver) Validate(environment spec.EnvironmentSpec) error {
-	return rejectUnknownOptions(environment.Options, "composeFile", "composeFiles", "projectName", "projectNamePrefix", "serviceNames", "grpcPorts", "objectStoreFixture")
+	return rejectUnknownOptions(environment.Options, "composeFile", "composeFiles", "projectName", "projectNamePrefix", "serviceNames", "grpcPorts", "objectStoreFixture", "imageOverride")
 }
 
 func (d ComposeDriver) Preflight(ctx context.Context, environment spec.EnvironmentSpec) error {
@@ -888,6 +888,9 @@ func (d ComposeDriver) Create(ctx context.Context, scenario spec.ResolvedScenari
 		projectName = composeProjectName(scenario.Metadata.Name, stringOption(environmentSpec.Options, "projectNamePrefix", "mycel-lab"))
 	}
 	metadata := map[string]string{"composeFile": composeFiles[0], "composeFiles": strings.Join(composeFiles, string(os.PathListSeparator)), "projectName": projectName, "nodeCount": strconv.Itoa(scenario.Cluster.Nodes)}
+	if image := strings.TrimSpace(stringOption(environmentSpec.Options, "imageOverride", "")); image != "" {
+		metadata["imageOverride"] = image
+	}
 	if serviceNames := stringSliceOption(environmentSpec.Options, "serviceNames"); len(serviceNames) > 0 {
 		metadata["serviceNames"] = strings.Join(serviceNames, ",")
 	}
@@ -1019,6 +1022,7 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 	}{
 		{name: "environment/compose-ps.txt", args: []string{"ps"}},
 		{name: "environment/compose-config.yaml", args: []string{"config"}},
+		{name: "environment/compose-images.jsonl", args: []string{"images", "--format", "json"}},
 	}
 	for _, capture := range captures {
 		result, err := d.compose(ctx, environment, capture.args...)
@@ -1055,7 +1059,11 @@ func (d ComposeDriver) compose(ctx context.Context, environment Environment, arg
 		base = append(base, "-p", project)
 	}
 	base = append(base, args...)
-	return d.runner().Run(ctx, "docker", append([]string{"compose"}, base...)...)
+	dockerArgs := append([]string{"compose"}, base...)
+	if image := strings.TrimSpace(environment.Metadata["imageOverride"]); image != "" {
+		return d.runner().Run(ctx, "env", append([]string{"MYCEL_IMAGE=" + image, "docker"}, dockerArgs...)...)
+	}
+	return d.runner().Run(ctx, "docker", dockerArgs...)
 }
 
 func (d ComposeDriver) runner() executil.Runner {

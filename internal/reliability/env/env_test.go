@@ -254,7 +254,7 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 	}
 	runner := &fakeRunner{}
 	driver := ComposeDriver{Confirmed: true, Runner: runner}
-	environmentSpec := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "projectName": "mlab-test", "serviceNames": []any{"myceld-a", "myceld-b"}, "grpcPorts": []any{19091, 19092}}}
+	environmentSpec := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "projectName": "mlab-test", "serviceNames": []any{"myceld-a", "myceld-b"}, "grpcPorts": []any{19091, 19092}, "imageOverride": "local/mycel:head"}}
 	if err := driver.Preflight(context.Background(), environmentSpec); err != nil {
 		t.Fatalf("Preflight() error=%v", err)
 	}
@@ -271,7 +271,7 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 		t.Fatalf("RestartNode() error=%v", err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"docker compose version", "docker compose -f " + composeFile + " -p mlab-test down --volumes --remove-orphans", "docker compose -f " + composeFile + " -p mlab-test up -d --wait", "docker compose -f " + composeFile + " -p mlab-test restart myceld-b"} {
+	for _, want := range []string{"docker compose version", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test down --volumes --remove-orphans", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test up -d --wait", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test restart myceld-b"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
 		}

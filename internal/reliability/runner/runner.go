@@ -187,6 +187,10 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	if image := strings.TrimSpace(opts.ImageOverride); image != "" {
 		scenario.Cluster.Image = image
+		if scenario.Environment.Options == nil {
+			scenario.Environment.Options = map[string]any{}
+		}
+		scenario.Environment.Options["imageOverride"] = image
 	}
 	driver := opts.EnvironmentDriver
 	effectiveEnvironment := scenario.Environment

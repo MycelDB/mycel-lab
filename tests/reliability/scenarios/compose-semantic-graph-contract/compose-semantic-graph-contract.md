@@ -68,5 +68,6 @@ Run dry-run on every scenario/schema change. Run the real environment-mutating c
 go run ./cmd/mycel-lab run scenario-file \
   tests/reliability/scenarios/compose-semantic-graph-contract/compose-semantic-graph-contract.yaml \
   --provider-profile tests/reliability/provider-profiles/deterministic-token-basis-v1.yaml \
+  --image local/mycel:<exact-head> \
   --dry-run
 ```
