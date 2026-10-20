@@ -64,13 +64,13 @@ Provider-owned limits are declared independently:
 - optional estimated USD cost;
 - capability-specific batch size.
 
-A required limit resolves only when the responsible daemon/provider capability is advertised by trusted daemon/provider preflight. Operators cannot assert enforcement with a CLI flag. A field is never labeled enforced merely because it exists. Advisory unavailable fields are recorded as `advisory`; required unavailable fields fail closed. SGT1b remains responsible for atomic daemon-side provider reservations and durable usage accounting.
+A required limit resolves only when the responsible daemon/provider capability is advertised by trusted daemon/provider preflight. The bundled `openai-compatible-live` profile is an SGT1 contract fixture and intentionally cannot run until SGT1b adds that trusted discovery and enforcement path. Operators cannot assert enforcement with a CLI flag. A field is never labeled enforced merely because it exists. Advisory unavailable fields are recorded as `advisory`; required unavailable fields fail closed. SGT1b remains responsible for atomic daemon-side provider reservations and durable usage accounting.
 
-Reservations are atomic. Exhaustion closes the ledger to new work. Releasing a reservation reduces only in-flight concurrency; cumulative use is never refunded. The request context uses the earlier of request and total deadlines.
+Reservations are atomic. Each provider-profile run owns one ledger and total-deadline context. Scenario provisioning, each finite runtime event, and each actor graph operation reserve before work; later semantic admin/search operations must use the same gate as they are added. Exhaustion cancels scheduling, closes the ledger to new work, fails the run, and persists `provider/budget-final.json`. Releasing a reservation reduces only in-flight concurrency; cumulative use is never refunded. Each operation context uses the earlier of request and total deadlines.
 
 ## Redaction and final gate
 
-Every runner artifact write passes through structured redaction. Sensitive map keys, CLI argument values, authorization/cookie values, API-key patterns, configured runtime secret values, and PEM material are replaced with `[REDACTED]`. The same sanitized payload is used for database persistence.
+Every runner artifact write passes through structured redaction. Sensitive map values, configured secrets embedded in map keys, CLI argument values, authorization/cookie values, API-key patterns, configured runtime secret values, and PEM material are replaced before persistence. Secret-bearing keys become `[REDACTED-KEY]`; a resulting key collision fails closed. The same sanitized payload is used for database persistence.
 
 Finalization performs a bounded recursive artifact scan. `redaction-scan.json` contains only path, detector category, and byte offsets. Files with findings are removed and replaced by a fixed quarantine marker. If the tree cannot be completely scanned, the run artifact root is removed and recreated before the failure report is written. A finding, quarantine failure, unreadable artifact, symlink, or scan-limit violation fails the run. Provider body/header capture is disabled in this contract.
 

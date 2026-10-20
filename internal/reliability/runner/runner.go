@@ -67,14 +67,15 @@ type harnessBuildIdentity struct {
 }
 
 type Result struct {
-	RunID        string       `json:"runId"`
-	ScenarioName string       `json:"scenarioName"`
-	Status       RunStatus    `json:"status"`
-	DryRun       bool         `json:"dryRun"`
-	StartedAt    time.Time    `json:"startedAt"`
-	FinishedAt   time.Time    `json:"finishedAt"`
-	ArtifactRoot string       `json:"artifactRoot"`
-	Phases       []PhaseState `json:"phases"`
+	RunID          string                   `json:"runId"`
+	ScenarioName   string                   `json:"scenarioName"`
+	Status         RunStatus                `json:"status"`
+	DryRun         bool                     `json:"dryRun"`
+	StartedAt      time.Time                `json:"startedAt"`
+	FinishedAt     time.Time                `json:"finishedAt"`
+	ArtifactRoot   string                   `json:"artifactRoot"`
+	Phases         []PhaseState             `json:"phases"`
+	ProviderBudget *provider.BudgetSnapshot `json:"providerBudget,omitempty"`
 }
 
 type Options struct {
@@ -131,6 +132,7 @@ func Transition(phase *PhaseState, to PhaseStatus, now time.Time) error {
 }
 
 func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Options) (Result, error) {
+	parentCtx := ctx
 	started := time.Now().UTC()
 	runID := fmt.Sprintf("%s-%s", safeName(scenario.Metadata.Name), started.Format("20060102-150405"))
 	secretValues := []string{provision.DefaultAdminPassword}
@@ -146,6 +148,33 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	for _, phase := range scenario.Phases {
 		result.Phases = append(result.Phases, PhaseState{Name: phase.Name, Status: PhasePending, Duration: phase.Duration.Duration})
 	}
+	var budgetLedger *provider.Ledger
+	budgetCancel := func() {}
+	if scenario.ProviderProfile != nil {
+		budgetLedger, err = provider.NewLedger(scenario.ProviderProfile.Profile.Budgets)
+		if err != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+		}
+		ctx, budgetCancel = budgetLedger.TotalContext(ctx)
+		defer budgetCancel()
+	}
+	finish := func(status RunStatus, runErr error) (Result, error) {
+		if budgetLedger != nil {
+			snapshot := budgetLedger.Snapshot()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) && !time.Now().UTC().Before(snapshot.Deadline) {
+				budgetLedger.Close("total timeout reached")
+				runErr = errors.Join(runErr, fmt.Errorf("%w: total timeout reached", provider.ErrBudgetExhausted))
+				status = RunFailed
+				snapshot = budgetLedger.Snapshot()
+			}
+			result.ProviderBudget = &snapshot
+			if _, writeErr := sink.WriteJSON("provider/budget-final.json", snapshot); writeErr != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("write provider budget artifact: %w", writeErr))
+				status = RunFailed
+			}
+		}
+		return finalize(parentCtx, opts.Store, sink, result, status, runErr)
+	}
 	if opts.EnvironmentOverride != nil {
 		scenario.Environment = mergeEnvironmentOverride(scenario.Environment, *opts.EnvironmentOverride)
 	}
@@ -158,46 +187,46 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		var selectErr error
 		driver, effectiveEnvironment, selectErr = env.SelectDriver(scenario.Environment, env.DriverSelectionOptions{DryRun: opts.DryRun, ConfirmDestructive: opts.ConfirmDestructive})
 		if selectErr != nil {
-			return finalize(ctx, opts.Store, sink, result, RunFailed, selectErr)
+			return finish(RunFailed, selectErr)
 		}
 	} else if opts.DryRun {
 		effectiveEnvironment.Driver = "dry-run"
 	}
 	scenario.Environment = effectiveEnvironment
 	if err := writeInitialArtifacts(sink, scenario); err != nil {
-		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+		return finish(RunFailed, err)
 	}
 	if opts.Store != nil {
 		resolvedJSON, sanitizeErr := sanitizedJSON(sink, scenario)
 		if sanitizeErr != nil {
-			return finalize(ctx, opts.Store, sink, result, RunFailed, sanitizeErr)
+			return finish(RunFailed, sanitizeErr)
 		}
 		var runPhases []store.RunPhase
 		for _, phase := range scenario.Phases {
 			phaseJSON, sanitizeErr := sanitizedJSON(sink, phase)
 			if sanitizeErr != nil {
-				return finalize(ctx, opts.Store, sink, result, RunFailed, sanitizeErr)
+				return finish(RunFailed, sanitizeErr)
 			}
 			runPhases = append(runPhases, store.RunPhase{Name: phase.Name, Status: string(PhasePending), SpecSnapshotJSON: phaseJSON})
 		}
 		if err := opts.Store.CreateRun(ctx, store.Run{ID: runID, ScenarioName: scenario.Metadata.Name, ScenarioVersion: opts.ScenarioVersion, Status: string(RunRunning), Seed: scenario.Seed, ResolvedJSON: resolvedJSON}, nil, runPhases); err != nil {
-			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+			return finish(RunFailed, err)
 		}
 	}
 	if !opts.DryRun {
 		if err := env.RequireDestructiveConfirmation(env.Options{ConfirmDestructive: opts.ConfirmDestructive}); err != nil {
-			return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+			return finish(RunFailed, err)
 		}
 	}
 	if err := driver.Preflight(ctx, effectiveEnvironment); err != nil {
-		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+		return finish(RunFailed, err)
 	}
 	environment, err := driver.Create(ctx, scenario, effectiveEnvironment)
 	if err != nil {
-		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+		return finish(RunFailed, err)
 	}
 	if err := driver.WaitReady(ctx, environment); err != nil {
-		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
+		return finish(RunFailed, err)
 	}
 	cleanupEnvironment := true
 	runFailedAfterEnvironmentCreate := false
@@ -212,7 +241,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		_ = driver.CaptureState(captureCtx, environment, sink)
 		cancel()
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "error": err.Error()}))
-		return finalize(ctx, opts.Store, sink, result, status, err)
+		return finish(status, err)
 	}
 	nodes, err := driver.Nodes(ctx, environment)
 	if err != nil {
@@ -257,8 +286,14 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("console-endpoints-ready", "", "", map[string]any{"endpoints": endpoints}))
 	}
 	provisionDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
-	if err := provision.ProvisionScenario(ctx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun}); err != nil {
+	provisionCtx, releaseProvision, err := reserveProviderOperation(ctx, budgetLedger)
+	if err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
+	}
+	provisionErr := provision.ProvisionScenario(provisionCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun})
+	releaseProvision()
+	if provisionErr != nil {
+		return failAfterEnvironmentCreate(RunFailed, provisionErr)
 	}
 	if _, err := sink.WriteJSON("environment/scenario-resources.json", resources); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
@@ -266,7 +301,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if _, err := sink.WriteJSON("actors/assignments.json", resources.Assignments); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
-	recorder := &runRecorder{store: opts.Store, sink: sink, runID: runID}
+	recorder := &runRecorder{store: opts.Store, sink: sink, runID: runID, budget: budgetLedger, budgetCancel: budgetCancel}
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
 		eventRuntime = defaultEventRuntime(opts, driver, environment, scenario, &resources)
@@ -301,7 +336,13 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	for i := range result.Phases {
 		select {
 		case <-ctx.Done():
+			if budgetErr := recorder.budgetError(); budgetErr != nil {
+				_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+				captureRunFailureEvidence()
+				return failAfterEnvironmentCreate(RunFailed, budgetErr)
+			}
 			_ = Transition(&result.Phases[i], PhaseAborted, time.Now().UTC())
+			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunAborted, ctx.Err())
 		default:
 		}
@@ -321,6 +362,11 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
+		if budgetErr := recorder.budgetError(); budgetErr != nil {
+			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+			captureRunFailureEvidence()
+			return failAfterEnvironmentCreate(RunFailed, budgetErr)
+		}
 		if opts.DryRun {
 			_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-dry-run", phaseSpec.Name, "", map[string]any{"plannedDuration": phaseSpec.Duration.String()}))
 		} else if phaseSpec.Duration.Duration > 0 {
@@ -328,7 +374,13 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			select {
 			case <-ctx.Done():
 				timer.Stop()
+				if budgetErr := recorder.budgetError(); budgetErr != nil {
+					_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+					captureRunFailureEvidence()
+					return failAfterEnvironmentCreate(RunFailed, budgetErr)
+				}
 				_ = Transition(&result.Phases[i], PhaseAborted, time.Now().UTC())
+				captureRunFailureEvidence()
 				return failAfterEnvironmentCreate(RunAborted, ctx.Err())
 			case <-timer.C:
 			}
@@ -360,6 +412,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	schedulerStopped = true
+	if budgetErr := recorder.budgetError(); budgetErr != nil {
+		return failAfterEnvironmentCreate(RunFailed, budgetErr)
+	}
 	if err := runFinalClusterAssertions(ctx, sink, scenario, driver, environment, nodes, !provisionDryRun); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
@@ -371,7 +426,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
-	return finalize(ctx, opts.Store, sink, result, RunPassed, nil)
+	return finish(RunPassed, nil)
 }
 
 func mergeEnvironmentOverride(base spec.EnvironmentSpec, override spec.EnvironmentSpec) spec.EnvironmentSpec {
@@ -934,16 +989,67 @@ func assertPhaseOracleProgress(assertions map[string]any, before, after phaseOra
 }
 
 type runRecorder struct {
-	store store.Store
-	sink  *artifacts.Sink
-	runID string
+	store        store.Store
+	sink         *artifacts.Sink
+	runID        string
+	budget       *provider.Ledger
+	budgetCancel context.CancelFunc
 
 	mu              sync.Mutex
+	budgetErr       error
 	acknowledged    []oracle.Transaction
 	expectedByActor map[string]graphCounts
 	readChecks      []map[string]any
 	successfulReads int
 	failedWrites    int
+}
+
+func reserveProviderOperation(ctx context.Context, ledger *provider.Ledger) (context.Context, func(), error) {
+	if ledger == nil {
+		return ctx, func() {}, nil
+	}
+	reservation, err := ledger.Reserve(ctx, provider.Demand{Operations: 1})
+	if err != nil {
+		return nil, nil, err
+	}
+	requestCtx, cancel := ledger.RequestContext(ctx)
+	return requestCtx, func() {
+		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+			ledger.Close("operation deadline reached")
+		}
+		cancel()
+		reservation.Release()
+	}, nil
+}
+
+func (r *runRecorder) reserveOperation(ctx context.Context) (context.Context, func(), error) {
+	operationCtx, release, err := reserveProviderOperation(ctx, r.budget)
+	if err == nil {
+		return operationCtx, release, nil
+	}
+	r.mu.Lock()
+	if r.budgetErr == nil {
+		r.budgetErr = err
+	}
+	r.mu.Unlock()
+	if r.budgetCancel != nil {
+		r.budgetCancel()
+	}
+	return nil, nil, err
+}
+
+func (r *runRecorder) ReserveActorOperation(ctx context.Context, _, _ string) (context.Context, func(), error) {
+	return r.reserveOperation(ctx)
+}
+
+func (r *runRecorder) ReserveRuntimeOperation(ctx context.Context, _, _ string) (context.Context, func(), error) {
+	return r.reserveOperation(ctx)
+}
+
+func (r *runRecorder) budgetError() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.budgetErr
 }
 
 func (r *runRecorder) oracleSnapshot() phaseOracleSnapshot {

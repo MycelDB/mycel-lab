@@ -373,8 +373,24 @@ func validateCapability(mode Mode, name string, capability *Capability) error {
 		if err := boundedRequiredString(prefix+".secretRef.env", capability.SecretRef.Env, 128); err != nil {
 			return err
 		}
+		if !validEnvironmentName(capability.SecretRef.Env) {
+			return fmt.Errorf("%s.secretRef.env must be a portable environment variable name", prefix)
+		}
 	}
 	return nil
+}
+
+func validEnvironmentName(value string) bool {
+	if value == "" || !((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z') || value[0] == '_') {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if !((character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func boundedRequiredString(name, value string, maximum int) error {
@@ -487,7 +503,7 @@ func Resolve(profile Profile, source []byte, opts ResolveOptions) (ResolvedProfi
 			seen[envName] = struct{}{}
 			value, ok := lookup(envName)
 			if !ok || value == "" {
-				return ResolvedProfile{}, fmt.Errorf("required provider credential environment variable %s is not set", envName)
+				return ResolvedProfile{}, fmt.Errorf("required provider credential environment variable %q is not set", envName)
 			}
 			secrets = append(secrets, value)
 		}

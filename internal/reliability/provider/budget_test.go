@@ -112,6 +112,19 @@ func TestLedgerHonorsCancellationBeforeReservation(t *testing.T) {
 	}
 }
 
+func TestLedgerTotalContextUsesRunDeadline(t *testing.T) {
+	ledger, err := NewLedger(testBudget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := ledger.TotalContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok || !deadline.Equal(ledger.Snapshot().Deadline) {
+		t.Fatalf("total context deadline=%v ok=%t snapshot=%v", deadline, ok, ledger.Snapshot().Deadline)
+	}
+}
+
 func TestLedgerRequestContextUsesBoundedDeadline(t *testing.T) {
 	ledger, err := NewLedger(testBudget())
 	if err != nil {

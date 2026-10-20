@@ -2,7 +2,7 @@ apiVersion: reliability.mycel.io/v1alpha1
 kind: ProviderProfile
 metadata:
   name: openai-compatible-live
-  description: Manual non-gating OpenAI-compatible live-provider profile.
+  description: SGT1 live-profile contract fixture; intentionally preflight-blocked until trusted SGT1b daemon enforcement discovery is available.
 mode: live
 capabilities:
   embedding:

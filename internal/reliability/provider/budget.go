@@ -127,6 +127,13 @@ func (r *Reservation) Release() {
 	})
 }
 
+func (l *Ledger) TotalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	l.mu.Lock()
+	deadline := l.state.Deadline
+	l.mu.Unlock()
+	return context.WithDeadline(parent, deadline)
+}
+
 func (l *Ledger) RequestContext(parent context.Context) (context.Context, context.CancelFunc) {
 	l.mu.Lock()
 	deadline := l.state.Deadline

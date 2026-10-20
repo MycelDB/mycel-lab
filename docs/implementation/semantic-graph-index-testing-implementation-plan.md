@@ -467,7 +467,7 @@ Acceptance:
 
 Repository: `mycel-lab`  
 Risk: medium
-Implementation status: implemented on `feature/46-sgt1-sgt2-foundations`; exact-head validation and review remain before promotion.
+Implementation status: implemented on `feature/46-sgt1-sgt2-foundations`; promotion remains separately approval-gated.
 
 1. Add `ProviderProfile` parsing, catalog/import support, validation, and resolution.
 2. Add scenario `providerProfileRef` and CLI override support.

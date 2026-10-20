@@ -113,15 +113,22 @@ func (r *Redactor) sanitize(value any, depth int, parentKey string, state *sanit
 			if len(key) > 64<<10 || state.stringBytes > 16<<20 {
 				return nil, errors.New("redaction input exceeds map-key byte limits")
 			}
+			cleanKey := r.SanitizeText(key)
+			if cleanKey != key {
+				cleanKey = "[REDACTED-KEY]"
+			}
+			if _, exists := out[cleanKey]; exists {
+				return nil, errors.New("redaction produced a duplicate map key")
+			}
 			if isSensitiveKey(key) {
-				out[key] = Redacted
+				out[cleanKey] = Redacted
 				continue
 			}
 			clean, err := r.sanitize(item, depth+1, key, state)
 			if err != nil {
 				return nil, err
 			}
-			out[key] = clean
+			out[cleanKey] = clean
 		}
 		return out, nil
 	default:

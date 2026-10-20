@@ -12,6 +12,7 @@ func TestRedactorSanitizesStructuredTextAndSubprocessArguments(t *testing.T) {
 	const opaque = "z9-Qp7-unrecognized-credential"
 	redactor := NewRedactor([]string{opaque})
 	input := map[string]any{
+		opaque:          "safe-key-value",
 		"Authorization": "Bearer abcdefghijklmnop",
 		"nested": map[string]any{
 			"api_key": "sk-1234567890abcdefghijklmnop",
@@ -37,6 +38,14 @@ func TestRedactorSanitizesStructuredTextAndSubprocessArguments(t *testing.T) {
 	}
 	if count := strings.Count(text, Redacted); count < 4 {
 		t.Fatalf("redaction marker count = %d: %s", count, text)
+	}
+}
+
+func TestRedactorRejectsConfiguredSecretKeyCollisions(t *testing.T) {
+	redactor := NewRedactor([]string{"first-secret", "second-secret"})
+	_, err := redactor.Sanitize(map[string]any{"first-secret": 1, "second-secret": 2})
+	if err == nil || !strings.Contains(err.Error(), "duplicate map key") {
+		t.Fatalf("Sanitize() error = %v", err)
 	}
 }
 

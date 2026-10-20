@@ -57,6 +57,14 @@ func TestLiveProfileDryRunDoesNotReadCredential(t *testing.T) {
 	}
 }
 
+func TestLiveProfileDryRunRejectsMalformedCredentialReference(t *testing.T) {
+	profile, _ := mustLoadProfile(t, "openai-compatible-live.yaml")
+	profile.Capabilities.Embedding.SecretRef.Env = "BAD=NAME"
+	if err := profile.Validate(); err == nil || !strings.Contains(err.Error(), "portable environment variable name") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestLiveProfileRequiresCredentialOutsideDryRun(t *testing.T) {
 	profile, source := mustLoadProfile(t, "openai-compatible-live.yaml")
 	if _, err := Resolve(profile, source, ResolveOptions{Manifest: fullProviderManifest(), LookupEnv: func(string) (string, bool) { return "", false }}); err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY") {

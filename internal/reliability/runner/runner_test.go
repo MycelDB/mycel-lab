@@ -52,6 +52,34 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestRunScenarioProviderBudgetExhaustionStopsScheduling(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved.Profile.Budgets.MaxOperations = 2 // provisioning plus the first event
+	scenario.ProviderProfile = &resolved
+	scenario.ActorGroups = nil
+	scenario.Phases = []spec.PhaseSpec{{Name: "budget-exhaustion", Events: []spec.EventSpec{{Type: "rolling-restart"}, {Type: "rolling-restart"}}}}
+
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), provider.ErrBudgetExhausted.Error()) {
+		t.Fatalf("RunScenario() result=%#v error=%v", result, err)
+	}
+	if result.Status != RunFailed || result.ProviderBudget == nil || !result.ProviderBudget.Closed || result.ProviderBudget.Operations != 2 {
+		t.Fatalf("unexpected budget result: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(result.ArtifactRoot, "provider", "budget-final.json")); err != nil {
+		t.Fatalf("budget artifact missing: %v", err)
+	}
+}
+
 func TestRunScenarioImageOverrideIsRecordedInResolvedArtifacts(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	originalImage := scenario.Cluster.Image
@@ -295,7 +323,7 @@ func TestRecorderSanitizesDatabasePayloadsBeforePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := appendEvent(ctx, st, sink, "sanitized", artifacts.EventNow("test", "phase", "actor", map[string]any{"password": "visible", "note": secret})); err != nil {
+	if err := appendEvent(ctx, st, sink, "sanitized", artifacts.EventNow("test", "phase", "actor", map[string]any{"password": "visible", "note": secret, secret: "safe-key-value"})); err != nil {
 		t.Fatal(err)
 	}
 	if err := appendMetric(ctx, st, sink, "sanitized", "test", 1, map[string]any{"authorization": "Bearer abcdefghijklmnop", "note": secret}); err != nil {
