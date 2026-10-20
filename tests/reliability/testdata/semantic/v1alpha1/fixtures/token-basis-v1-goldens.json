@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-token-basis-goldens/v1alpha1",
+  "strategy": "token-basis-v1",
+  "dimensions": 3,
+  "vectors": [
+    {
+      "input": "axis-0",
+      "expected": [1.0, 0.0, 0.0]
+    },
+    {
+      "input": "axis-1",
+      "expected": [0.0, 1.0, 0.0]
+    },
+    {
+      "input": " AXIS-0   axis-1 ",
+      "normalizedInput": "axis-0 axis-1",
+      "expected": [0.7071067811865475, 0.7071067811865475, 0.0]
+    },
+    {
+      "input": "unseen token",
+      "expected": [-0.7013575770151536, -0.13235341487757818, 0.700414250807104]
+    }
+  ],
+  "scripts": [
+    {
+      "name": "retry-then-success",
+      "input": "axis-2",
+      "outcomes": [
+        {"kind": "retryable-error", "code": "fixture_retry"},
+        {"kind": "success"}
+      ],
+      "exhaustedOutcome": "error:fake_fixture_script_exhausted",
+      "reset": "process-restart"
+    },
+    {
+      "name": "blocked-refused-wrong-dimensions",
+      "input": "axis-0",
+      "outcomes": [
+        {"kind": "blocked"},
+        {"kind": "refused"},
+        {"kind": "wrong-dimensions", "dimensions": 2}
+      ],
+      "exhaustedOutcome": "error:fake_fixture_script_exhausted",
+      "reset": "process-restart"
+    },
+    {
+      "name": "bounded-delay",
+      "input": "axis-1",
+      "outcomes": [
+        {"kind": "success", "delay_ms": 25},
+        {"kind": "success"}
+      ],
+      "exhaustedOutcome": "error:fake_fixture_script_exhausted",
+      "reset": "process-restart"
+    }
+  ]
+}

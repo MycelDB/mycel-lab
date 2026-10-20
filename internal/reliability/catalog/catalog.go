@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 	"gopkg.in/yaml.v3"
@@ -76,7 +78,7 @@ func ImportPath(ctx context.Context, st store.Store, path string, opts ImportOpt
 }
 
 func BuildDefinition(path string, profileDirs []string) (store.Definition, error) {
-	loaded, err := spec.LoadFile(path)
+	loaded, err := loadDefinitionFile(path)
 	if err != nil {
 		return store.Definition{}, err
 	}
@@ -90,7 +92,7 @@ func BuildDefinition(path string, profileDirs []string) (store.Definition, error
 	}
 	var resolvedJSON []byte
 	if scenario, ok := loaded.(spec.Scenario); ok {
-		resolved, err := ResolveScenario(scenario, filepath.Dir(path), ResolveOptions{ProfileDirs: profileDirs})
+		resolved, err := ResolveScenario(scenario, filepath.Dir(path), ResolveOptions{ProfileDirs: profileDirs, ProviderDryRun: true})
 		if err == nil {
 			resolvedJSON, err = canonicalJSON(resolved)
 			if err != nil {
@@ -140,8 +142,36 @@ func hashJSON(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func loadDefinitionFile(path string) (any, error) {
+	const maxDefinitionBytes = 8 << 20
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxDefinitionBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxDefinitionBytes {
+		return nil, fmt.Errorf("definition file exceeds %d bytes", maxDefinitionBytes)
+	}
+	var typeMeta struct {
+		Kind string `yaml:"kind"`
+	}
+	if err := yaml.Unmarshal(raw, &typeMeta); err != nil {
+		return nil, err
+	}
+	if typeMeta.Kind == provider.Kind {
+		return provider.Load(raw)
+	}
+	return spec.Load(raw)
+}
+
 func kindAndName(value any) (store.DefinitionKind, string, error) {
 	switch v := value.(type) {
+	case provider.Profile:
+		return store.KindProviderProfile, v.Metadata.Name, nil
 	case spec.ClusterProfile:
 		return store.KindClusterProfile, v.Metadata.Name, nil
 	case spec.ActorProfile:
@@ -202,10 +232,12 @@ func kindOrderForPath(path string) int {
 			return 0
 		case "actor-profiles":
 			return 1
-		case "scenarios":
+		case "provider-profiles":
 			return 2
-		case "suites":
+		case "scenarios":
 			return 3
+		case "suites":
+			return 4
 		}
 	}
 	return 4

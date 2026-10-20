@@ -467,6 +467,7 @@ Acceptance:
 
 Repository: `mycel-lab`  
 Risk: medium
+Implementation status: implemented on `feature/46-sgt1-sgt2-foundations`; exact-head validation and review remain before promotion.
 
 1. Add `ProviderProfile` parsing, catalog/import support, validation, and resolution.
 2. Add scenario `providerProfileRef` and CLI override support.
@@ -533,6 +534,7 @@ Acceptance:
 
 Repositories: `mycel`, then `mycel-lab` fixture goldens  
 Risk: medium
+Implementation status: implemented on `mycel/feature/237-token-basis-fixture` plus `mycel-lab/feature/46-sgt1-sgt2-foundations`; first released-daemon declaration remains pending release.
 
 1. Add the explicit `token-basis-v1` fake-connector strategy.
 2. Add finite endpoint/model fixture scripts for bounded delays, error sequences, blocked/refused outcomes, wrong dimensions, and safe request accounting.

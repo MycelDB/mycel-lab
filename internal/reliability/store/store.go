@@ -8,10 +8,11 @@ import (
 type DefinitionKind string
 
 const (
-	KindClusterProfile DefinitionKind = "cluster-profile"
-	KindActorProfile   DefinitionKind = "actor-profile"
-	KindScenario       DefinitionKind = "scenario"
-	KindSuite          DefinitionKind = "suite"
+	KindClusterProfile  DefinitionKind = "cluster-profile"
+	KindActorProfile    DefinitionKind = "actor-profile"
+	KindProviderProfile DefinitionKind = "provider-profile"
+	KindScenario        DefinitionKind = "scenario"
+	KindSuite           DefinitionKind = "suite"
 )
 
 type Definition struct {

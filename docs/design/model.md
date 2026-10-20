@@ -16,6 +16,7 @@ it to decide which concept to model when adding new tests or runner features.
 | Test suite | `Suite` | Ordered collection of scenarios executed as one validation bundle. |
 | Cluster config | `ClusterProfile` | Reusable Mycel cluster topology and daemon/runtime settings. |
 | Actor role/template | `ActorProfile` | Reusable workload actor definition. |
+| Provider capability profile | `ProviderProfile` | Mode, logical capabilities, model/vector identity, budgets, and secret references for semantic work. |
 | Actor group | `Scenario.actorGroups[]` | Scenario-local group of actors sharing one profile and rate. |
 | Concrete actor | `ActorInstance` runtime concept | One running actor created from an actor group. |
 | Stage | `Phase` | Time-bounded section of a scenario. |
@@ -33,6 +34,7 @@ experiment:
 
 - which environment backend to use;
 - which Mycel cluster profile to instantiate;
+- which optional provider profile supplies semantic capabilities;
 - which actor groups to run;
 - which phases and disruptions occur;
 - which assertions and artifacts are required.
@@ -66,6 +68,7 @@ seed: 12345
 environment:
   driver: k3d
 clusterRef: raft-3-node
+providerProfileRef: deterministic-token-basis-v1 # optional
 actorGroups: []
 phases:
   - name: smoke
@@ -139,6 +142,12 @@ tests/reliability/actor-profiles/<name>.yaml
 
 Profiles define behavior type and behavior-specific settings. Scenario actor
 groups decide how many instances of the profile to run and at what rate.
+
+## Provider capability profile: `ProviderProfile`
+
+A provider profile binds independent logical slots such as embedding, generation, enrichment, structured output, and routing. It records deterministic/emulator/live mode, connector/model/vector-space identity, typed finite budgets, and environment-variable secret references. Scenario and CLI selection are resolved before execution; the redacted result and source hash become run evidence.
+
+Provider profiles are catalog definitions under `tests/reliability/provider-profiles/`. Their contract, enforcement rules, and final artifact scan are documented in [Provider profiles, budgets, and artifact safety](provider-profiles.md).
 
 ## Actor group
 

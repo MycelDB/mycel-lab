@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/events"
 	"github.com/MycelDB/mycel-lab/internal/reliability/oracle"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/report"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
@@ -86,6 +88,9 @@ type Options struct {
 	ConsolePortBase          int
 	EnvironmentOverride      *spec.EnvironmentSpec
 	ImageOverride            string
+	ProviderProfileOverride  string
+	ProviderManifest         provider.CapabilityManifest
+	ProfileDirs              []string
 	ProgressWriter           io.Writer
 	EnvironmentDriver        env.EnvironmentDriver
 	EventRuntime             events.Runtime
@@ -128,7 +133,12 @@ func Transition(phase *PhaseState, to PhaseStatus, now time.Time) error {
 func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Options) (Result, error) {
 	started := time.Now().UTC()
 	runID := fmt.Sprintf("%s-%s", safeName(scenario.Metadata.Name), started.Format("20060102-150405"))
-	sink, err := artifacts.NewSink(artifacts.RunRoot(opts.ArtifactRoot, runID))
+	secretValues := []string{provision.DefaultAdminPassword}
+	if scenario.ProviderProfile != nil {
+		secretValues = append(secretValues, scenario.ProviderProfile.RuntimeSecretValues()...)
+	}
+	redactor := provider.NewRedactor(secretValues)
+	sink, err := artifacts.NewSanitizedSink(artifacts.RunRoot(opts.ArtifactRoot, runID), redactor)
 	if err != nil {
 		return Result{}, err
 	}
@@ -158,10 +168,16 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return finalize(ctx, opts.Store, sink, result, RunFailed, err)
 	}
 	if opts.Store != nil {
-		resolvedJSON, _ := json.Marshal(scenario)
+		resolvedJSON, sanitizeErr := sanitizedJSON(sink, scenario)
+		if sanitizeErr != nil {
+			return finalize(ctx, opts.Store, sink, result, RunFailed, sanitizeErr)
+		}
 		var runPhases []store.RunPhase
 		for _, phase := range scenario.Phases {
-			phaseJSON, _ := json.Marshal(phase)
+			phaseJSON, sanitizeErr := sanitizedJSON(sink, phase)
+			if sanitizeErr != nil {
+				return finalize(ctx, opts.Store, sink, result, RunFailed, sanitizeErr)
+			}
 			runPhases = append(runPhases, store.RunPhase{Name: phase.Name, Status: string(PhasePending), SpecSnapshotJSON: phaseJSON})
 		}
 		if err := opts.Store.CreateRun(ctx, store.Run{ID: runID, ScenarioName: scenario.Metadata.Name, ScenarioVersion: opts.ScenarioVersion, Status: string(RunRunning), Seed: scenario.Seed, ResolvedJSON: resolvedJSON}, nil, runPhases); err != nil {
@@ -446,7 +462,7 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 		if !filepath.IsAbs(scenarioPath) {
 			scenarioPath = filepath.Join(baseDir, scenarioPath)
 		}
-		resolved, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{})
+		resolved, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProfileDirs: opts.ProfileDirs, ProviderProfileOverride: opts.ProviderProfileOverride, ProviderDryRun: opts.DryRun, ProviderManifest: opts.ProviderManifest})
 		if err != nil {
 			return out, err
 		}
@@ -465,6 +481,11 @@ func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario)
 	}
 	if _, err := sink.WriteJSON("resolved-scenario.json", scenario); err != nil {
 		return err
+	}
+	if scenario.ProviderProfile != nil {
+		if _, err := sink.WriteJSON("provider/provider-profile-resolved.json", scenario.ProviderProfile); err != nil {
+			return err
+		}
 	}
 	manifests, err := deploy.RenderKubernetesManifests(scenario)
 	if err != nil {
@@ -806,27 +827,77 @@ func finalize(ctx context.Context, st store.Store, sink *artifacts.Sink, result 
 	result.Status = status
 	result.FinishedAt = time.Now().UTC()
 	for i := range result.Phases {
-		if result.Phases[i].Status == PhasePending {
+		if result.Phases[i].Status == PhasePending || result.Phases[i].Status == PhaseRunning {
 			_ = Transition(&result.Phases[i], PhaseAborted, result.FinishedAt)
 		}
-		if result.Phases[i].Status == PhaseRunning {
-			_ = Transition(&result.Phases[i], PhaseAborted, result.FinishedAt)
+	}
+	if runErr != nil {
+		if redactor, ok := sink.Sanitizer().(*provider.Redactor); ok {
+			runErr = errors.New(redactor.SanitizeText(runErr.Error()))
 		}
 	}
 	var artifactPaths []string
-	if path, err := sink.WriteJSON("result.json", result); err == nil {
-		artifactPaths = append(artifactPaths, path)
-	}
-	summary := report.RunSummary{RunID: result.RunID, ScenarioName: result.ScenarioName, Status: string(result.Status), StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, DryRun: result.DryRun, Artifacts: artifactPaths}
-	for _, phase := range result.Phases {
-		actualDuration := time.Duration(0)
-		if !phase.StartedAt.IsZero() && !phase.FinishedAt.IsZero() {
-			actualDuration = phase.FinishedAt.Sub(phase.StartedAt).Round(time.Millisecond)
+	writeResultAndSummary := func() error {
+		artifactPaths = artifactPaths[:0]
+		path, err := sink.WriteJSON("result.json", result)
+		if err != nil {
+			return fmt.Errorf("write result artifact: %w", err)
 		}
-		summary.Phases = append(summary.Phases, report.PhaseSummary{Name: phase.Name, Status: string(phase.Status), PlannedDuration: phase.Duration, ActualDuration: actualDuration})
-	}
-	if path, err := sink.WriteText("summary.md", report.Markdown(summary)); err == nil {
 		artifactPaths = append(artifactPaths, path)
+		summary := report.RunSummary{RunID: result.RunID, ScenarioName: result.ScenarioName, Status: string(result.Status), StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, DryRun: result.DryRun, Artifacts: append([]string(nil), artifactPaths...)}
+		for _, phase := range result.Phases {
+			actualDuration := time.Duration(0)
+			if !phase.StartedAt.IsZero() && !phase.FinishedAt.IsZero() {
+				actualDuration = phase.FinishedAt.Sub(phase.StartedAt).Round(time.Millisecond)
+			}
+			summary.Phases = append(summary.Phases, report.PhaseSummary{Name: phase.Name, Status: string(phase.Status), PlannedDuration: phase.Duration, ActualDuration: actualDuration})
+		}
+		path, err = sink.WriteText("summary.md", report.Markdown(summary))
+		if err != nil {
+			return fmt.Errorf("write summary artifact: %w", err)
+		}
+		artifactPaths = append(artifactPaths, path)
+		return nil
+	}
+	if err := writeResultAndSummary(); err != nil {
+		runErr = errors.Join(runErr, err)
+		result.Status = RunFailed
+	}
+	redactor, _ := sink.Sanitizer().(*provider.Redactor)
+	scanner, scannerErr := provider.NewScanner(redactor, provider.DefaultScanLimits())
+	var scanReport provider.ScanReport
+	if scannerErr == nil {
+		scanReport, scannerErr = scanner.Scan(sink.Root())
+	}
+	if scannerErr != nil {
+		scanReport.OK = false
+		if quarantineErr := quarantineArtifactRoot(sink); quarantineErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("quarantine unscannable artifact root: %w", quarantineErr))
+		}
+		runErr = errors.Join(runErr, fmt.Errorf("artifact redaction scan failed: %w", scannerErr))
+		result.Status = RunFailed
+	} else if !scanReport.OK {
+		if quarantineErr := quarantineUnsafeArtifacts(sink, scanReport.Findings); quarantineErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("quarantine unsafe artifacts: %w", quarantineErr))
+		}
+		runErr = errors.Join(runErr, fmt.Errorf("artifact redaction scan found %d prohibited value(s)", len(scanReport.Findings)))
+		result.Status = RunFailed
+	}
+	var scanArtifactPath string
+	if path, err := sink.WriteJSON("redaction-scan.json", scanReport); err == nil {
+		scanArtifactPath = path
+		artifactPaths = append(artifactPaths, path)
+	} else {
+		runErr = errors.Join(runErr, fmt.Errorf("write redaction scan report: %w", err))
+		result.Status = RunFailed
+	}
+	if result.Status != status {
+		if err := writeResultAndSummary(); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+		if scanArtifactPath != "" {
+			artifactPaths = append(artifactPaths, scanArtifactPath)
+		}
 	}
 	if st != nil {
 		_ = st.FinishRun(ctx, result.RunID, string(result.Status))
@@ -940,10 +1011,41 @@ func (r *runRecorder) RecordRuntimeEvent(ctx context.Context, record events.Reco
 	return nil
 }
 
+func quarantineArtifactRoot(sink *artifacts.Sink) error {
+	if err := os.RemoveAll(sink.Root()); err != nil {
+		return err
+	}
+	return os.MkdirAll(sink.Root(), 0o700)
+}
+
+func quarantineUnsafeArtifacts(sink *artifacts.Sink, findings []provider.Finding) error {
+	seen := make(map[string]struct{}, len(findings))
+	for _, finding := range findings {
+		name := filepath.FromSlash(finding.Path)
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		path := filepath.Join(sink.Root(), name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if _, err := sink.WriteText(name, "[REDACTED: unsafe artifact removed]\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func appendMetric(ctx context.Context, st store.Store, sink *artifacts.Sink, runID, name string, value float64, labels map[string]any) error {
 	if labels == nil {
 		labels = map[string]any{}
 	}
+	clean, err := sink.Sanitize(labels)
+	if err != nil {
+		return err
+	}
+	labels, _ = clean.(map[string]any)
 	labelJSON, _ := json.Marshal(labels)
 	record := map[string]any{"runId": runID, "name": name, "value": value, "labels": labels, "time": time.Now().UTC()}
 	if _, err := sink.AppendJSONL("metrics.jsonl", record); err != nil {
@@ -956,6 +1058,11 @@ func appendMetric(ctx context.Context, st store.Store, sink *artifacts.Sink, run
 }
 
 func appendEvent(ctx context.Context, st store.Store, sink *artifacts.Sink, runID string, event artifacts.Event) error {
+	clean, err := sink.Sanitize(event.Payload)
+	if err != nil {
+		return err
+	}
+	event.Payload = clean
 	if _, err := sink.AppendJSONL("events.jsonl", event); err != nil {
 		return err
 	}
@@ -967,6 +1074,14 @@ func appendEvent(ctx context.Context, st store.Store, sink *artifacts.Sink, runI
 		return st.AppendEvent(ctx, store.RunEvent{RunID: runID, PhaseName: event.PhaseName, EventType: event.Type, ActorID: event.ActorID, Payload: payload})
 	}
 	return nil
+}
+
+func sanitizedJSON(sink *artifacts.Sink, value any) ([]byte, error) {
+	clean, err := sink.Sanitize(value)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(clean)
 }
 
 func safeName(name string) string {

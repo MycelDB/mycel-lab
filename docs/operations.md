@@ -39,6 +39,7 @@ mycel-lab export scenario one-node-graph-smoke --version latest > scenario.yaml
 
 Definition lifecycle rules:
 
+- supported definitions include cluster, actor, provider, scenario, and suite profiles;
 - new definitions create version `1`;
 - unchanged imports are no-ops;
 - changed latest definitions update in place until used by a run;
@@ -65,6 +66,18 @@ Run a baseline scenario by name from `tests/reliability/scenarios/`:
 ```sh
 mycel-lab run scenario one-node-graph-smoke --confirm-destructive
 ```
+
+Semantic scenarios may set `providerProfileRef`. Override only the provider selection with a name or path:
+
+```sh
+mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml \
+  --dry-run \
+  --provider-profile tests/reliability/provider-profiles/deterministic-token-basis-v1.yaml
+```
+
+Live profiles resolve credentials only for non-dry-runs. Required provider-owned limits must have enforcement sources advertised by daemon/provider preflight; operators cannot turn an unavailable capability into enforced state with a CLI assertion.
+
+The resolved redacted profile and exact source SHA-256 are written under `provider/`. Finalization always writes `redaction-scan.json`; any prohibited-value finding or scan failure fails the run. See [Provider profiles, budgets, and artifact safety](design/provider-profiles.md).
 
 Mycel Lab supports three initial environment drivers:
 

@@ -1,0 +1,26 @@
+apiVersion: reliability.mycel.io/v1alpha1
+kind: ProviderProfile
+metadata:
+  name: deterministic-token-basis-v1
+  description: Credential-free exact-vector embedding fixture for semantic graph-index tests.
+mode: deterministic
+capabilities:
+  embedding:
+    connectorType: fake
+    endpointKey: mycel-fixture
+    modelKey: mycel/token-basis-v1-8
+    dimensions: 8
+    vectorSpaceKey: mycel/token-basis-v1/8
+    fixtureStrategy: token-basis-v1
+    batching:
+      mode: single
+      maxItems: 1
+budgets:
+  enforcement: required
+  maxOperations: 4096
+  maxConcurrentOperations: 16
+  requestTimeout: 5s
+  totalTimeout: 10m
+artifacts:
+  captureBodies: false
+  captureHeaders: false

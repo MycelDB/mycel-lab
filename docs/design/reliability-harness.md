@@ -18,6 +18,8 @@ executes deterministic phase-based events such as pod outages or restarts, and
 records structured events, metrics, artifacts, and assertion results. See
 [Mycel Lab model](model.md) for the full concept glossary covering scenarios,
 suites, cluster profiles, actor profiles, phases, events, runs, and artifacts.
+Provider-backed semantic scenarios additionally use the strict contract in
+[Provider profiles, budgets, and artifact safety](provider-profiles.md).
 
 YAML is the portable authoring and import/export format. Postgres is the
 operational source of truth for definitions, runs, events, metrics, trends, and

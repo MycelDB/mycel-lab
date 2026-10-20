@@ -143,7 +143,7 @@ func runImport(args []string, stdout, stderr io.Writer) int {
 
 func runExport(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab export <cluster-profile|actor-profile|scenario|suite> <name> [--version <version>]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab export <cluster-profile|actor-profile|provider-profile|scenario|suite> <name> [--version <version>]")
 		return 0
 	}
 	if len(nonFlagArgs(args)) < 2 {
@@ -179,7 +179,7 @@ func runExport(args []string, stdout, stderr io.Writer) int {
 func runList(args []string, stdout, stderr io.Writer) int {
 	positional := nonFlagArgs(args)
 	if len(positional) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab list <cluster-profile|actor-profile|scenario|suite> [--database-url <url>]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab list <cluster-profile|actor-profile|provider-profile|scenario|suite> [--database-url <url>]")
 		return 0
 	}
 	kind, err := parseDefinitionKind(positional[0])
@@ -206,7 +206,7 @@ func runList(args []string, stdout, stderr io.Writer) int {
 
 func runShow(args []string, stdout, stderr io.Writer) int {
 	if len(nonFlagArgs(args)) < 2 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab show <cluster-profile|actor-profile|scenario|suite> <name> [--version <version>|latest]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab show <cluster-profile|actor-profile|provider-profile|scenario|suite> <name> [--version <version>|latest]")
 		return 0
 	}
 	positional := nonFlagArgs(args)
@@ -237,7 +237,7 @@ func runShow(args []string, stdout, stderr io.Writer) int {
 
 func runDelete(args []string, stdout, stderr io.Writer) int {
 	if len(nonFlagArgs(args)) < 2 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab delete <cluster-profile|actor-profile|scenario|suite> <name> [--version <version>]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab delete <cluster-profile|actor-profile|provider-profile|scenario|suite> <name> [--version <version>]")
 		return 0
 	}
 	positional := nonFlagArgs(args)
@@ -271,7 +271,7 @@ func runDelete(args []string, stdout, stderr io.Writer) int {
 
 func runRun(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--image <tag>] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--image <tag>] [--provider-profile <name-or-path>] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
 		return 0
 	}
 	if len(nonFlagArgs(args)) < 2 {
@@ -285,7 +285,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	positional := nonFlagArgs(args)
 	switch positional[0] {
 	case "scenario-file":
-		resolved, err := catalog.ResolveScenarioFile(positional[1], catalog.ResolveOptions{ProfileDirs: flagValues(args, "--profile-dir")})
+		resolved, err := catalog.ResolveScenarioFile(positional[1], resolveOptionsFromRun(args, runOpts))
 		if err != nil {
 			fmt.Fprintf(stderr, "resolve scenario-file: %v\n", err)
 			return 1
@@ -328,7 +328,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		if !looksLikePath(scenarioPath) {
 			scenarioPath = filepath.Join("tests", "reliability", "scenarios", scenarioPath, scenarioPath+".yaml")
 		}
-		resolved, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProfileDirs: flagValues(args, "--profile-dir")})
+		resolved, err := catalog.ResolveScenarioFile(scenarioPath, resolveOptionsFromRun(args, runOpts))
 		if err != nil {
 			fmt.Fprintf(stderr, "resolve scenario: %v\n", err)
 			return 1
@@ -375,8 +375,19 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 		ConsolePortBase:          consolePortBase,
 		EnvironmentOverride:      environmentOverride,
 		ImageOverride:            imageOverride,
+		ProviderProfileOverride:  strings.TrimSpace(flagValue(args, "--provider-profile")),
+		ProfileDirs:              flagValues(args, "--profile-dir"),
 		ProgressWriter:           stdout,
 	}, true
+}
+
+func resolveOptionsFromRun(args []string, opts runner.Options) catalog.ResolveOptions {
+	return catalog.ResolveOptions{
+		ProfileDirs:             flagValues(args, "--profile-dir"),
+		ProviderProfileOverride: opts.ProviderProfileOverride,
+		ProviderDryRun:          opts.DryRun,
+		ProviderManifest:        opts.ProviderManifest,
+	}
 }
 
 func imageOverrideFromArgs(args []string) (string, error) {
@@ -547,7 +558,7 @@ func flagTakesValue(arg string) bool {
 		return false
 	}
 	switch arg {
-	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base", "--image":
+	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base", "--image", "--provider-profile":
 		return true
 	default:
 		return false
@@ -596,6 +607,8 @@ func parseDefinitionKind(value string) (store.DefinitionKind, error) {
 		return store.KindClusterProfile, nil
 	case "actor-profile", "actor", "actors":
 		return store.KindActorProfile, nil
+	case "provider-profile", "provider", "providers":
+		return store.KindProviderProfile, nil
 	case "scenario", "scenarios":
 		return store.KindScenario, nil
 	case "suite", "suites":

@@ -1,0 +1,32 @@
+apiVersion: reliability.mycel.io/v1alpha1
+kind: ProviderProfile
+metadata:
+  name: openai-compatible-emulator
+  description: Credential-free local OpenAI-compatible protocol profile.
+mode: emulator
+capabilities:
+  embedding:
+    connectorType: openai-compatible
+    endpointKey: local-openai-emulator
+    baseURL: http://127.0.0.1:18080/v1
+    modelKey: emulator/embedding-v1
+    providerModelName: embedding-v1
+    dimensions: 8
+    vectorSpaceKey: emulator/embedding-v1/8
+    batching:
+      mode: batch
+      maxItems: 16
+budgets:
+  enforcement: advisory
+  maxOperations: 4096
+  maxRequests: 4096
+  maxConcurrentOperations: 16
+  maxConcurrentRequests: 8
+  maxRetriesPerRequest: 2
+  maxInputTokens: 100000
+  maxOutputTokens: 1
+  requestTimeout: 5s
+  totalTimeout: 10m
+artifacts:
+  captureBodies: false
+  captureHeaders: false

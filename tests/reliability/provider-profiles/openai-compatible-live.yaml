@@ -1,0 +1,35 @@
+apiVersion: reliability.mycel.io/v1alpha1
+kind: ProviderProfile
+metadata:
+  name: openai-compatible-live
+  description: Manual non-gating OpenAI-compatible live-provider profile.
+mode: live
+capabilities:
+  embedding:
+    connectorType: openai-compatible
+    endpointKey: openai-compatible-live
+    baseURL: https://api.openai.com/v1
+    modelKey: live/text-embedding
+    providerModelName: text-embedding-3-small
+    dimensions: 1536
+    vectorSpaceKey: live/text-embedding-3-small/1536
+    secretRef:
+      env: OPENAI_API_KEY
+    batching:
+      mode: batch
+      maxItems: 16
+budgets:
+  enforcement: required
+  maxOperations: 128
+  maxRequests: 128
+  maxConcurrentOperations: 4
+  maxConcurrentRequests: 2
+  maxRetriesPerRequest: 1
+  maxInputTokens: 20000
+  maxOutputTokens: 1
+  maxEstimatedCostUSD: 1.00
+  requestTimeout: 15s
+  totalTimeout: 5m
+artifacts:
+  captureBodies: false
+  captureHeaders: false

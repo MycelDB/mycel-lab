@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/actors"
@@ -13,6 +14,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
@@ -280,6 +282,99 @@ func (d *clusterAssertionDriver) Exec(_ context.Context, _ env.Environment, node
 		}
 	}
 	return env.ExecResult{}, nil
+}
+
+func TestRecorderSanitizesDatabasePayloadsBeforePersistence(t *testing.T) {
+	const secret = "opaque-database-secret"
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	if err := st.CreateRun(ctx, store.Run{ID: "sanitized", ScenarioName: "test", Status: "running"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := artifacts.NewSanitizedSink(t.TempDir(), provider.NewRedactor([]string{secret}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendEvent(ctx, st, sink, "sanitized", artifacts.EventNow("test", "phase", "actor", map[string]any{"password": "visible", "note": secret})); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendMetric(ctx, st, sink, "sanitized", "test", 1, map[string]any{"authorization": "Bearer abcdefghijklmnop", "note": secret}); err != nil {
+		t.Fatal(err)
+	}
+	details, err := st.GetRun(ctx, "sanitized")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(details)
+	for _, prohibited := range []string{secret, "visible", "abcdefghijklmnop"} {
+		if strings.Contains(string(raw), prohibited) {
+			t.Fatalf("database details leaked %q: %s", prohibited, raw)
+		}
+	}
+}
+
+func TestFinalizeRedactsReturnedErrors(t *testing.T) {
+	const secret = "opaque-error-secret"
+	sink, err := artifacts.NewSanitizedSink(t.TempDir(), provider.NewRedactor([]string{secret}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = finalize(context.Background(), nil, sink, Result{RunID: "redacted-error", ScenarioName: "test"}, RunFailed, errors.New("provider failure: "+secret))
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), provider.Redacted) {
+		t.Fatalf("finalize() error = %v", err)
+	}
+}
+
+func TestFinalizeQuarantinesUnscannableArtifactRoot(t *testing.T) {
+	sink, err := artifacts.NewSanitizedSink(t.TempDir(), provider.NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(sink.Root(), "unsafe-link")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalize(context.Background(), nil, sink, Result{RunID: "unscannable", ScenarioName: "test"}, RunPassed, nil)
+	if err == nil || !strings.Contains(err.Error(), "redaction scan failed") || result.Status != RunFailed {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if _, err := os.Lstat(filepath.Join(sink.Root(), "unsafe-link")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe symlink survived quarantine: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sink.Root(), "redaction-scan.json")); err != nil {
+		t.Fatalf("redaction report missing after quarantine: %v", err)
+	}
+}
+
+func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
+	const secret = "opaque-finalize-secret"
+	sink, err := artifacts.NewSanitizedSink(t.TempDir(), provider.NewRedactor([]string{secret}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sink.Root(), "bypass.log"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalize(context.Background(), nil, sink, Result{RunID: "redaction-gate", ScenarioName: "test"}, RunPassed, nil)
+	if err == nil || !strings.Contains(err.Error(), "redaction scan found") {
+		t.Fatalf("finalize() error = %v", err)
+	}
+	if result.Status != RunFailed {
+		t.Fatalf("status = %q", result.Status)
+	}
+	report, readErr := os.ReadFile(filepath.Join(sink.Root(), "redaction-scan.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(report), secret) {
+		t.Fatalf("scan report leaked secret: %s", report)
+	}
+	quarantined, readErr := os.ReadFile(filepath.Join(sink.Root(), "bypass.log"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(quarantined), secret) {
+		t.Fatalf("quarantined artifact retained secret: %s", quarantined)
+	}
 }
 
 type recordingDriver struct {
