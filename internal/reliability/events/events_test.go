@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"runtime"
 	"strings"
 	"testing"
@@ -282,6 +283,31 @@ func TestDriverRuntimeSeedsCommonFolioAutomation(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commonfolio seed command missing %q in:\n%s", want, joined)
 		}
+	}
+}
+
+func TestCommonFolioAutomationJSONSupportsVersionedProcedureDefinitions(t *testing.T) {
+	assignment := provision.ActorAssignment{ActorID: "graph-writers-0", SpaceID: "space-1", DomainID: "11111111-1111-4111-8111-111111111111", PrincipalID: "22222222-2222-4222-8222-222222222222"}
+	procedureJSON, bindingJSON, err := commonFolioAutomationJSON(map[string]any{
+		"procedureVersion": 2,
+		"procedurePrompt":  "Return the updated CommonFolio page summary.",
+	}, assignment)
+	if err != nil {
+		t.Fatalf("commonFolioAutomationJSON() error=%v", err)
+	}
+	var procedure map[string]any
+	if err := json.Unmarshal([]byte(procedureJSON), &procedure); err != nil {
+		t.Fatalf("decode procedure JSON: %v", err)
+	}
+	if procedure["version"] != float64(2) || procedure["prompt"] != "Return the updated CommonFolio page summary." {
+		t.Fatalf("procedure=%v, want version 2 and updated prompt", procedure)
+	}
+	var binding map[string]any
+	if err := json.Unmarshal([]byte(bindingJSON), &binding); err != nil {
+		t.Fatalf("decode binding JSON: %v", err)
+	}
+	if binding["version"] != float64(2) || binding["procedure_version"] != float64(2) {
+		t.Fatalf("binding=%v, want version 2 and procedure_version 2", binding)
 	}
 }
 
