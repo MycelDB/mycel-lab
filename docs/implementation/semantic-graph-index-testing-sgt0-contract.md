@@ -1,7 +1,7 @@
 # SGT0 Semantic Graph-Index Proof and Compatibility Contract
 
-Status: Candidate  
-Parent plan: [Semantic graph-index testing implementation plan](semantic-graph-index-testing-implementation-plan.md)  
+Status: Candidate
+Parent plan: [Semantic graph-index testing implementation plan](semantic-graph-index-testing-implementation-plan.md)
 Tracking issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
 ## 1. Purpose

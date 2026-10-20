@@ -1,8 +1,8 @@
 # Provider-Neutral Semantic Graph Index Testing Implementation Plan
 
-Status: Proposed  
-Tracking issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)  
-Primary repository: `mycel-lab`  
+Status: Proposed
+Tracking issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
+Primary repository: `mycel-lab`
 Related repositories: `mycel-api`, `mycel-go-sdk`, `mycel`
 
 ## 1. Purpose
@@ -444,7 +444,7 @@ Every tranche ends with focused tests, `make test`, `go vet ./...`, `make check-
 
 Deliverable: [SGT0 semantic graph-index proof and compatibility contract](semantic-graph-index-testing-sgt0-contract.md)
 
-Repository: `mycel-lab`  
+Repository: `mycel-lab`
 Risk: low
 
 1. Add this plan and an issue-to-tranche checklist.
@@ -465,7 +465,7 @@ Acceptance:
 
 ### SGT1: Provider profile, budget declaration, and redaction foundations
 
-Repository: `mycel-lab`  
+Repository: `mycel-lab`
 Risk: medium
 Implementation status: implemented on `feature/46-sgt1-sgt2-foundations`; promotion remains separately approval-gated.
 
@@ -532,7 +532,7 @@ Acceptance:
 
 ### SGT2: Deterministic daemon embedding prerequisite
 
-Repositories: `mycel`, then `mycel-lab` fixture goldens  
+Repositories: `mycel`, then `mycel-lab` fixture goldens
 Risk: medium
 Implementation status: implemented on `mycel/feature/237-token-basis-fixture` plus `mycel-lab/feature/46-sgt1-sgt2-foundations`; first released-daemon declaration remains pending release.
 
@@ -561,7 +561,7 @@ Release dependency:
 
 ### SGT3: Semantic provisioning and finite event engine
 
-Repository: `mycel-lab`  
+Repository: `mycel-lab`
 Risk: high
 
 1. Add run-scoped semantic resource state and safe artifact serialization.
@@ -589,7 +589,7 @@ Acceptance:
 
 ### SGT4: `semantic-graph-index-contract`
 
-Repository: `mycel-lab`  
+Repository: `mycel-lab`
 Risk: high
 
 Implement the deterministic compose-first contract scenario with these ordered checks. Preflight requires both client semantic search/discovery authorization and Admin Semantic Maintenance authorization. Backfill control, work-item inspection, and the Level 2 terminal barrier use `GetSemanticMaintenanceStatus` plus targeted `ListSemanticMaintenanceWork`. On the v0.20.0 baseline, client rule summaries populate only pending depth; their default-zero running/failure counts are never convergence evidence.
@@ -714,7 +714,7 @@ Acceptance:
 
 ### SGT6: `semantic-graph-index-recovery`
 
-Repository: `mycel-lab`  
+Repository: `mycel-lab`
 Risk: high; destructive suite
 
 Start with k3d and the deterministic provider profile. Add continuous semantic search and mutation actors around controlled events:
@@ -743,7 +743,7 @@ Acceptance:
 
 ### SGT7: Local protocol emulators
 
-Repositories: `mycel-lab`, with daemon connector changes only when required  
+Repositories: `mycel-lab`, with daemon connector changes only when required
 Risk: medium
 
 Add bounded local emulators for connector protocols that exist in the daemon. The emulator is a small dedicated command/package with no third-party credentials. It supports scripted cases:
@@ -860,7 +860,7 @@ Acceptance:
 
 ### SGT10: CI and release integration
 
-Repository: `mycel-lab`  
+Repository: `mycel-lab`
 Risk: medium
 
 Keep capability tier, execution environment, and gating status as separate dimensions.
