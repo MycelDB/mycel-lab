@@ -3,6 +3,7 @@ package catalog
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
@@ -96,6 +97,39 @@ func TestResolvedScenarioOutputIsStable(t *testing.T) {
 	}
 	if string(firstYAML) != string(secondYAML) {
 		t.Fatalf("resolved output is not stable\nfirst:\n%s\nsecond:\n%s", firstYAML, secondYAML)
+	}
+}
+
+func TestResolveScenarioProviderProfileReferenceAndOverride(t *testing.T) {
+	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage", "raft-3-node-short-outage.yaml")
+	loaded, err := spec.LoadFile(scenarioPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario := loaded.(spec.Scenario)
+	scenario.ProviderProfileRef = "deterministic-token-basis-v1"
+	profileRoot := filepath.Join("..", "..", "..", "tests", "reliability")
+	fromScenario, err := ResolveScenario(scenario, filepath.Dir(scenarioPath), ResolveOptions{ProfileDirs: []string{profileRoot}})
+	if err != nil {
+		t.Fatalf("ResolveScenario(reference) error = %v", err)
+	}
+	if fromScenario.ProviderProfile == nil || fromScenario.ProviderProfile.Selection != "scenario" {
+		t.Fatalf("scenario provider selection = %#v", fromScenario.ProviderProfile)
+	}
+	base, err := ResolveScenarioFile(scenarioPath, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	overridePath := filepath.Join(profileRoot, "provider-profiles", "deterministic-token-basis-v1.yaml")
+	fromOverride, err := ResolveScenarioFile(scenarioPath, ResolveOptions{ProviderProfileOverride: overridePath})
+	if err != nil {
+		t.Fatalf("ResolveScenarioFile(override) error = %v", err)
+	}
+	if fromOverride.ProviderProfile == nil || fromOverride.ProviderProfile.Selection != "cli-override" {
+		t.Fatalf("override provider selection = %#v", fromOverride.ProviderProfile)
+	}
+	if !reflect.DeepEqual(base.Cluster, fromOverride.Cluster) || !reflect.DeepEqual(base.ActorGroups, fromOverride.ActorGroups) || !reflect.DeepEqual(base.Phases, fromOverride.Phases) {
+		t.Fatal("provider override changed non-provider scenario fields")
 	}
 }
 

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-final-report/v1alpha1",
+  "runId": "negative-empty-required-evidence",
+  "scenario": "semantic-graph-index-contract",
+  "proofLevel": 1,
+  "assertionsOk": true,
+  "summary": {
+    "required": 1,
+    "passed": 1,
+    "failed": 0,
+    "notRun": 0
+  },
+  "gates": {
+    "graph": true,
+    "semantic": true,
+    "budget": true,
+    "redaction": true,
+    "artifacts": true
+  },
+  "assertions": [
+    {
+      "id": "semantic.indexed-path",
+      "description": "All conditions except required evidence satisfy a true verdict.",
+      "required": true,
+      "proofLevel": 1,
+      "status": "pass",
+      "evidenceRefs": []
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "semantic/searches.jsonl",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

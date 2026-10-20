@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,6 +55,37 @@ func TestSubcommandSkeletons(t *testing.T) {
 		if stdout.Len() == 0 {
 			t.Fatalf("Run(%v) wrote no stdout", args)
 		}
+	}
+}
+
+func TestRunDryRunWritesResolvedProviderArtifact(t *testing.T) {
+	fixtureRoot := filepath.Join("..", "..", "..", "tests", "reliability")
+	scenarioPath := filepath.Join(fixtureRoot, "scenarios", "raft-3-node-short-outage.yaml")
+	profilePath := filepath.Join(fixtureRoot, "provider-profiles", "deterministic-token-basis-v1.yaml")
+	artifactRoot := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"run", "scenario-file", scenarioPath, "--dry-run", "--provider-profile", profilePath, "--artifact-root", artifactRoot}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code=%d stderr=%q", code, stderr.String())
+	}
+	var providerArtifact string
+	if err := filepath.WalkDir(artifactRoot, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() && filepath.Base(path) == "provider-profile-resolved.json" {
+			providerArtifact = path
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if providerArtifact == "" {
+		t.Fatal("provider-profile-resolved.json not found")
+	}
+	raw, err := os.ReadFile(providerArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"sourceSHA256": "sha256:`) || !strings.Contains(string(raw), `"selection": "cli-override"`) {
+		t.Fatalf("unexpected provider artifact: %s", raw)
 	}
 }
 
@@ -112,6 +144,17 @@ func TestRunOptionsParseEnvironmentOverride(t *testing.T) {
 	}
 	if opts.ImageOverride != "myceldb/mycel:candidate" {
 		t.Fatalf("ImageOverride=%q", opts.ImageOverride)
+	}
+}
+
+func TestRunOptionsParseProviderOverride(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts, ok := runOptionsFromArgs([]string{"--provider-profile", "candidate-profile.yaml"}, &stdout, &stderr)
+	if !ok {
+		t.Fatalf("runOptionsFromArgs ok=false stderr=%q", stderr.String())
+	}
+	if opts.ProviderProfileOverride != "candidate-profile.yaml" {
+		t.Fatalf("opts=%+v", opts)
 	}
 }
 

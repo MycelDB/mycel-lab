@@ -23,6 +23,10 @@ type EventRecorder interface {
 	RecordActorEvent(ctx context.Context, event ActorEvent) error
 }
 
+type OperationBudgetRecorder interface {
+	ReserveActorOperation(ctx context.Context, actorID, operation string) (context.Context, func(), error)
+}
+
 type ActorEvent struct {
 	Type        string             `json:"type"`
 	ActorID     string             `json:"actorId"`
@@ -298,11 +302,16 @@ func (a *GraphActor) intervals() (time.Duration, time.Duration) {
 }
 
 func (a *GraphActor) commit(ctx context.Context) {
+	operationCtx, release, err := reserveActorOperation(ctx, a.Recorder, a.ID, "graph-commit")
+	if err != nil {
+		return
+	}
+	defer release()
 	a.mu.Lock()
 	a.sequence++
 	tx := GenerateGraphTransaction(a.ID, a.Seed, a.sequence, a.Profile, a.state)
 	a.mu.Unlock()
-	if err := a.executeRealTransaction(ctx, tx); err != nil {
+	if err := a.executeRealTransaction(operationCtx, tx); err != nil {
 		tx.Acknowledged = false
 		tx.ErrorClass = ClassifyError(err)
 		if a.Recorder != nil {
@@ -321,6 +330,11 @@ func (a *GraphActor) commit(ctx context.Context) {
 }
 
 func (a *GraphActor) read(ctx context.Context) {
+	operationCtx, release, err := reserveActorOperation(ctx, a.Recorder, a.ID, "graph-read")
+	if err != nil {
+		return
+	}
+	defer release()
 	assignment := a.currentAssignment()
 	if !assignmentCanUseRealClient(assignment) {
 		if a.Recorder != nil {
@@ -330,10 +344,10 @@ func (a *GraphActor) read(ctx context.Context) {
 	}
 	erredAfterReauth := false
 	reauthenticated := false
-	err := a.readOnce(ctx, false)
+	err = a.readOnce(operationCtx, false)
 	if shouldReauthenticate(err, a.currentAssignment()) {
 		reauthenticated = true
-		err = a.readOnce(ctx, true)
+		err = a.readOnce(operationCtx, true)
 		erredAfterReauth = err != nil
 	}
 	payload := map[string]any{"ok": err == nil, "spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr, "targetActorId": a.ID}
@@ -348,6 +362,13 @@ func (a *GraphActor) read(ctx context.Context) {
 	if a.Recorder != nil {
 		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-read-check", ActorID: a.ID, GroupName: a.GroupName, Payload: payload})
 	}
+}
+
+func reserveActorOperation(ctx context.Context, recorder EventRecorder, actorID, operation string) (context.Context, func(), error) {
+	if limiter, ok := recorder.(OperationBudgetRecorder); ok {
+		return limiter.ReserveActorOperation(ctx, actorID, operation)
+	}
+	return ctx, func() {}, nil
 }
 
 func (a *GraphActor) readOnce(ctx context.Context, forceLogin bool) error {

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-final-report/v1alpha1",
+  "runId": "negative-false-gate",
+  "scenario": "semantic-graph-index-contract",
+  "proofLevel": 1,
+  "assertionsOk": true,
+  "summary": {
+    "required": 1,
+    "passed": 1,
+    "failed": 0,
+    "notRun": 0
+  },
+  "gates": {
+    "graph": true,
+    "semantic": true,
+    "budget": true,
+    "redaction": false,
+    "artifacts": true
+  },
+  "assertions": [
+    {
+      "id": "semantic.indexed-path",
+      "description": "All conditions except the redaction gate satisfy a true verdict.",
+      "required": true,
+      "proofLevel": 1,
+      "status": "pass",
+      "evidenceRefs": ["semantic/searches.jsonl#sequence=1"]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "semantic/searches.jsonl",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

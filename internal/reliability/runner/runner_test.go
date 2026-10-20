@@ -6,13 +6,17 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/actors"
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/events"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
@@ -34,6 +38,14 @@ func TestPhaseTransitionsAreValid(t *testing.T) {
 	}
 }
 
+func TestMarkLastPassedPhaseFailedKeepsClosedBudgetEvidenceConsistent(t *testing.T) {
+	phases := []PhaseState{{Name: "warmup", Status: PhasePassed}, {Name: "steady", Status: PhasePassed}}
+	markLastPassedPhaseFailed(phases)
+	if phases[0].Status != PhasePassed || phases[1].Status != PhaseFailed {
+		t.Fatalf("phase states = %#v", phases)
+	}
+}
+
 func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), Store: store.NewMemoryStore()})
@@ -47,6 +59,142 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(result.ArtifactRoot, name)); err != nil {
 			t.Fatalf("artifact %s missing: %v", name, err)
 		}
+	}
+}
+
+func TestRunScenarioProviderBudgetExhaustionStopsScheduling(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved.Profile.Budgets.MaxOperations = 2 // provisioning plus the first event
+	scenario.ProviderProfile = &resolved
+	scenario.ActorGroups = nil
+	scenario.Phases = []spec.PhaseSpec{{Name: "budget-exhaustion", Events: []spec.EventSpec{{Type: "rolling-restart"}, {Type: "rolling-restart"}}}}
+
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), provider.ErrBudgetExhausted.Error()) {
+		t.Fatalf("RunScenario() result=%#v error=%v", result, err)
+	}
+	if result.Status != RunFailed || result.ProviderBudget == nil || !result.ProviderBudget.Closed || result.ProviderBudget.Operations != 2 {
+		t.Fatalf("unexpected budget result: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(result.ArtifactRoot, "provider", "budget-final.json")); err != nil {
+		t.Fatalf("budget artifact missing: %v", err)
+	}
+}
+
+func TestReserveProviderOperationPreservesEarlierParentDeadline(t *testing.T) {
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := provider.NewLedger(resolved.Profile.Budgets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancelParent()
+	operationCtx, release, err := reserveProviderOperation(parent, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-operationCtx.Done()
+	if err := release(); err != nil {
+		t.Fatalf("parent deadline was misclassified: %v", err)
+	}
+	if snapshot := ledger.Snapshot(); snapshot.Closed {
+		t.Fatalf("parent deadline closed provider ledger: %#v", snapshot)
+	}
+}
+
+func TestReserveProviderOperationReleaseLinearizesBeforeDeadline(t *testing.T) {
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved.Profile.Budgets.RequestTimeout = provider.Duration{Duration: 5 * time.Millisecond}
+	ledger, err := provider.NewLedger(resolved.Profile.Budgets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := reserveProviderOperation(context.Background(), ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("completed operation release error: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if snapshot := ledger.Snapshot(); snapshot.Closed || snapshot.ConcurrentOperations != 0 {
+		t.Fatalf("completed operation later timed out: %#v", snapshot)
+	}
+}
+
+type swallowingTimeoutRuntime struct{}
+
+func (swallowingTimeoutRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, _ bool, recorder events.Recorder) error {
+	limiter, ok := recorder.(events.OperationBudgetRecorder)
+	if !ok {
+		return errors.New("operation budget recorder is missing")
+	}
+	operationCtx, release, err := limiter.ReserveRuntimeOperation(ctx, phase.Name, "swallowed-timeout")
+	if err != nil {
+		return err
+	}
+	<-operationCtx.Done()
+	release()
+	return nil
+}
+
+func TestRunScenarioRequestTimeoutCannotProducePassedRun(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved.Profile.Budgets.RequestTimeout = provider.Duration{Duration: time.Millisecond}
+	scenario.ProviderProfile = &resolved
+	scenario.ActorGroups = nil
+	scenario.Phases = []spec.PhaseSpec{{Name: "request-timeout", Events: []spec.EventSpec{{Type: "rolling-restart"}}}}
+
+	result, err := RunScenario(context.Background(), scenario, Options{
+		DryRun:       true,
+		ArtifactRoot: t.TempDir(),
+		EventRuntime: swallowingTimeoutRuntime{},
+	})
+	if err == nil || !strings.Contains(err.Error(), provider.ErrBudgetExhausted.Error()) {
+		t.Fatalf("RunScenario() result=%#v error=%v", result, err)
+	}
+	if result.Status != RunFailed || result.ProviderBudget == nil || !result.ProviderBudget.Closed || result.ProviderBudget.StopReason != "operation deadline reached" {
+		t.Fatalf("unexpected request-timeout result: %#v", result)
+	}
+	if len(result.Phases) != 1 || result.Phases[0].Status != PhaseFailed {
+		t.Fatalf("request-timeout phase did not fail immediately: %#v", result.Phases)
+	}
+	if _, err := os.Stat(filepath.Join(result.ArtifactRoot, "provider", "budget-final.json")); err != nil {
+		t.Fatalf("budget artifact missing: %v", err)
 	}
 }
 
@@ -280,6 +428,99 @@ func (d *clusterAssertionDriver) Exec(_ context.Context, _ env.Environment, node
 		}
 	}
 	return env.ExecResult{}, nil
+}
+
+func TestRecorderSanitizesDatabasePayloadsBeforePersistence(t *testing.T) {
+	const secret = "opaque-database-secret"
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	if err := st.CreateRun(ctx, store.Run{ID: "sanitized", ScenarioName: "test", Status: "running"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := artifacts.NewSanitizedSink(t.TempDir(), provider.NewRedactor([]string{secret}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendEvent(ctx, st, sink, "sanitized", artifacts.EventNow("test", "phase", "actor", map[string]any{"password": "visible", "note": secret, secret: "safe-key-value"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendMetric(ctx, st, sink, "sanitized", "test", 1, map[string]any{"authorization": "Bearer abcdefghijklmnop", "note": secret}); err != nil {
+		t.Fatal(err)
+	}
+	details, err := st.GetRun(ctx, "sanitized")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(details)
+	for _, prohibited := range []string{secret, "visible", "abcdefghijklmnop"} {
+		if strings.Contains(string(raw), prohibited) {
+			t.Fatalf("database details leaked %q: %s", prohibited, raw)
+		}
+	}
+}
+
+func TestFinalizeRedactsReturnedErrors(t *testing.T) {
+	const secret = "opaque-error-secret"
+	sink, err := artifacts.NewSanitizedSink(t.TempDir(), provider.NewRedactor([]string{secret}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = finalize(context.Background(), nil, sink, Result{RunID: "redacted-error", ScenarioName: "test"}, RunFailed, errors.New("provider failure: "+secret))
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), provider.Redacted) {
+		t.Fatalf("finalize() error = %v", err)
+	}
+}
+
+func TestFinalizeQuarantinesUnscannableArtifactRoot(t *testing.T) {
+	sink, err := artifacts.NewSanitizedSink(t.TempDir(), provider.NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(sink.Root(), "unsafe-link")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalize(context.Background(), nil, sink, Result{RunID: "unscannable", ScenarioName: "test"}, RunPassed, nil)
+	if err == nil || !strings.Contains(err.Error(), "redaction scan failed") || result.Status != RunFailed {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if _, err := os.Lstat(filepath.Join(sink.Root(), "unsafe-link")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe symlink survived quarantine: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sink.Root(), "redaction-scan.json")); err != nil {
+		t.Fatalf("redaction report missing after quarantine: %v", err)
+	}
+}
+
+func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
+	const secret = "opaque-finalize-secret"
+	sink, err := artifacts.NewSanitizedSink(t.TempDir(), provider.NewRedactor([]string{secret}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sink.Root(), "bypass.log"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalize(context.Background(), nil, sink, Result{RunID: "redaction-gate", ScenarioName: "test"}, RunPassed, nil)
+	if err == nil || !strings.Contains(err.Error(), "redaction scan found") {
+		t.Fatalf("finalize() error = %v", err)
+	}
+	if result.Status != RunFailed {
+		t.Fatalf("status = %q", result.Status)
+	}
+	report, readErr := os.ReadFile(filepath.Join(sink.Root(), "redaction-scan.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(report), secret) {
+		t.Fatalf("scan report leaked secret: %s", report)
+	}
+	quarantined, readErr := os.ReadFile(filepath.Join(sink.Root(), "bypass.log"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(quarantined), secret) {
+		t.Fatalf("quarantined artifact retained secret: %s", quarantined)
+	}
 }
 
 type recordingDriver struct {

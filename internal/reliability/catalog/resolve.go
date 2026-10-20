@@ -6,12 +6,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"gopkg.in/yaml.v3"
 )
 
 type ResolveOptions struct {
-	ProfileDirs []string
+	ProfileDirs             []string
+	ProviderProfileOverride string
+	ProviderDryRun          bool
+	ProviderManifest        provider.CapabilityManifest
+	ProviderLookupEnv       func(string) (string, bool)
 }
 
 func ResolveScenarioFile(path string, opts ResolveOptions) (spec.ResolvedScenario, error) {
@@ -82,6 +87,25 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 		return spec.ResolvedScenario{}, fmt.Errorf("resolved cluster invalid: %w", err)
 	}
 
+	selectedProviderRef := strings.TrimSpace(scenario.ProviderProfileRef)
+	selection := "scenario"
+	if override := strings.TrimSpace(opts.ProviderProfileOverride); override != "" {
+		selectedProviderRef = override
+		selection = "cli-override"
+	}
+	var resolvedProvider *provider.ResolvedProfile
+	if selectedProviderRef != "" {
+		profile, source, err := resolveProviderProfile(selectedProviderRef, scenarioDir, opts.ProfileDirs)
+		if err != nil {
+			return spec.ResolvedScenario{}, fmt.Errorf("provider profile: %w", err)
+		}
+		resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{DryRun: opts.ProviderDryRun, Selection: selection, Manifest: opts.ProviderManifest, LookupEnv: opts.ProviderLookupEnv})
+		if err != nil {
+			return spec.ResolvedScenario{}, fmt.Errorf("provider profile %q: %w", selectedProviderRef, err)
+		}
+		resolvedProvider = &resolved
+	}
+
 	groups := make([]spec.ResolvedActorGroup, 0, len(scenario.ActorGroups))
 	for _, group := range scenario.ActorGroups {
 		profile, err := resolveActorProfile(group.ProfileRef, scenarioDir, opts.ProfileDirs)
@@ -96,16 +120,18 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 	}
 
 	return spec.ResolvedScenario{
-		TypeMeta:    spec.TypeMeta{APIVersion: spec.APIVersion, Kind: "ResolvedScenario"},
-		Metadata:    scenario.Metadata,
-		Seed:        scenario.Seed,
-		Environment: scenario.Environment,
-		ClusterRef:  scenario.ClusterRef,
-		Cluster:     cluster,
-		ActorGroups: groups,
-		Phases:      scenario.Phases,
-		Assertions:  scenario.Assertions,
-		Artifacts:   scenario.Artifacts,
+		TypeMeta:           spec.TypeMeta{APIVersion: spec.APIVersion, Kind: "ResolvedScenario"},
+		Metadata:           scenario.Metadata,
+		Seed:               scenario.Seed,
+		Environment:        scenario.Environment,
+		ClusterRef:         scenario.ClusterRef,
+		Cluster:            cluster,
+		ProviderProfileRef: selectedProviderRef,
+		ProviderProfile:    resolvedProvider,
+		ActorGroups:        groups,
+		Phases:             scenario.Phases,
+		Assertions:         scenario.Assertions,
+		Artifacts:          scenario.Artifacts,
 	}, nil
 }
 
@@ -123,6 +149,14 @@ func resolveClusterProfile(ref, scenarioDir string, profileDirs []string) (spec.
 		return spec.ClusterProfile{}, fmt.Errorf("%s is %T, want ClusterProfile", path, loaded)
 	}
 	return profile, nil
+}
+
+func resolveProviderProfile(ref, scenarioDir string, profileDirs []string) (provider.Profile, []byte, error) {
+	path, err := resolveRef(ref, scenarioDir, profileDirs, "provider-profiles")
+	if err != nil {
+		return provider.Profile{}, nil, err
+	}
+	return provider.LoadFile(path)
 }
 
 func resolveActorProfile(ref, scenarioDir string, profileDirs []string) (spec.ActorProfile, error) {

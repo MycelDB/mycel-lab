@@ -35,6 +35,10 @@ type Recorder interface {
 	RecordRuntimeEvent(ctx context.Context, record Record) error
 }
 
+type OperationBudgetRecorder interface {
+	ReserveRuntimeOperation(ctx context.Context, phaseName, eventType string) (context.Context, func(), error)
+}
+
 type Runtime interface {
 	ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error
 }
@@ -51,6 +55,12 @@ func (LocalRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec
 }
 
 func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec, dryRun bool, recorder Recorder) error {
+	operationCtx, release, err := reserveRuntimeOperation(ctx, recorder, phase.Name, event.Type)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = operationCtx
 	if recorder != nil {
 		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"dryRun": dryRun}}); err != nil {
 			return err
@@ -75,6 +85,13 @@ func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec,
 		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target})
 	}
 	return nil
+}
+
+func reserveRuntimeOperation(ctx context.Context, recorder Recorder, phaseName, eventType string) (context.Context, func(), error) {
+	if limiter, ok := recorder.(OperationBudgetRecorder); ok {
+		return limiter.ReserveRuntimeOperation(ctx, phaseName, eventType)
+	}
+	return ctx, func() {}, nil
 }
 
 func validateEvent(event spec.EventSpec) error {

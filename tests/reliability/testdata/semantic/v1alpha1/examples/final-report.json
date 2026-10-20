@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-final-report/v1alpha1",
+  "runId": "semantic-contract-20261020T120000Z",
+  "scenario": "semantic-graph-index-contract",
+  "proofLevel": 1,
+  "assertionsOk": true,
+  "summary": {
+    "required": 2,
+    "passed": 2,
+    "failed": 0,
+    "notRun": 0
+  },
+  "gates": {
+    "graph": true,
+    "semantic": true,
+    "budget": true,
+    "redaction": true,
+    "artifacts": true
+  },
+  "assertions": [
+    {
+      "id": "semantic.indexed-path",
+      "description": "Direct semantic search returns the expected physical semantic record.",
+      "required": true,
+      "proofLevel": 1,
+      "status": "pass",
+      "evidenceRefs": ["semantic/searches.jsonl#sequence=7"]
+    },
+    {
+      "id": "semantic.exact-ranking",
+      "description": "The deterministic direct semantic result has the expected node, score, and rank.",
+      "required": true,
+      "proofLevel": 1,
+      "status": "pass",
+      "evidenceRefs": ["semantic/searches.jsonl#sequence=7"]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "semantic/searches.jsonl",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ]
+}

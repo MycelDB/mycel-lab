@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-evidence/v1alpha1",
+  "kind": "search",
+  "runId": "semantic-contract-20261020T120000Z",
+  "scenario": "semantic-graph-index-contract",
+  "phase": "baseline-search",
+  "eventId": "semantic-search-assert-1",
+  "sequence": 7,
+  "startedAt": "2026-10-20T12:00:30Z",
+  "finishedAt": "2026-10-20T12:00:31Z",
+  "status": "succeeded",
+  "provenance": {
+    "harnessCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "harnessDirty": false,
+    "daemonImage": "myceldb/mycel:v0.20.0",
+    "daemonDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "apiVersion": "v0.20.1",
+    "sdkVersion": "v0.20.1",
+    "providerProfileName": "deterministic-token-basis-v1",
+    "providerProfileSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "corpusName": "minimal-semantic-contract",
+    "corpusSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "semanticContext": {
+    "daemonAddressId": "daemon-0",
+    "spaceId": "11111111-1111-1111-1111-111111111111",
+    "domainId": "22222222-2222-2222-2222-222222222222",
+    "semanticRuleId": "33333333-3333-3333-3333-333333333333",
+    "embeddingBindingKey": "primary",
+    "nodeId": "44444444-4444-4444-4444-444444444444",
+    "recordId": "55555555-5555-5555-5555-555555555555",
+    "committedRevision": 12
+  },
+  "evidence": {
+    "sourceKind": "direct-semantic",
+    "proofLevel": 1,
+    "references": [
+      {
+        "path": "semantic/searches.jsonl",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    "data": {
+      "queryId": "memory-baseline",
+      "querySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "rank": 1,
+      "score": 1.0,
+      "warnings": []
+    }
+  }
+}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
@@ -72,6 +73,31 @@ func TestImportPathLifecycleAndExportRoundTrip(t *testing.T) {
 	}
 	if loaded.(spec.Scenario).Metadata.Name != "example" {
 		t.Fatalf("exported scenario name = %q", loaded.(spec.Scenario).Metadata.Name)
+	}
+}
+
+func TestProviderProfileImportAndExportRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	results, err := ImportPath(ctx, st, path, ImportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoImportErrors(t, results)
+	if len(results) != 1 || results[0].Kind != store.KindProviderProfile {
+		t.Fatalf("results = %#v", results)
+	}
+	exported, err := ExportDefinition(ctx, st, store.KindProviderProfile, "deterministic-token-basis-v1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := provider.Load(exported)
+	if err != nil {
+		t.Fatalf("provider.Load(exported) error = %v\n%s", err, exported)
+	}
+	if profile.Capabilities.Embedding == nil || profile.Capabilities.Embedding.FixtureStrategy != "token-basis-v1" {
+		t.Fatalf("profile = %#v", profile)
 	}
 }
 

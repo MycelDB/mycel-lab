@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/myceldb/mycel-go-sdk v0.20.1
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1

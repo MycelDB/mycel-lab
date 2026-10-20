@@ -280,6 +280,8 @@ func tableForKind(kind DefinitionKind) (string, error) {
 		return "cluster_profiles", nil
 	case KindActorProfile:
 		return "actor_profiles", nil
+	case KindProviderProfile:
+		return "provider_profiles", nil
 	case KindScenario:
 		return "scenarios", nil
 	case KindSuite:

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-final-report/v1alpha1",
+  "runId": "negative-false-success",
+  "scenario": "semantic-graph-index-contract",
+  "proofLevel": 1,
+  "assertionsOk": true,
+  "summary": {
+    "required": 1,
+    "passed": 0,
+    "failed": 0,
+    "notRun": 1
+  },
+  "gates": {
+    "graph": true,
+    "semantic": true,
+    "budget": true,
+    "redaction": false,
+    "artifacts": true
+  },
+  "assertions": [
+    {
+      "id": "semantic.required-not-run",
+      "description": "A required assertion was not executed.",
+      "required": true,
+      "proofLevel": 1,
+      "status": "not-run",
+      "evidenceRefs": []
+    }
+  ],
+  "artifacts": []
+}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"gopkg.in/yaml.v3"
 )
 
@@ -121,16 +122,17 @@ type ActorProfile struct {
 }
 
 type Scenario struct {
-	TypeMeta         `yaml:",inline" json:",inline"`
-	Metadata         Metadata         `yaml:"metadata" json:"metadata"`
-	Seed             int64            `yaml:"seed" json:"seed"`
-	Environment      EnvironmentSpec  `yaml:"environment" json:"environment"`
-	ClusterRef       string           `yaml:"clusterRef" json:"clusterRef"`
-	ClusterOverrides map[string]any   `yaml:"clusterOverrides,omitempty" json:"clusterOverrides,omitempty"`
-	ActorGroups      []ActorGroupSpec `yaml:"actorGroups" json:"actorGroups"`
-	Phases           []PhaseSpec      `yaml:"phases" json:"phases"`
-	Assertions       map[string]any   `yaml:"assertions,omitempty" json:"assertions,omitempty"`
-	Artifacts        map[string]bool  `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	TypeMeta           `yaml:",inline" json:",inline"`
+	Metadata           Metadata         `yaml:"metadata" json:"metadata"`
+	Seed               int64            `yaml:"seed" json:"seed"`
+	Environment        EnvironmentSpec  `yaml:"environment" json:"environment"`
+	ClusterRef         string           `yaml:"clusterRef" json:"clusterRef"`
+	ProviderProfileRef string           `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
+	ClusterOverrides   map[string]any   `yaml:"clusterOverrides,omitempty" json:"clusterOverrides,omitempty"`
+	ActorGroups        []ActorGroupSpec `yaml:"actorGroups" json:"actorGroups"`
+	Phases             []PhaseSpec      `yaml:"phases" json:"phases"`
+	Assertions         map[string]any   `yaml:"assertions,omitempty" json:"assertions,omitempty"`
+	Artifacts          map[string]bool  `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
 }
 
 type EnvironmentSpec struct {
@@ -199,16 +201,18 @@ type SuiteExecution struct {
 }
 
 type ResolvedScenario struct {
-	TypeMeta    `yaml:",inline" json:",inline"`
-	Metadata    Metadata             `yaml:"metadata" json:"metadata"`
-	Seed        int64                `yaml:"seed" json:"seed"`
-	Environment EnvironmentSpec      `yaml:"environment" json:"environment"`
-	ClusterRef  string               `yaml:"clusterRef" json:"clusterRef"`
-	Cluster     ClusterSpec          `yaml:"cluster" json:"cluster"`
-	ActorGroups []ResolvedActorGroup `yaml:"actorGroups" json:"actorGroups"`
-	Phases      []PhaseSpec          `yaml:"phases" json:"phases"`
-	Assertions  map[string]any       `yaml:"assertions,omitempty" json:"assertions,omitempty"`
-	Artifacts   map[string]bool      `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	TypeMeta           `yaml:",inline" json:",inline"`
+	Metadata           Metadata                  `yaml:"metadata" json:"metadata"`
+	Seed               int64                     `yaml:"seed" json:"seed"`
+	Environment        EnvironmentSpec           `yaml:"environment" json:"environment"`
+	ClusterRef         string                    `yaml:"clusterRef" json:"clusterRef"`
+	Cluster            ClusterSpec               `yaml:"cluster" json:"cluster"`
+	ProviderProfileRef string                    `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
+	ProviderProfile    *provider.ResolvedProfile `yaml:"providerProfile,omitempty" json:"providerProfile,omitempty"`
+	ActorGroups        []ResolvedActorGroup      `yaml:"actorGroups" json:"actorGroups"`
+	Phases             []PhaseSpec               `yaml:"phases" json:"phases"`
+	Assertions         map[string]any            `yaml:"assertions,omitempty" json:"assertions,omitempty"`
+	Artifacts          map[string]bool           `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
 }
 
 type ResolvedActorGroup struct {

@@ -1,6 +1,6 @@
 # Runtime artifacts
-artifacts/
-results/
+/artifacts/
+/results/
 
 # Local configuration/secrets
 .env

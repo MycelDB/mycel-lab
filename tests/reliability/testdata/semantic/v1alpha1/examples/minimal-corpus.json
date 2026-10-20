@@ -1,0 +1,210 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-corpus/v1alpha1",
+  "metadata": {
+    "name": "minimal-semantic-contract",
+    "description": "Synthetic deterministic corpus for projection, isolation, lifecycle, and transaction-oracle drafts."
+  },
+  "classification": {
+    "dataClass": "synthetic",
+    "artifactCaptureSafe": true
+  },
+  "scopes": [
+    {
+      "key": "primary",
+      "spaceKey": "semantic-contract",
+      "domainKey": "documents"
+    },
+    {
+      "key": "isolation",
+      "spaceKey": "semantic-contract-isolation",
+      "domainKey": "documents"
+    }
+  ],
+  "nodes": [
+    {
+      "key": "memory-note",
+      "scopeKey": "primary",
+      "labels": ["Document"],
+      "properties": {
+        "title": "Memory systems",
+        "body": "axis-zero memory retrieval",
+        "privateNote": "excluded axis-one text"
+      },
+      "projection": {
+        "includedPaths": ["title", "body"],
+        "excludedPaths": ["privateNote"],
+        "fixtureTokens": ["axis-0"],
+        "expectedEligible": true
+      }
+    },
+    {
+      "key": "garden-note",
+      "scopeKey": "primary",
+      "labels": ["Document"],
+      "properties": {
+        "title": "Garden planning",
+        "body": "axis-one seasonal planting"
+      },
+      "projection": {
+        "includedPaths": ["title", "body"],
+        "excludedPaths": [],
+        "fixtureTokens": ["axis-1"],
+        "expectedEligible": true
+      }
+    },
+    {
+      "key": "excluded-field-confounder",
+      "scopeKey": "primary",
+      "labels": ["Document"],
+      "properties": {
+        "title": "Unrelated note",
+        "body": "axis-two unrelated content",
+        "privateNote": "axis-zero memory retrieval"
+      },
+      "projection": {
+        "includedPaths": ["title", "body"],
+        "excludedPaths": ["privateNote"],
+        "fixtureTokens": ["axis-2"],
+        "expectedEligible": true
+      }
+    },
+    {
+      "key": "isolated-memory-note",
+      "scopeKey": "isolation",
+      "labels": ["Document"],
+      "properties": {
+        "title": "Memory systems",
+        "body": "axis-zero memory retrieval"
+      },
+      "projection": {
+        "includedPaths": ["title", "body"],
+        "excludedPaths": [],
+        "fixtureTokens": ["axis-0"],
+        "expectedEligible": true
+      }
+    }
+  ],
+  "edges": [],
+  "mutations": [
+    {
+      "key": "update-memory-projection",
+      "disposition": "commit",
+      "operations": [
+        {
+          "type": "update-node",
+          "targetKey": "memory-note",
+          "setProperties": {
+            "body": "axis-one updated garden content"
+          }
+        }
+      ],
+      "expected": {
+        "graphChangedKeys": ["memory-note"],
+        "graphUnchangedKeys": [],
+        "semanticChangedKeys": ["memory-note"],
+        "semanticUnchangedKeys": []
+      }
+    },
+    {
+      "key": "update-excluded-property",
+      "disposition": "commit",
+      "operations": [
+        {
+          "type": "update-node",
+          "targetKey": "excluded-field-confounder",
+          "setProperties": {
+            "privateNote": "axis-one replacement remains excluded"
+          }
+        }
+      ],
+      "expected": {
+        "graphChangedKeys": ["excluded-field-confounder"],
+        "graphUnchangedKeys": [],
+        "semanticChangedKeys": [],
+        "semanticUnchangedKeys": ["excluded-field-confounder"]
+      }
+    },
+    {
+      "key": "rollback-garden-update",
+      "disposition": "rollback",
+      "operations": [
+        {
+          "type": "update-node",
+          "targetKey": "garden-note",
+          "setProperties": {
+            "body": "axis-zero rolled back content"
+          }
+        }
+      ],
+      "expected": {
+        "graphChangedKeys": [],
+        "graphUnchangedKeys": ["garden-note"],
+        "semanticChangedKeys": [],
+        "semanticUnchangedKeys": ["garden-note"]
+      }
+    },
+    {
+      "key": "failed-multi-node-statement",
+      "disposition": "failed-statement",
+      "operations": [
+        {
+          "type": "update-node",
+          "targetKey": "memory-note",
+          "setProperties": {
+            "body": "axis-two must not survive"
+          }
+        },
+        {
+          "type": "update-node",
+          "targetKey": "garden-note",
+          "setProperties": {
+            "body": "axis-zero must not survive"
+          }
+        }
+      ],
+      "expected": {
+        "graphChangedKeys": [],
+        "graphUnchangedKeys": ["memory-note", "garden-note"],
+        "semanticChangedKeys": [],
+        "semanticUnchangedKeys": ["memory-note", "garden-note"]
+      }
+    }
+  ],
+  "queries": [
+    {
+      "key": "memory-baseline",
+      "scopeKey": "primary",
+      "text": "axis-zero memory retrieval",
+      "semanticRuleKey": "document-projection",
+      "bindingKey": "primary",
+      "limit": 3,
+      "minScore": 0.5,
+      "proofLevel": 1,
+      "expected": {
+        "orderedNodeKeys": ["memory-note"],
+        "absentNodeKeys": ["excluded-field-confounder", "isolated-memory-note"],
+        "exactScores": [1.0],
+        "scoreTolerance": 0,
+        "requireRecordIdentity": true,
+        "requireSemanticSource": true
+      }
+    },
+    {
+      "key": "memory-after-update",
+      "scopeKey": "primary",
+      "text": "axis-zero memory retrieval",
+      "semanticRuleKey": "document-projection",
+      "bindingKey": "primary",
+      "limit": 3,
+      "minScore": 0.5,
+      "proofLevel": 3,
+      "expected": {
+        "orderedNodeKeys": [],
+        "absentNodeKeys": ["memory-note", "excluded-field-confounder", "isolated-memory-note"],
+        "requireRecordIdentity": true,
+        "requireSemanticSource": true,
+        "requiredMutationKey": "update-memory-projection"
+      }
+    }
+  ]
+}

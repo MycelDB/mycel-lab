@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-corpus/v1alpha1",
+  "metadata": {
+    "name": "unsafe-classification",
+    "description": "Negative fixture: confidential content cannot opt into raw artifact capture."
+  },
+  "classification": {
+    "dataClass": "confidential",
+    "artifactCaptureSafe": true
+  },
+  "scopes": [
+    {"key": "primary", "spaceKey": "semantic-contract", "domainKey": "documents"}
+  ],
+  "nodes": [
+    {
+      "key": "node-a",
+      "scopeKey": "primary",
+      "labels": ["Document"],
+      "properties": {"body": "redacted"},
+      "projection": {
+        "includedPaths": ["body"],
+        "excludedPaths": [],
+        "fixtureTokens": ["axis-0"],
+        "expectedEligible": true
+      }
+    }
+  ],
+  "mutations": [],
+  "queries": [
+    {
+      "key": "baseline",
+      "scopeKey": "primary",
+      "text": "axis-zero",
+      "semanticRuleKey": "document-projection",
+      "bindingKey": "primary",
+      "limit": 1,
+      "minScore": 0.5,
+      "proofLevel": 1,
+      "expected": {
+        "orderedNodeKeys": ["node-a"],
+        "absentNodeKeys": [],
+        "requireRecordIdentity": true,
+        "requireSemanticSource": true
+      }
+    }
+  ]
+}

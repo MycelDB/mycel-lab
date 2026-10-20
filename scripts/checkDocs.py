@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Lightweight docs/spec checker for Mycel Lab.
 
-The script validates that Markdown files are non-empty and YAML reliability
-specs parse as YAML. It intentionally avoids external dependencies so it can run
-in minimal CI environments.
+The script validates that Markdown files are non-empty, YAML reliability
+specs have the required envelope, and JSON documents parse. It intentionally
+avoids external dependencies so it can run in minimal CI environments.
 """
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import sys
@@ -44,6 +45,20 @@ def check_yaml(path: pathlib.Path) -> None:
     missing = [token for token in required if token not in text]
     if missing:
         raise SystemExit(f"yaml file {path} missing {', '.join(missing)}")
+
+
+def check_json(path: pathlib.Path) -> None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid json file {path}: {exc}") from exc
+    if not isinstance(value, (dict, list)):
+        raise SystemExit(f"json file must contain an object or array: {path}")
+    if path.name.endswith(".schema.json"):
+        required = ["$schema", "$id", "type"]
+        missing = [key for key in required if key not in value]
+        if missing:
+            raise SystemExit(f"json schema {path} missing {', '.join(missing)}")
 
 
 def check_scenario_docs(root: pathlib.Path) -> None:
@@ -92,6 +107,8 @@ def main(argv: list[str]) -> int:
             check_markdown(path)
         elif path.suffix in {".yaml", ".yml"}:
             check_yaml(path)
+        elif path.suffix == ".json":
+            check_json(path)
     check_scenario_docs(pathlib.Path.cwd())
     print("docs checks passed")
     return 0

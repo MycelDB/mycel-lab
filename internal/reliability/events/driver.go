@@ -41,6 +41,12 @@ func (r *DriverRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.Phase
 }
 
 func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec, dryRun bool, recorder Recorder) error {
+	operationCtx, release, err := reserveRuntimeOperation(ctx, recorder, phase.Name, event.Type)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = operationCtx
 	if recorder != nil {
 		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"dryRun": dryRun, "runtime": r.Environment.Driver}}); err != nil {
 			return err
