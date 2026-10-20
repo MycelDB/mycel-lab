@@ -371,8 +371,8 @@ phases:
           concurrentMutation:
             eventType: semantic-node-create
             nodeId: 00000000-0000-4000-8000-000000000109
-            labels: [RebuildDeltaMarker]
-            text: rebuild-delta-marker
+            labels: [Document, RebuildDeltaMarker]
+            text: axis-7
             captureRevisionAs: rebuild-delta-commit
           captureGenerationAs: rebuilt-generation
           captureRebuildEpochAs: rebuilt-epoch
@@ -401,6 +401,18 @@ phases:
           captureConfigurationHashAs: configuration-v2
           expectedNodeIds:
             - 00000000-0000-4000-8000-000000000104
+      - type: semantic-search-assert
+        target:
+          query: axis-7
+          limit: 3
+          minimumScore: 0.99
+          expectedResultCount: 1
+          requireProvenance: true
+          expectSourceRevisionFrom: rebuild-delta-commit
+          expectGenerationFrom: rebuilt-generation
+          expectRebuildEpochFrom: rebuilt-epoch
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000109
 assertions:
   final:
     requireHealthyCluster: true
