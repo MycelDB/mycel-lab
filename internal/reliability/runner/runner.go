@@ -167,6 +167,10 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 				status = RunFailed
 				snapshot = budgetLedger.Snapshot()
 			}
+			if snapshot.Closed && status == RunPassed {
+				runErr = errors.Join(runErr, fmt.Errorf("%w: provider budget closed before successful completion", provider.ErrBudgetExhausted))
+				status = RunFailed
+			}
 			result.ProviderBudget = &snapshot
 			if _, writeErr := sink.WriteJSON("provider/budget-final.json", snapshot); writeErr != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("write provider budget artifact: %w", writeErr))
@@ -1024,9 +1028,20 @@ func reserveProviderOperation(ctx context.Context, ledger *provider.Ledger) (con
 
 func (r *runRecorder) reserveOperation(ctx context.Context) (context.Context, func(), error) {
 	operationCtx, release, err := reserveProviderOperation(ctx, r.budget)
-	if err == nil {
-		return operationCtx, release, nil
+	if err != nil {
+		r.recordBudgetError(err)
+		return nil, nil, err
 	}
+	return operationCtx, func() {
+		timedOut := errors.Is(operationCtx.Err(), context.DeadlineExceeded)
+		release()
+		if timedOut {
+			r.recordBudgetError(fmt.Errorf("%w: operation deadline reached", provider.ErrBudgetExhausted))
+		}
+	}, nil
+}
+
+func (r *runRecorder) recordBudgetError(err error) {
 	r.mu.Lock()
 	if r.budgetErr == nil {
 		r.budgetErr = err
@@ -1035,7 +1050,6 @@ func (r *runRecorder) reserveOperation(ctx context.Context) (context.Context, fu
 	if r.budgetCancel != nil {
 		r.budgetCancel()
 	}
-	return nil, nil, err
 }
 
 func (r *runRecorder) ReserveActorOperation(ctx context.Context, _, _ string) (context.Context, func(), error) {

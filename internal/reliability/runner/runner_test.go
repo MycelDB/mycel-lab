@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/actors"
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/events"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
@@ -74,6 +76,57 @@ func TestRunScenarioProviderBudgetExhaustionStopsScheduling(t *testing.T) {
 	}
 	if result.Status != RunFailed || result.ProviderBudget == nil || !result.ProviderBudget.Closed || result.ProviderBudget.Operations != 2 {
 		t.Fatalf("unexpected budget result: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(result.ArtifactRoot, "provider", "budget-final.json")); err != nil {
+		t.Fatalf("budget artifact missing: %v", err)
+	}
+}
+
+type swallowingTimeoutRuntime struct{}
+
+func (swallowingTimeoutRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, _ bool, recorder events.Recorder) error {
+	limiter, ok := recorder.(events.OperationBudgetRecorder)
+	if !ok {
+		return errors.New("operation budget recorder is missing")
+	}
+	operationCtx, release, err := limiter.ReserveRuntimeOperation(ctx, phase.Name, "swallowed-timeout")
+	if err != nil {
+		return err
+	}
+	<-operationCtx.Done()
+	release()
+	return nil
+}
+
+func TestRunScenarioRequestTimeoutCannotProducePassedRun(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved.Profile.Budgets.RequestTimeout = provider.Duration{Duration: time.Millisecond}
+	scenario.ProviderProfile = &resolved
+	scenario.ActorGroups = nil
+	scenario.Phases = []spec.PhaseSpec{{Name: "request-timeout", Events: []spec.EventSpec{{Type: "rolling-restart"}}}}
+
+	result, err := RunScenario(context.Background(), scenario, Options{
+		DryRun:       true,
+		ArtifactRoot: t.TempDir(),
+		EventRuntime: swallowingTimeoutRuntime{},
+	})
+	if err == nil || !strings.Contains(err.Error(), provider.ErrBudgetExhausted.Error()) {
+		t.Fatalf("RunScenario() result=%#v error=%v", result, err)
+	}
+	if result.Status != RunFailed || result.ProviderBudget == nil || !result.ProviderBudget.Closed || result.ProviderBudget.StopReason != "operation deadline reached" {
+		t.Fatalf("unexpected request-timeout result: %#v", result)
+	}
+	if len(result.Phases) != 1 || result.Phases[0].Status != PhaseFailed {
+		t.Fatalf("request-timeout phase did not fail immediately: %#v", result.Phases)
 	}
 	if _, err := os.Stat(filepath.Join(result.ArtifactRoot, "provider", "budget-final.json")); err != nil {
 		t.Fatalf("budget artifact missing: %v", err)
