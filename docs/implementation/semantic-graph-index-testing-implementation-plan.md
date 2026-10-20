@@ -89,7 +89,7 @@ The current public API can prove an initial path with:
 It does not currently expose all stored provenance needed for every assertion requested by issue #46:
 
 - `SemanticDirtyWorkItem` internally stores first/last graph revision and work generation, but the admin protobuf omits them;
-- `SemanticIndexState` internally stores the graph dirty checkpoint revision and configuration checkpoint, but client summaries omit them;
+- `SemanticIndexState` internally stores the graph dirty checkpoint revision and configuration checkpoint, but client summaries omit them. The graph dirty checkpoint is an analyzer-consumption cursor that can advance once work is enqueued; it is not a completed/fresh-through boundary;
 - stored semantic records retain source hash, endpoint/model/capability IDs, vector-space key, and dimensions, but direct search results expose only a subset;
 - there is no public raw-vector diagnostic, and one is not required if an opaque vector-record version or deterministic fixture identity can prove the same contract without exposing data;
 - `SemanticSearch` accepts only `limit`; it has no page token or next-page token, so direct semantic pagination and cursor binding are not currently testable;
@@ -150,7 +150,7 @@ Every semantic assertion declares the strongest proof level it requires.
 
 3. **Revision/provenance proof**
    - Lifecycle/freshness proof.
-   - Public diagnostics show the expected graph revision/work generation/config checkpoint.
+   - Public diagnostics show the per-result source revision/work generation/configuration identity and a semantic fresh-through frontier at or beyond the expected graph revision; the analyzer ingestion cursor alone is insufficient.
    - Safe model endpoint, model, capability, vector-space, dimensions, and opaque source-version fields match the selected provider profile.
 
 The first end-to-end scenario may land with proof levels 1 and 2 using existing APIs. Proof level 3 is a separate gate and cannot be simulated by timestamps or sleeps.
@@ -202,6 +202,9 @@ capabilities:
     dimensions: 8
     vectorSpaceKey: mlab/token-basis-v1
     fixtureStrategy: token-basis-v1
+    batching:
+      mode: single
+      maxItems: 1
 budgets:
   enforcement: required
   maxRequests: 500
@@ -225,6 +228,9 @@ capabilities:
     modelKey: provider/model
     secretRef:
       env: MYCEL_LAB_EMBEDDING_API_KEY
+    batching:
+      mode: single
+      maxItems: 1
 budgets:
   enforcement: required
   maxRequests: 100
@@ -316,9 +322,10 @@ Pre-existing-data coverage requires a phase that seeds graph nodes before the se
 - retryable and permanent failures are zero unless explicitly expected;
 - rule and search-index states match the expected state;
 - live record count matches the fixture;
-- required checkpoint revision/configuration generation is reached when those diagnostics exist.
+- the rule/binding/generation's semantic fresh-through frontier reaches the required graph revision when that diagnostic exists;
+- the analyzer ingestion cursor and any unresolved-gap diagnostics are captured separately and never treated as freshness.
 
-The poller has an absolute deadline, per-call timeout, bounded exponential backoff with deterministic jitter disabled for deterministic suites, and a final diagnostic capture on failure. Fixed sleeps do not establish correctness.
+The poller has an absolute deadline, per-call timeout, bounded exponential backoff with deterministic jitter disabled for deterministic suites, and a final diagnostic capture on failure. Fixed sleeps do not establish correctness. An analyzer cursor that has merely consumed and enqueued a graph revision is not a convergence condition.
 
 ### 4.11 Make budgets enforceable
 
@@ -335,6 +342,7 @@ The daemon intelligence profile/policy must enforce provider-facing limits:
 
 - provider request and retry-attempt counts;
 - concurrent provider requests;
+- batch mode and maximum items per request, with explicit `single`/one-item enforcement when batching is unsupported;
 - per-request and aggregate input/output token limits;
 - elapsed provider time and absolute run deadline;
 - optional estimated cost against a versioned price definition.
@@ -416,7 +424,7 @@ semantic/
   operations.jsonl            # graph/rule/backfill/rebuild operations
   maintenance.jsonl           # bounded status observations
   searches.jsonl              # query IDs/hashes, source diagnostics, IDs, scores; no raw text by default
-  budget.json                 # limits, consumed values, stop reason
+  budget.json                 # limits, requests/attempts/batch items/usage, stop reason
   assertions.json             # every semantic assertion and evidence reference
   final-report.json
   final-report.md
@@ -488,16 +496,18 @@ Repositories: `mycel-api` → `mycel-go-sdk` → `mycel` → `mycel-lab`
 Risk: high; prerequisite for live profiles with hard provider budgets
 
 1. Define a run/budget-scope identity that background semantic work carries through policy decisions, attempts, retries, and usage events.
-2. Add atomic reservation and release/accounting for total attempts, retries, concurrency, aggregate input/output tokens, elapsed time, and optional estimated cost.
-3. Reserve before every provider attempt, including internal retries; reject work before provider side effects when a hard limit cannot be reserved.
-4. Require a versioned currency/price source for cost enforcement. If route or price is unknown, a required cost ceiling fails preflight or denies the request rather than estimating optimistically.
-5. Persist enough bounded budget state for restart/replay without resetting a live run's limits or double-charging one durable attempt.
-6. Expose authorization-scoped limits, reservations, usage, denials, and enforcement capability through additive admin APIs.
-7. Reconcile daemon usage with the Mycel Lab reservation ledger and emulator-observed attempts.
+2. Add atomic reservation and release/accounting for total attempts, retries, concurrency, batch item counts, aggregate input/output tokens, elapsed time, and optional estimated cost.
+3. Add a provider capability/configuration contract for `single` versus `batch` requests and enforce `maxBatchItems` before request construction. Existing single-input connectors advertise and enforce one item.
+4. Reserve before every provider attempt, including internal retries; reject work before provider side effects when a hard limit cannot be reserved.
+5. Require a versioned currency/price source for cost enforcement. If route or price is unknown, a required cost ceiling fails preflight or denies the request rather than estimating optimistically.
+6. Persist enough bounded budget state for restart/replay without resetting a live run's limits or double-charging one durable attempt.
+7. Expose authorization-scoped limits, reservations, usage, denials, batching mode, and enforcement capability through additive admin APIs.
+8. Reconcile daemon usage with the Mycel Lab reservation ledger and emulator-observed attempts/items.
 
 Tests:
 
 - concurrent attempts cannot oversubscribe any hard limit;
+- single-input connectors emit exactly one item per request, and batch-capable connectors never exceed `maxBatchItems`;
 - retries consume the declared attempt budget exactly once per provider attempt;
 - cancellation, crash/restart, and ambiguous provider outcomes do not reset or silently exceed limits;
 - aggregate token, deadline, and cost denials occur before the next provider side effect;
@@ -507,7 +517,7 @@ Tests:
 Acceptance:
 
 - every live-profile hard-limit field is backed by an advertised enforcement capability;
-- daemon, emulator/provider, and harness accounting reconcile or fail the run;
+- daemon, emulator/provider, and harness request, attempt, and batch-item accounting reconcile or fail the run;
 - SGT9 cannot start when a required enforcement capability is absent.
 
 ### SGT2: Deterministic daemon embedding prerequisite
@@ -595,10 +605,12 @@ Implement the deterministic compose-first contract scenario with these ordered c
 7. **Deletion/tombstone**
    - delete the previous top match;
    - prove it is absent from semantic results and live-record counts converge.
-8. **Transaction boundary**
+8. **Transaction and failed-statement boundary**
    - prove no semantic work becomes visible for uncommitted graph changes;
    - after a multi-node commit converges, prove all committed changes are indexed from the acknowledged transaction/revision;
-   - roll back a second transaction and prove it creates no semantic change;
+   - execute a deliberately failing multi-operation statement after it has identified or attempted more than one mutation, then continue or finalize according to the public transaction contract;
+   - prove no node/property/edge from the failed statement's partial overlay produces dirty work or a semantic record, while earlier independent successful statements remain correct;
+   - exercise an aborted/failed transaction and an explicit rollback and prove neither creates semantic work;
    - record intermediate asynchronous indexing states, but require atomic semantic visibility only if the public product contract explicitly guarantees it.
 9. **Rule lifecycle**
    - disable, re-enable, and modify a projection setting;
@@ -606,6 +618,8 @@ Implement the deterministic compose-first contract scenario with these ordered c
 10. **Isolation and authorization**
     - verify same-content nodes in another space/domain are excluded;
     - verify unauthorized callers cannot list, search, hydrate, or infer through errors.
+
+The failed-statement fixture uses a deterministic public schema/work/response-limit failure. A daemon integration test must prove that trigger is reached after at least one touched entry and that the statement journal removes it; Mycel Lab then proves the externally visible graph and semantic outcomes. If no deterministic public trigger exists, add that product-level integration contract before the Lab case rather than adding a harness-only internal bypass.
 
 The suite fails unless every required assertion has an evidence reference. `final-report.json` carries a single gating `assertionsOk` field derived from required semantic assertions, graph-state assertions, budget status, and redaction scan status.
 
@@ -615,7 +629,8 @@ Tests:
 - missing source diagnostics cannot pass;
 - lexical/hybrid-only evidence cannot satisfy direct semantic assertions;
 - stale vector-record identity after update fails;
-- any pre-commit or rolled-back semantic visibility fails;
+- any pre-commit, failed-statement-overlay, aborted-transaction, or rolled-back semantic visibility fails;
+- an earlier successful statement is not erased by a later failed statement when the public transaction contract permits continuation;
 - partial post-commit asynchronous indexing is recorded and allowed unless an advertised capability promises atomic publication;
 - failure to reach complete post-commit convergence fails.
 
@@ -637,13 +652,17 @@ This is product-state work, not an adapter-only observability change. Before cha
 2. Persist on each live/tombstone record the source graph revision, source transaction identity where safe/useful, generation/configuration identity, configured endpoint/model/capability, vector space, dimensions, and opaque source version.
 3. Extend neutral inference results to retain requested route and optional actual provider/model/route provenance when a provider returns it. Preserve explicit `unknown`/`unavailable` semantics when it does not.
 4. Reject stale asynchronous completion by comparing source revision and generation with authoritative current state before publication. An aggregate maintenance checkpoint cannot authorize an older record.
-5. Define snapshot, backup/restore, replay, and migration handling for the new fields. Legacy records without required provenance become explicitly stale and require rebuild; values are never guessed.
-6. Keep provenance bounded and exclude credentials, raw vectors, projected source text, and provider payloads.
+5. Define two distinct per-space/domain/rule/binding/generation frontiers:
+   - `analyzed_through_graph_revision` is only the ingestion cursor proving dirty events were examined and required work was durably classified/enqueued;
+   - `fresh_through_graph_revision` is the highest contiguous revision for which analysis is complete and every required semantic consequence is durably applied or reaches an explicitly allowed terminal no-op/skip/delete outcome.
+6. Persist bounded gap/barrier state between those frontiers. Analyzer completion records the required outcome count for each relevant revision atomically with enqueue; worker completion resolves those outcomes. Retryable or permanent required failures block freshness. Unaffected revisions and policy-declared skips advance only through explicit terminal outcomes. Coalesced work may satisfy older revisions from a validated newer record, but that satisfaction is recorded rather than inferred. Compact resolved intervals at or below the frontier so state cannot grow without bound.
+7. Reset or rebuild the fresh-through frontier on incompatible generation changes, and define snapshot, backup/restore, replay, and legacy migration handling for records, frontiers, and gaps. Legacy records without required provenance become explicitly stale and require rebuild; values are never guessed.
+8. Keep provenance and gap state bounded and exclude credentials, raw vectors, projected source text, and provider payloads.
 
 After those semantics are durable, add authorization-scoped public fields for:
 
 - maintenance work first/last graph revision and work generation;
-- semantic index graph-dirty checkpoint revision and configuration checkpoint;
+- separately named analyzer ingestion cursor (`analyzed_through_graph_revision`) and semantic freshness frontier (`fresh_through_graph_revision`), plus bounded unresolved-gap count/oldest revision and configuration generation;
 - result source graph revision, semantic generation/configuration identity, opaque source version, dimensions, vector-space key, configured endpoint/model/capability IDs, and optional actual route identity;
 - explicit semantic source/fallback reason for hybrid results when not already present.
 
@@ -655,12 +674,16 @@ Requirements:
 - use an authorization-scoped non-reversible opaque source version, not a plain digest of low-entropy projected text;
 - preserve wire compatibility;
 - regenerate SDK and daemon bindings from `mycel-api` rather than hand-editing generated files;
-- test domain production, durable storage, snapshots/replay/migration, stale-response rejection, API mapping, and authorization—not only adapters;
+- test domain production, durable storage, frontiers/gaps, snapshots/replay/migration, stale-response rejection, API mapping, and authorization—not only adapters;
+- commit several revisions with one required entity scripted to fail; prove the analyzer cursor advances, the freshness frontier remains before the gap, and a successful retry advances freshness monotonically without skipping the failed revision;
+- test explicit no-op/skip/delete, coalesced updates, permanent failure, generation reset, and bounded gap compaction;
 - make Mycel Lab proof-level-3 and pagination assertions require the advertised API capability, never best-effort inference.
 
 Acceptance:
 
 - exact per-result source revision and generation claims are backed by durably stored public fields;
+- the analyzer ingestion cursor is never labeled or asserted as freshness;
+- the persisted fresh-through frontier advances monotonically only across contiguous resolved outcomes and remains behind every unresolved required gap;
 - configured and actual route provenance are distinguishable, with `unknown` preserved when the provider supplies no actual route;
 - model/vector provenance is sufficient to reject stale or incompatible reuse;
 - direct semantic pages have no duplicate/skip on an unchanged view;
@@ -693,7 +716,8 @@ Acceptance:
 - restart persistence and rebuild correctness are independently demonstrated;
 - post-recovery acknowledged writes and successful semantic reads prove progress;
 - no leaderless or unhealthy required Raft group is accepted;
-- no pending, running, retryable-failed, or permanent-failed semantic work remains;
+- no pending, running, retryable-failed, permanent-failed, or unresolved required freshness gap remains;
+- every required rule/binding fresh-through frontier reaches the final acknowledged graph revision;
 - final semantic results and graph state converge on all declared read targets.
 
 ### SGT7: Local protocol emulators
@@ -708,19 +732,20 @@ Add bounded local emulators for connector protocols that exist in the daemon. Th
 - authentication-header construction plus 401/403 failure without persisted secrets;
 - 408/429/5xx retryable failure with bounded `Retry-After`;
 - delayed response and cancellation;
-- partial/batch response if the connector supports batching;
+- single-item request enforcement for current connectors and partial/batch response when a connector advertises batching;
 - changing route/model identity;
 - usage fields and safe request IDs.
 
 Deployment must work in compose and k3d without exposing the emulator to the public network. The resolved environment records the emulator image/binary checksum and script hash.
 
-The emulator records only a sanitized request envelope: method, path, content length, capability, model, sequence, and body hash. Body capture is off.
+The emulator records only a sanitized request envelope: method, path, content length, capability, model, sequence, batch item count, and body hash. Body capture is off. Tests assert one item for `single` connectors and `1..maxBatchItems` for batch-capable connectors.
 
 Acceptance:
 
 - protocol error categories and retry behavior are deterministic;
 - deadlines cancel provider work and leave bounded queues;
 - malformed dimensions fail closed without publishing a bad semantic record;
+- request envelopes prove the advertised batch mode and maximum item count;
 - retry tests prove the configured combined retry ceiling.
 
 ### SGT8: Advanced deterministic matrix
@@ -753,7 +778,7 @@ Expand the reusable contract components through explicit matrix cases. Each case
    - retry and prove final convergence without duplicate active records.
 6. **Large backfill under writes**
    - create a bounded corpus sized by profile, start backfill, and concurrently apply a recorded mutation schedule;
-   - sample selected/processed/failed counts, queue depth, memory/work metrics, checkpoint revision, and latest acknowledged graph revision;
+   - sample selected/processed/failed counts, queue depth, memory/work metrics, analyzed-through cursor, fresh-through frontier/gaps, and latest acknowledged graph revision;
    - require finite configured ceilings, monotonic progress, and final convergence to the newest revision rather than the initial scan.
 7. **Replay, backup, and restore**
    - inject duplicate dirty events and retry/replay and prove idempotent active records;
@@ -797,7 +822,7 @@ Provider sequencing and scenario checks:
 5. **Cross-provider comparison:** run the same synthetic corpus and lifecycle against two resolved profiles, then compare top-K membership bounds, lifecycle convergence, isolation, provenance, and freshness—not vectors or exact scores.
 6. **Controlled response drift:** run two declared provider/model/projection versions and prove the changed output is attributed to a new generation while old records/cursors are stale or rebuilt.
 7. **Outage and partial failure:** exercise bounded timeout/429/5xx/refusal cases and, when composition exists, one-entity enrichment failure; require visible backlog/degraded state and no false freshness.
-8. **Live bounded backfill:** record selected/completed/failed entity counts, duration, provider attempts, reported tokens, versioned estimated cost, final checkpoint revision, and invariant result quality.
+8. **Live bounded backfill:** record selected/completed/failed entity counts, duration, provider attempts and batch items, reported tokens, versioned estimated cost, final analyzed-through cursor, fresh-through frontier/gaps, and invariant result quality.
 9. **Live recovery:** restart with provider work durably pending, then require bounded resumption, newest-revision convergence, and no duplicate active vectors or graph effects.
 
 Each live check records required capabilities, profile/model/route identities, corpus classification/hash, provider-accounting reconciliation, invariant observations, and a sanitized terminal verdict. Checks 2–4 do not create placeholder profiles before the corresponding daemon connector/pipeline capability exists.
@@ -847,12 +872,12 @@ Each row below names the minimum proof level, required capability, and terminal 
 | # | Scenario | Tranche(s) | Proof | Required capability | Terminal oracle |
 | ---: | --- | --- | --- | --- | --- |
 | 1 | Committed node searchable | SGT4, SGT5 | 3 | embedding, direct semantic, provenance | Exact node/rank/score, `record_id`, revision, generation, and semantic source match. |
-| 2 | Projection selects intended data | SGT4, SGT8 | 2; 3 when versioned | projection + supported entity type | Selected values alter results; excluded values do not; checkpoint converges. |
+| 2 | Projection selects intended data | SGT4, SGT8 | 2; 3 when versioned | projection + supported entity type | Selected values alter results; excluded values do not; required fresh-through frontier converges. |
 | 3 | Update replaces embedding | SGT4, SGT5 | 3 | embedding maintenance | New record/version wins; old candidate is absent at target revision. |
 | 4 | Delete removes results | SGT4 | 2 | delete/tombstone maintenance | Deleted ID and stale record are absent; live count converges. |
 | 5 | Pre-existing data backfilled | SGT4, SGT5 | 3 | backfill | Every eligible entity has one active record at target revision. |
-| 6 | Transaction visibility | SGT4, SGT5 | 3 | graph transaction + maintenance provenance | No pre-commit/rollback work; all committed changes converge from durable transaction/revision. |
-| 7 | Freshness/revision tracking | SGT5 | 3 | per-record revision/checkpoint diagnostics | Checkpoint is monotonic and cannot cross unresolved required work. |
+| 6 | Transaction visibility | SGT4, SGT5 | 3 | graph transaction + maintenance provenance | No pre-commit, failed-statement-overlay, aborted, or rollback work; valid committed changes alone converge from their durable transaction/revision. |
+| 7 | Freshness/revision tracking | SGT5 | 3 | per-record revision + analyzed/fresh frontiers + gaps | Analyzer cursor may advance, but fresh-through is monotonic and cannot cross unresolved required work. |
 | 8 | Rapid/out-of-order updates | SGT2, SGT6 | 3 | scripted delay + stale-write guard | Newest revision/generation remains active after older completion. |
 | 9 | Connector failure/retry | SGT2, SGT7 | 2; 3 for revision boundary | scripted outcomes or emulator | Exact bounded attempts, degraded/dirty evidence, then convergence or terminal failure. |
 | 10 | Restart with pending work | SGT6 | 2; 3 after SGT5 | durable maintenance queue | Pending work resumes; one active latest record remains. |
@@ -880,7 +905,7 @@ Each row below names the minimum proof level, required capability, and terminal 
 | 32 | Partial enrichment failure | SGT7, SGT8 | 3 | explicit enrichment pipeline + scripted failure | Other allowed entities converge; failed revision blocks required freshness until repaired. |
 | 33 | Model response drift | SGT9 | 3 | versioned model/projection provenance | Drift is attributed to a new generation; old records/cursors are separated. |
 | 34 | Malformed/refused/policy-blocked output | SGT2, SGT7, SGT8 | 2; 3 for boundary | scripted connector/emulator | Exact dirty/skip/fail state occurs and bad output is never published. |
-| 35 | Rate/cost controls | SGT1b, SGT7, SGT9 | Cross-cutting budget proof | atomic daemon budget enforcement | Daemon, emulator/provider, and harness counts reconcile within hard ceilings. |
+| 35 | Rate/cost controls | SGT1b, SGT7, SGT9 | Cross-cutting budget proof | atomic daemon budget + batching enforcement | Requests, attempts, batch items, concurrency, tokens, time, and cost reconcile within hard ceilings. |
 | 36 | Secret/artifact hygiene | SGT1 and all later | Cross-cutting security proof | redactor + scanner | Scanner passes; no secret, payload, TLS material, or disallowed graph data is retained. |
 | 37 | Live bounded backfill | SGT9 | 3 with live invariants | live embedding + hard budgets | Counts, duration, attempts, usage/cost, revision, and result invariants pass. |
 | 38 | Live recovery | SGT6, SGT9 | 3 with live invariants | durable queue + live connector | Pending work resumes within budget; newest revision wins with no duplicates. |
@@ -937,9 +962,10 @@ The following always fail a required suite:
 - unexpected fallback;
 - stale or incompatible cursor accepted;
 - graph revision/config generation below the declared target when proof level 3 is required;
-- pending/running/permanent-failed work at the final barrier;
+- pending/running/retryable-failed/permanent-failed work at the final barrier;
 - wrong dimensions, vector space, model route, opaque source version, live count, or node identity;
-- any pre-commit or rolled-back semantic visibility, failure to reach complete final post-commit convergence, or partial post-commit publication when an advertised capability promises atomic publication;
+- treating the analyzer ingestion cursor as freshness or advancing fresh-through across an unresolved required gap;
+- any pre-commit, failed-statement-overlay, aborted, or rolled-back semantic visibility, failure to reach complete final post-commit convergence, or partial post-commit publication when an advertised capability promises atomic publication;
 - budget exhaustion before required assertions complete;
 - timeout, cancellation leak, unbounded retry, or queue growth;
 - secret/redaction scanner finding;
@@ -986,6 +1012,6 @@ Issue #46 can close when:
 - protocol emulators cover the supported connector surfaces;
 - Anthropic/OpenRouter-ready live profiles are documented and manually runnable when their required daemon capabilities exist;
 - live runs use invariant assertions and fail on missing configuration or hard-budget enforcement capability;
-- actual provider attempts/concurrency/tokens/time/cost are atomically bounded where declared, not inferred from harness RPC counts;
+- actual provider requests/attempts/batch items/concurrency/tokens/time/cost are atomically bounded where declared, not inferred from harness RPC counts;
 - all work is bounded, sanitized, and artifact-backed;
 - future CI workflows can run the same suites without changing their correctness logic.
