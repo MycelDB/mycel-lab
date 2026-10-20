@@ -170,12 +170,35 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 		}
 		return evidence, err
 	case "semantic-rebuild":
-		callCtx, cancel := admin.AuthCallContext(ctx)
+		rebuildCtx, stopRebuild := context.WithCancel(ctx)
+		var mutationDone <-chan error
+		if mutationTarget, ok := nestedTarget(target, "concurrentMutation"); ok {
+			done := make(chan error, 1)
+			mutationDone = done
+			go func() {
+				done <- mutateDuringSemanticRebuild(rebuildCtx, admin, resources, semanticResources, mutationTarget)
+			}()
+		}
+		callCtx, cancel := admin.AuthCallContext(rebuildCtx)
 		response, err := admin.SemanticMaintenance.RebuildSemanticRule(callCtx, &adminv1.RebuildSemanticRuleRequest{SpaceId: semanticResources.SpaceID, SemanticRuleId: semanticResources.SemanticRuleID, EmbeddingBindingKey: semanticResources.EmbeddingBindingKey, BackfillLimit: int32(intTarget(target, "backfillLimit", 4096)), MaintenanceBatchLimit: int32(intTarget(target, "maintenanceBatchLimit", 256)), MaxCatchupIterations: int32(intTarget(target, "maxCatchupIterations", 100))})
 		cancel()
 		if err != nil {
+			stopRebuild()
 			return nil, fmt.Errorf("rebuild semantic rule: %w", err)
 		}
+		if mutationDone != nil {
+			select {
+			case mutationErr := <-mutationDone:
+				if mutationErr != nil {
+					stopRebuild()
+					return nil, mutationErr
+				}
+			case <-rebuildCtx.Done():
+				stopRebuild()
+				return nil, rebuildCtx.Err()
+			}
+		}
+		stopRebuild()
 		if response.GetReliability() == nil || response.GetRebuild() == nil || response.GetRebuild().GetState() != "completed" {
 			return nil, errors.New("semantic rebuild did not return completed reliability evidence")
 		}
@@ -246,6 +269,49 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 	}
 }
 
+func mutateDuringSemanticRebuild(ctx context.Context, admin *mycel.AdminClient, resources *provision.ScenarioResources, semanticResources *provision.SemanticResources, target map[string]any) error {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for observations := 0; observations < 10000; observations++ {
+		callCtx, cancel := admin.AuthCallContext(ctx)
+		statusResponse, err := admin.SemanticMaintenance.GetSemanticReliabilityStatus(callCtx, &adminv1.GetSemanticReliabilityStatusRequest{SpaceId: semanticResources.SpaceID, SemanticRuleId: semanticResources.SemanticRuleID, EmbeddingBindingKey: semanticResources.EmbeddingBindingKey})
+		cancel()
+		if err != nil {
+			return fmt.Errorf("observe running semantic rebuild: %w", err)
+		}
+		state := statusResponse.GetRebuild().GetState()
+		if state == "running" {
+			eventType := targetString(target, "eventType")
+			if eventType == "" {
+				eventType = "semantic-node-create"
+			}
+			_, err := executeSemanticGraphMutation(ctx, resources, eventType, target)
+			if err != nil {
+				return fmt.Errorf("mutate during semantic rebuild: %w", err)
+			}
+			return nil
+		}
+		if state == "completed" || state == "failed" {
+			return fmt.Errorf("semantic rebuild reached %s before the concurrent mutation", state)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+	return errors.New("semantic rebuild did not expose a bounded running interval for delta mutation")
+}
+
+func nestedTarget(target map[string]any, key string) (map[string]any, bool) {
+	value, ok := target[key]
+	if !ok || value == nil {
+		return nil, false
+	}
+	out, ok := value.(map[string]any)
+	return out, ok
+}
+
 func assertSemanticReliability(ctx context.Context, admin *mycel.AdminClient, resources *provision.SemanticResources, target map[string]any) (SemanticReliabilityEvidence, error) {
 	callCtx, cancel := admin.AuthCallContext(ctx)
 	response, err := admin.SemanticMaintenance.GetSemanticReliabilityStatus(callCtx, &adminv1.GetSemanticReliabilityStatusRequest{SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey})
@@ -279,7 +345,35 @@ func assertSemanticReliability(ctx context.Context, admin *mycel.AdminClient, re
 	if minimum := intTarget(target, "minimumSemanticGeneration", 0); evidence.SemanticGeneration < uint64(minimum) {
 		return evidence, fmt.Errorf("semantic generation %d is below %d", evidence.SemanticGeneration, minimum)
 	}
+	if err := requireCapturedRevision(resources, target, "expectFreshRevisionFrom", evidence.FreshThroughGraphRevision); err != nil {
+		return evidence, err
+	}
+	if err := requireCapturedRevision(resources, target, "expectDeltaCatchupRevisionFrom", evidence.DeltaCatchupGraphRevision); err != nil {
+		return evidence, err
+	}
+	if boolTarget(target, "requireDeltaAfterPinned", false) && evidence.DeltaCatchupGraphRevision <= evidence.PinnedTargetGraphRevision {
+		return evidence, fmt.Errorf("semantic delta catch-up revision %d did not advance past pinned revision %d", evidence.DeltaCatchupGraphRevision, evidence.PinnedTargetGraphRevision)
+	}
 	return evidence, nil
+}
+
+func requireCapturedRevision(resources *provision.SemanticResources, target map[string]any, field string, actual uint64) error {
+	key := targetString(target, field)
+	if key == "" {
+		return nil
+	}
+	raw, ok := resources.EvidenceValues[key]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("semantic revision capture %q is missing", key)
+	}
+	expected, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return fmt.Errorf("semantic revision capture %q is malformed", key)
+	}
+	if actual != expected {
+		return fmt.Errorf("semantic revision %d does not match capture %q", actual, key)
+	}
+	return nil
 }
 
 func mapSemanticReliabilityEvidence(response *adminv1.GetSemanticReliabilityStatusResponse) SemanticReliabilityEvidence {
@@ -305,6 +399,12 @@ func captureSemanticReliability(resources *provision.ScenarioResources, target m
 	}
 	if key := targetString(target, "captureFreshRevisionAs"); key != "" {
 		resources.Semantic.EvidenceValues[key] = strconv.FormatUint(evidence.FreshThroughGraphRevision, 10)
+	}
+	if key := targetString(target, "capturePinnedRevisionAs"); key != "" {
+		resources.Semantic.EvidenceValues[key] = strconv.FormatUint(evidence.PinnedTargetGraphRevision, 10)
+	}
+	if key := targetString(target, "captureDeltaCatchupRevisionAs"); key != "" {
+		resources.Semantic.EvidenceValues[key] = strconv.FormatUint(evidence.DeltaCatchupGraphRevision, 10)
 	}
 }
 

@@ -20,6 +20,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The SGT4 rebuild phase now commits a graph mutation while rebuild state is running and asserts exact pinned-target, delta-catch-up, freshness, generation, epoch, and rebuilt-record provenance (#46).
 - Definition import/export and catalog storage now include provider profiles; semantic scenarios may use `providerProfileRef` or `--provider-profile`, while required provider-owned limits fail unless their enforcement source is advertised.
 - Documentation checks now parse JSON contracts and examples in addition to Markdown and reliability YAML.
 - Strengthened the SGT0 contract with typed graph mutation operations, node/edge fixture shapes, explicit minimum-score and artifact-capture safety, Level 1-only baseline examples, bounded decoder annotations, Admin Maintenance lifecycle ownership, direct semantic filter prerequisites, and compose artifact topology.

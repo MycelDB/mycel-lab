@@ -368,14 +368,25 @@ phases:
           backfillLimit: 2
           maintenanceBatchLimit: 64
           maxCatchupIterations: 64
+          concurrentMutation:
+            eventType: semantic-node-create
+            nodeId: 00000000-0000-4000-8000-000000000109
+            labels: [RebuildDeltaMarker]
+            text: rebuild-delta-marker
+            captureRevisionAs: rebuild-delta-commit
           captureGenerationAs: rebuilt-generation
           captureRebuildEpochAs: rebuilt-epoch
-          captureFreshRevisionAs: rebuilt-revision
+          capturePinnedRevisionAs: rebuilt-pinned-revision
+          captureDeltaCatchupRevisionAs: rebuilt-delta-revision
+          captureFreshRevisionAs: rebuilt-fresh-revision
       - type: semantic-reliability-assert
         target:
           requireFreshAtLatest: true
           maximumUnresolvedGapCount: 0
           minimumSemanticGeneration: 2
+          expectFreshRevisionFrom: rebuild-delta-commit
+          expectDeltaCatchupRevisionFrom: rebuild-delta-commit
+          requireDeltaAfterPinned: true
       - type: semantic-search-assert
         target:
           query: axis-4
@@ -383,7 +394,7 @@ phases:
           minimumScore: 0.99
           expectedResultCount: 1
           requireProvenance: true
-          expectSourceRevisionFrom: rebuilt-revision
+          expectSourceRevisionFrom: rebuilt-pinned-revision
           expectGenerationFrom: rebuilt-generation
           expectRebuildEpochFrom: rebuilt-epoch
           rejectConfigurationHashFrom: configuration-v1

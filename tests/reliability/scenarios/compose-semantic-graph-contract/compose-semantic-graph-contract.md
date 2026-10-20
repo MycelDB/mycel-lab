@@ -38,7 +38,7 @@ flowchart LR
 3. Prove ranking, pagination, provenance, and filtering.
 4. Exercise post-rule create, excluded/projected update, transaction negatives, isolation, and deletion.
 5. Disable and re-enable the rule.
-6. Rotate projection generation, prove old records stale, rebuild at a pinned target, and catch up deltas.
+6. Rotate projection generation, prove old records stale, mutate the graph while the rebuild is running, then prove pinned-target provenance and exact bounded delta catch-up.
 
 ## Actors
 
