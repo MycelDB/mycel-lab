@@ -19,7 +19,7 @@ The scenario proves:
 
 ## Topology
 
-The suite uses the compose single-node daemon topology and two isolated semantic-controller actor groups. The default `deterministic-token-basis-v1` provider performs no network or credential access.
+The suite uses the compose three-daemon Raft topology and two isolated semantic-controller actor groups. The default `deterministic-token-basis-v1` provider performs no network or credential access.
 
 ```mermaid
 flowchart LR

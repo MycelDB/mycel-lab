@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -163,7 +164,11 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 	case "semantic-unauthorized-search":
 		return executeSemanticUnauthorizedSearch(ctx, resources, target)
 	case "semantic-reliability-assert":
-		return assertSemanticReliability(ctx, admin, semanticResources, target)
+		evidence, err := assertSemanticReliability(ctx, admin, semanticResources, target)
+		if err == nil {
+			captureSemanticReliability(resources, target, evidence)
+		}
+		return evidence, err
 	case "semantic-rebuild":
 		callCtx, cancel := admin.AuthCallContext(ctx)
 		response, err := admin.SemanticMaintenance.RebuildSemanticRule(callCtx, &adminv1.RebuildSemanticRuleRequest{SpaceId: semanticResources.SpaceID, SemanticRuleId: semanticResources.SemanticRuleID, EmbeddingBindingKey: semanticResources.EmbeddingBindingKey, BackfillLimit: int32(intTarget(target, "backfillLimit", 4096)), MaintenanceBatchLimit: int32(intTarget(target, "maintenanceBatchLimit", 256)), MaxCatchupIterations: int32(intTarget(target, "maxCatchupIterations", 100))})
@@ -174,7 +179,9 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 		if response.GetReliability() == nil || response.GetRebuild() == nil || response.GetRebuild().GetState() != "completed" {
 			return nil, errors.New("semantic rebuild did not return completed reliability evidence")
 		}
-		return mapSemanticReliabilityEvidence(response.GetReliability()), nil
+		evidence := mapSemanticReliabilityEvidence(response.GetReliability())
+		captureSemanticReliability(resources, target, evidence)
+		return evidence, nil
 	case "semantic-rule-projection-update":
 		callCtx, cancel := admin.AuthCallContext(ctx)
 		current, err := admin.Semantic.GetSemanticRule(callCtx, &adminv1.GetSemanticRuleRequest{SpaceId: semanticResources.SpaceID, SemanticRuleId: semanticResources.SemanticRuleID})
@@ -284,6 +291,21 @@ func mapSemanticReliabilityEvidence(response *adminv1.GetSemanticReliabilityStat
 		evidence.DeltaCatchupGraphRevision = rebuild.GetDeltaCatchupGraphRevision()
 	}
 	return evidence
+}
+
+func captureSemanticReliability(resources *provision.ScenarioResources, target map[string]any, evidence SemanticReliabilityEvidence) {
+	if resources == nil || resources.Semantic == nil {
+		return
+	}
+	if key := targetString(target, "captureGenerationAs"); key != "" {
+		resources.Semantic.EvidenceValues[key] = strconv.FormatUint(evidence.SemanticGeneration, 10)
+	}
+	if key := targetString(target, "captureRebuildEpochAs"); key != "" {
+		resources.Semantic.EvidenceValues[key] = evidence.RebuildEpoch
+	}
+	if key := targetString(target, "captureFreshRevisionAs"); key != "" {
+		resources.Semantic.EvidenceValues[key] = strconv.FormatUint(evidence.FreshThroughGraphRevision, 10)
+	}
 }
 
 func executeSemanticTransactionNegative(ctx context.Context, resources *provision.ScenarioResources, target map[string]any) (SemanticTransactionNegativeResult, error) {
@@ -433,7 +455,11 @@ func executeSemanticGraphMutation(ctx context.Context, resources *provision.Scen
 		return SemanticGraphMutationResult{}, fmt.Errorf("commit semantic graph mutation: %w", err)
 	}
 	committed = true
-	return SemanticGraphMutationResult{Action: eventType, NodeID: nodeID, TransactionID: txID, CommitID: commit.GetCommitId(), CommittedRevision: commit.GetCommittedRevision()}, nil
+	result := SemanticGraphMutationResult{Action: eventType, NodeID: nodeID, TransactionID: txID, CommitID: commit.GetCommitId(), CommittedRevision: commit.GetCommittedRevision()}
+	if capture := targetString(target, "captureRevisionAs"); capture != "" {
+		resources.Semantic.EvidenceValues[capture] = strconv.FormatInt(result.CommittedRevision, 10)
+	}
+	return result, nil
 }
 
 func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision.ScenarioResources, target map[string]any) (map[string]any, error) {
@@ -584,13 +610,48 @@ func executeSemanticSearchAssertion(ctx context.Context, resources *provision.Sc
 		if boolTarget(target, "requireActualRoute", false) && (!mapped.ActualRouteKnown || mapped.ActualModelEndpointID == "" || mapped.ActualModelID == "" || mapped.ActualCapabilityID == "") {
 			return evidence, fmt.Errorf("semantic search result %q has incomplete provider-observed route provenance", item.GetRecordId())
 		}
+		if key := targetString(target, "expectSourceRevisionFrom"); key != "" {
+			expected, parseErr := strconv.ParseUint(resources.Semantic.EvidenceValues[key], 10, 64)
+			if parseErr != nil || mapped.SourceGraphRevision != expected {
+				return evidence, fmt.Errorf("semantic result source revision %d does not match capture %q", mapped.SourceGraphRevision, key)
+			}
+		}
+		if key := targetString(target, "expectGenerationFrom"); key != "" {
+			expected, parseErr := strconv.ParseUint(resources.Semantic.EvidenceValues[key], 10, 64)
+			if parseErr != nil || mapped.SemanticGeneration != expected {
+				return evidence, fmt.Errorf("semantic result generation %d does not match capture %q", mapped.SemanticGeneration, key)
+			}
+		}
+		if key := targetString(target, "expectRebuildEpochFrom"); key != "" {
+			expected := resources.Semantic.EvidenceValues[key]
+			if expected == "" || mapped.RebuildEpoch != expected {
+				return evidence, fmt.Errorf("semantic result rebuild epoch does not match capture %q", key)
+			}
+		}
+		if key := targetString(target, "expectConfigurationHashFrom"); key != "" {
+			expected := resources.Semantic.EvidenceValues[key]
+			if expected == "" || mapped.SemanticConfigurationHash != expected {
+				return evidence, fmt.Errorf("semantic result configuration hash does not match capture %q", key)
+			}
+		}
+		if key := targetString(target, "rejectConfigurationHashFrom"); key != "" {
+			if rejected := resources.Semantic.EvidenceValues[key]; rejected != "" && mapped.SemanticConfigurationHash == rejected {
+				return evidence, fmt.Errorf("semantic result retained stale configuration hash capture %q", key)
+			}
+		}
 		evidence.Results = append(evidence.Results, mapped)
 	}
-	if capture := strings.TrimSpace(fmt.Sprint(target["captureRecordAs"])); capture != "" && capture != "<nil>" {
+	if capture := targetString(target, "captureRecordAs"); capture != "" {
 		if len(evidence.Results) == 0 {
 			return evidence, fmt.Errorf("cannot capture semantic record %q from an empty result", capture)
 		}
 		resources.Semantic.EvidenceValues[capture] = evidence.Results[0].RecordID
+	}
+	if capture := targetString(target, "captureConfigurationHashAs"); capture != "" {
+		if len(evidence.Results) == 0 || evidence.Results[0].SemanticConfigurationHash == "" {
+			return evidence, fmt.Errorf("cannot capture semantic configuration hash %q from an empty result", capture)
+		}
+		resources.Semantic.EvidenceValues[capture] = evidence.Results[0].SemanticConfigurationHash
 	}
 	if expectedCapture := strings.TrimSpace(fmt.Sprint(target["expectRecordFrom"])); expectedCapture != "" && expectedCapture != "<nil>" {
 		expectedRecordID := resources.Semantic.EvidenceValues[expectedCapture]
@@ -679,6 +740,14 @@ func dialSemanticActorGroup(ctx context.Context, resources *provision.ScenarioRe
 		return client, assignment, nil
 	}
 	return nil, provision.ActorAssignment{}, errors.New("semantic target actor assignment was not found")
+}
+
+func targetString(target map[string]any, key string) string {
+	value := strings.TrimSpace(fmt.Sprint(target[key]))
+	if value == "<nil>" {
+		return ""
+	}
+	return value
 }
 
 func floatTarget(target map[string]any, key string) (float64, bool) {

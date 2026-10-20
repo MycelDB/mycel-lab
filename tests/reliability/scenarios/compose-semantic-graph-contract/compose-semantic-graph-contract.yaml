@@ -85,6 +85,7 @@ phases:
           nodeId: 00000000-0000-4000-8000-000000000103
           labels: [Document]
           text: axis-2
+          captureRevisionAs: initial-baseline-revision
           properties:
             title: secondary-confounder
   - name: create-rule-backfill-and-converge
@@ -108,6 +109,7 @@ phases:
           requireFreshAtLatest: true
           maximumUnresolvedGapCount: 0
           minimumSemanticGeneration: 1
+          captureGenerationAs: generation-v1
   - name: prove-direct-indexed-retrieval
     duration: 1ms
     events:
@@ -117,7 +119,10 @@ phases:
           limit: 3
           minimumScore: 0.99
           requireProvenance: true
+          expectSourceRevisionFrom: initial-baseline-revision
+          expectGenerationFrom: generation-v1
           captureRecordAs: primary-v1
+          captureConfigurationHashAs: configuration-v1
           expectedScores: [1.0]
           scoreTolerance: 0.000000001
           expectedNodeIds:
@@ -160,6 +165,7 @@ phases:
           nodeId: 00000000-0000-4000-8000-000000000105
           labels: [Document]
           text: axis-5
+          captureRevisionAs: post-rule-create-revision
       - type: semantic-maintenance-await
         target:
           timeout: 30s
@@ -174,6 +180,8 @@ phases:
           limit: 3
           minimumScore: 0.99
           requireProvenance: true
+          expectSourceRevisionFrom: post-rule-create-revision
+          expectGenerationFrom: generation-v1
           expectedNodeIds:
             - 00000000-0000-4000-8000-000000000105
   - name: excluded-field-update-keeps-record
@@ -242,6 +250,7 @@ phases:
         target:
           nodeId: 00000000-0000-4000-8000-000000000101
           text: axis-3
+          captureRevisionAs: primary-v2-revision
       - type: semantic-maintenance-await
         target:
           timeout: 30s
@@ -256,6 +265,9 @@ phases:
           limit: 3
           minimumScore: 0.99
           requireProvenance: true
+          expectSourceRevisionFrom: primary-v2-revision
+          expectGenerationFrom: generation-v1
+          expectConfigurationHashFrom: configuration-v1
           rejectRecordFrom: primary-v1
           captureRecordAs: primary-v2
           expectedNodeIds:
@@ -343,6 +355,7 @@ phases:
       - type: semantic-reliability-assert
         target:
           expectRebuildRequired: true
+          captureGenerationAs: generation-v2
       - type: semantic-search-assert
         target:
           query: axis-4
@@ -352,14 +365,31 @@ phases:
           allowWarnings: true
       - type: semantic-rebuild
         target:
-          backfillLimit: 16
+          backfillLimit: 2
           maintenanceBatchLimit: 64
           maxCatchupIterations: 64
+          captureGenerationAs: rebuilt-generation
+          captureRebuildEpochAs: rebuilt-epoch
+          captureFreshRevisionAs: rebuilt-revision
       - type: semantic-reliability-assert
         target:
           requireFreshAtLatest: true
           maximumUnresolvedGapCount: 0
           minimumSemanticGeneration: 2
+      - type: semantic-search-assert
+        target:
+          query: axis-4
+          limit: 3
+          minimumScore: 0.99
+          expectedResultCount: 1
+          requireProvenance: true
+          expectSourceRevisionFrom: rebuilt-revision
+          expectGenerationFrom: rebuilt-generation
+          expectRebuildEpochFrom: rebuilt-epoch
+          rejectConfigurationHashFrom: configuration-v1
+          captureConfigurationHashAs: configuration-v2
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000104
 assertions:
   final:
     requireHealthyCluster: true
