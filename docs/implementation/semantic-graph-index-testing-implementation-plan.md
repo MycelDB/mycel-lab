@@ -323,9 +323,10 @@ Pre-existing-data coverage requires a phase that seeds graph nodes before the se
 - rule and search-index states match the expected state;
 - live record count matches the fixture;
 - the rule/binding/generation's semantic fresh-through frontier reaches the required graph revision when that diagnostic exists;
-- the analyzer ingestion cursor and any unresolved-gap diagnostics are captured separately and never treated as freshness.
+- the analyzer ingestion cursor and any unresolved-gap diagnostics are captured separately and never treated as freshness;
+- no degraded/rebuild-required freshness-capacity marker is active.
 
-The poller has an absolute deadline, per-call timeout, bounded exponential backoff with deterministic jitter disabled for deterministic suites, and a final diagnostic capture on failure. Fixed sleeps do not establish correctness. An analyzer cursor that has merely consumed and enqueued a graph revision is not a convergence condition.
+The poller has an absolute deadline, per-call timeout, bounded exponential backoff with deterministic jitter disabled for deterministic suites, and a final diagnostic capture on failure. Fixed sleeps do not establish correctness. An analyzer cursor that has merely consumed and enqueued a graph revision is not a convergence condition. A capacity marker requires the declared rebuild/catch-up path; polling cannot reinterpret it as convergence.
 
 ### 4.11 Make budgets enforceable
 
@@ -422,7 +423,7 @@ semantic/
   resources.json              # safe IDs and lifecycle state
   fixture.json                # key-to-node mapping and expected graph revisions
   operations.jsonl            # graph/rule/backfill/rebuild operations
-  maintenance.jsonl           # bounded status observations
+  maintenance.jsonl           # frontiers, gaps/capacity markers, bounded status observations
   searches.jsonl              # query IDs/hashes, source diagnostics, IDs, scores; no raw text by default
   budget.json                 # limits, requests/attempts/batch items/usage, stop reason
   assertions.json             # every semantic assertion and evidence reference
@@ -655,14 +656,17 @@ This is product-state work, not an adapter-only observability change. Before cha
 5. Define two distinct per-space/domain/rule/binding/generation frontiers:
    - `analyzed_through_graph_revision` is only the ingestion cursor proving dirty events were examined and required work was durably classified/enqueued;
    - `fresh_through_graph_revision` is the highest contiguous revision for which analysis is complete and every required semantic consequence is durably applied or reaches an explicitly allowed terminal no-op/skip/delete outcome.
-6. Persist bounded gap/barrier state between those frontiers. Analyzer completion records the required outcome count for each relevant revision atomically with enqueue; worker completion resolves those outcomes. Retryable or permanent required failures block freshness. Unaffected revisions and policy-declared skips advance only through explicit terminal outcomes. Coalesced work may satisfy older revisions from a validated newer record, but that satisfaction is recorded rather than inferred. Compact resolved intervals at or below the frontier so state cannot grow without bound.
-7. Reset or rebuild the fresh-through frontier on incompatible generation changes, and define snapshot, backup/restore, replay, and legacy migration handling for records, frontiers, and gaps. Legacy records without required provenance become explicitly stale and require rebuild; values are never guessed.
-8. Keep provenance and gap state bounded and exclude credentials, raw vectors, projected source text, and provider payloads.
+6. Persist bounded gap/barrier state between those frontiers. Analyzer completion records the required outcome count for each relevant revision atomically with enqueue; worker completion resolves those outcomes. Retryable or permanent required failures block freshness. Unaffected revisions and policy-declared skips advance only through explicit terminal outcomes. Coalesced work may satisfy older revisions from a validated newer record, but that satisfaction is recorded rather than inferred.
+7. Coalesce contiguous resolved ranges both below and above a blocked frontier, and enforce explicit per-rule/binding/generation ceilings for retained barriers, disjoint gap/range intervals, revision span, and serialized bytes. Admission checks occur before allocating another barrier.
+8. On a frontier-state ceiling, atomically enter a visible `degraded/rebuild_required` state with the earliest unresolved revision, latest observed graph revision, generation, reason, and bounded error sample. Stop allocating per-revision frontier state; represent each subsequent revision by durably and monotonically updating the single latest-observed value before its dirty event is acknowledged. Graph writes are not blocked, outcome evidence is not discarded into a false-fresh state, and dirty events may be pruned only after the durable marker guarantees reconstruction from authoritative graph truth. In-flight incremental completions cannot clear the marker.
+9. Recovery from the capacity marker requires a full rebuild against a pinned graph revision followed by bounded delta catch-up (or a retry until a stable target is reached). Advance fresh-through and clear the marker only after all eligible entities at the target and all required later deltas are accounted. Ordinary polling or retry cannot skip the rebuild requirement.
+10. Reset or rebuild the fresh-through frontier on incompatible generation changes, and define snapshot, backup/restore, replay, and legacy migration handling for records, frontiers, gaps, and capacity markers. Legacy records without required provenance become explicitly stale and require rebuild; values are never guessed.
+11. Keep provenance, gap state, and diagnostic samples bounded and exclude credentials, raw vectors, projected source text, and provider payloads.
 
 After those semantics are durable, add authorization-scoped public fields for:
 
 - maintenance work first/last graph revision and work generation;
-- separately named analyzer ingestion cursor (`analyzed_through_graph_revision`) and semantic freshness frontier (`fresh_through_graph_revision`), plus bounded unresolved-gap count/oldest revision and configuration generation;
+- separately named analyzer ingestion cursor (`analyzed_through_graph_revision`) and semantic freshness frontier (`fresh_through_graph_revision`), plus configured frontier limits, bounded unresolved-gap count/oldest revision, capacity/degraded/rebuild-required state, latest observed revision, and configuration generation;
 - result source graph revision, semantic generation/configuration identity, opaque source version, dimensions, vector-space key, configured endpoint/model/capability IDs, and optional actual route identity;
 - explicit semantic source/fallback reason for hybrid results when not already present.
 
@@ -677,6 +681,8 @@ Requirements:
 - test domain production, durable storage, frontiers/gaps, snapshots/replay/migration, stale-response rejection, API mapping, and authorization—not only adapters;
 - commit several revisions with one required entity scripted to fail; prove the analyzer cursor advances, the freshness frontier remains before the gap, and a successful retry advances freshness monotonically without skipping the failed revision;
 - test explicit no-op/skip/delete, coalesced updates, permanent failure, generation reset, and bounded gap compaction;
+- leave an old permanent failure unresolved, alternate enough later successes/failures to hit each configured frontier-state ceiling, restart, and prove state remains bounded and visibly rebuild-required while fresh-through does not move;
+- repair the source/provider, execute the required pinned rebuild plus delta catch-up, and prove the marker clears and contiguous freshness converges without losing newer graph changes;
 - make Mycel Lab proof-level-3 and pagination assertions require the advertised API capability, never best-effort inference.
 
 Acceptance:
@@ -684,6 +690,7 @@ Acceptance:
 - exact per-result source revision and generation claims are backed by durably stored public fields;
 - the analyzer ingestion cursor is never labeled or asserted as freshness;
 - the persisted fresh-through frontier advances monotonically only across contiguous resolved outcomes and remains behind every unresolved required gap;
+- retained frontier state never exceeds its declared barrier/interval/span/byte ceilings; capacity produces a restart-safe rebuild-required marker rather than graph-write backpressure, silent evidence loss, or false freshness;
 - configured and actual route provenance are distinguishable, with `unknown` preserved when the provider supplies no actual route;
 - model/vector provenance is sufficient to reject stale or incompatible reuse;
 - direct semantic pages have no duplicate/skip on an unchanged view;
@@ -778,8 +785,9 @@ Expand the reusable contract components through explicit matrix cases. Each case
    - retry and prove final convergence without duplicate active records.
 6. **Large backfill under writes**
    - create a bounded corpus sized by profile, start backfill, and concurrently apply a recorded mutation schedule;
-   - sample selected/processed/failed counts, queue depth, memory/work metrics, analyzed-through cursor, fresh-through frontier/gaps, and latest acknowledged graph revision;
-   - require finite configured ceilings, monotonic progress, and final convergence to the newest revision rather than the initial scan.
+   - sample selected/processed/failed counts, queue depth, memory/work metrics, analyzed-through cursor, fresh-through frontier/gaps/capacity marker, and latest acknowledged graph revision;
+   - require finite configured ceilings, monotonic progress, and final convergence to the newest revision rather than the initial scan;
+   - in a dedicated negative case, hold an old failure while later outcomes alternate until the frontier-state ceiling is reached, then require bounded rebuild-required behavior and successful pinned rebuild/delta catch-up.
 7. **Replay, backup, and restore**
    - inject duplicate dirty events and retry/replay and prove idempotent active records;
    - restore into a fresh deployment and either validate restored derived semantic state or execute the documented rebuild path;
@@ -877,7 +885,7 @@ Each row below names the minimum proof level, required capability, and terminal 
 | 4 | Delete removes results | SGT4 | 2 | delete/tombstone maintenance | Deleted ID and stale record are absent; live count converges. |
 | 5 | Pre-existing data backfilled | SGT4, SGT5 | 3 | backfill | Every eligible entity has one active record at target revision. |
 | 6 | Transaction visibility | SGT4, SGT5 | 3 | graph transaction + maintenance provenance | No pre-commit, failed-statement-overlay, aborted, or rollback work; valid committed changes alone converge from their durable transaction/revision. |
-| 7 | Freshness/revision tracking | SGT5 | 3 | per-record revision + analyzed/fresh frontiers + gaps | Analyzer cursor may advance, but fresh-through is monotonic and cannot cross unresolved required work. |
+| 7 | Freshness/revision tracking | SGT5 | 3 | per-record revision + analyzed/fresh frontiers + bounded gaps | Analyzer cursor may advance, but fresh-through cannot cross unresolved work; capacity remains bounded and forces visible rebuild. |
 | 8 | Rapid/out-of-order updates | SGT2, SGT6 | 3 | scripted delay + stale-write guard | Newest revision/generation remains active after older completion. |
 | 9 | Connector failure/retry | SGT2, SGT7 | 2; 3 for revision boundary | scripted outcomes or emulator | Exact bounded attempts, degraded/dirty evidence, then convergence or terminal failure. |
 | 10 | Restart with pending work | SGT6 | 2; 3 after SGT5 | durable maintenance queue | Pending work resumes; one active latest record remains. |
@@ -894,7 +902,7 @@ Each row below names the minimum proof level, required capability, and terminal 
 | 21 | Dimension/model changes | SGT5, SGT8 | 3 | generation identity + rebuild/migration | Incompatible records/cursors are rejected; generations never mix. |
 | 22 | Projection/schema changes | SGT4, SGT8 | 3 | versioned projection | Affected records rebuild; old content no longer influences results. |
 | 23 | Empty/unsupported values | SGT8 | 2; 3 for freshness | projection value matrix | Each value has exact projection, skip, or error category and correct freshness. |
-| 24 | Large backfill with writes | SGT8 | 3 | metrics + bounded backfill | Finite ceilings, monotonic progress, final latest-revision convergence. |
+| 24 | Large backfill with writes | SGT8 | 3 | metrics + bounded backfill/frontier state | Finite ceilings, visible rebuild-required overflow, monotonic progress, and final latest-revision convergence. |
 | 25 | Hybrid lexical/semantic | SGT8 | 2 plus source proof | hybrid diagnostics/fusion | Exact deterministic fusion order, limits, filters, sources, and pages match. |
 | 26 | Enrichment + embedding | SGT9 | 3 for both stages | explicit enrichment-to-embedding pipeline | Both stage identities/versions are retained and final record is current. |
 | 27 | Direct embedding profile | SGT9 | 3 | live embedding connector | Lifecycle invariants, provenance, and target freshness hold. |
@@ -964,7 +972,7 @@ The following always fail a required suite:
 - graph revision/config generation below the declared target when proof level 3 is required;
 - pending/running/retryable-failed/permanent-failed work at the final barrier;
 - wrong dimensions, vector space, model route, opaque source version, live count, or node identity;
-- treating the analyzer ingestion cursor as freshness or advancing fresh-through across an unresolved required gap;
+- treating the analyzer ingestion cursor as freshness, advancing fresh-through across an unresolved required gap, exceeding a frontier-state ceiling, or hiding a rebuild-required capacity marker;
 - any pre-commit, failed-statement-overlay, aborted, or rolled-back semantic visibility, failure to reach complete final post-commit convergence, or partial post-commit publication when an advertised capability promises atomic publication;
 - budget exhaustion before required assertions complete;
 - timeout, cancellation leak, unbounded retry, or queue growth;
@@ -1004,7 +1012,7 @@ Issue #46 can close when:
 
 - `semantic-graph-index-contract` and `semantic-graph-index-recovery` are canonical Mycel Lab suites;
 - deterministic runs need no network or credentials and assert exact contract results;
-- semantic-index use, freshness, revision, generation, and safe provenance are publicly observable and asserted;
+- semantic-index use, per-result revision/generation, analyzer position, contiguous freshness, bounded gap/capacity state, and safe provenance are publicly observable and asserted;
 - create/update/delete/transaction/backfill/restart/rebuild and backup/restore behavior is covered;
 - direct semantic pagination has source-safe opaque cursor binding with no duplicate/skip;
 - isolation, authorization, mismatch, retry, partial failure, large-backfill, and bounded-failure cases fail closed;
