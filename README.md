@@ -52,7 +52,7 @@ mycel-lab run suite k3d-cluster-validation --confirm-destructive
 mycel-lab run suite k3d-raft-disruption --confirm-destructive
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --confirm-destructive
 # Override the scenario's baseline image for candidate validation.
-mycel-lab run suite k3d-commonfolio-stale-replay-recovery --confirm-destructive --image myceldb/mycel:v0.19.4
+mycel-lab run suite k3d-commonfolio-stale-replay-recovery --confirm-destructive --image myceldb/mycel:v0.20.0
 mycel-lab run suite compose-cluster-soak --confirm-destructive
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```
