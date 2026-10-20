@@ -269,10 +269,15 @@ func commonFolioAutomationDiagnostics(ctx context.Context, driver env.Environmen
 func commonFolioAutomationJSON(target map[string]any, assignment provision.ActorAssignment) (string, string, error) {
 	procedureID := commonFolioProcedureID(target)
 	bindingID := commonFolioBindingID(target, assignment)
+	procedureVersion := intTarget(target, "procedureVersion", 1)
+	if procedureVersion <= 0 {
+		procedureVersion = 1
+	}
+	procedurePrompt := firstNonEmpty(stringTarget(target, "procedurePrompt"), "Summarize the CommonFolio page entry and return concise text.")
 	procedure := map[string]any{
 		"id":      procedureID,
-		"name":    "CommonFolio-style page summary",
-		"version": 1,
+		"name":    firstNonEmpty(stringTarget(target, "procedureName"), "CommonFolio-style page summary"),
+		"version": procedureVersion,
 		"status":  "enabled",
 		"input": map[string]any{
 			"target": "changed",
@@ -287,7 +292,7 @@ func commonFolioAutomationJSON(target map[string]any, assignment provision.Actor
 				"maxInputTokens": 12000,
 			},
 		},
-		"prompt": "Summarize the CommonFolio page entry and return concise text.",
+		"prompt": procedurePrompt,
 		"output": map[string]any{
 			"mode": "text",
 			"actions": []map[string]any{{
@@ -303,9 +308,9 @@ func commonFolioAutomationJSON(target map[string]any, assignment provision.Actor
 	binding := map[string]any{
 		"id":                bindingID,
 		"name":              "CommonFolio-style entry trigger for " + assignment.ActorID,
-		"version":           1,
+		"version":           procedureVersion,
 		"procedure_id":      procedureID,
-		"procedure_version": 1,
+		"procedure_version": procedureVersion,
 		"status":            "enabled",
 		"scope": map[string]any{
 			"space_id":  assignment.SpaceID,

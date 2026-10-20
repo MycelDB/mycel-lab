@@ -13,12 +13,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - Added strict cataloged `ProviderProfile` definitions, scenario/CLI selection, redacted source-hashed resolution artifacts, typed finite budgets, enforcement-capability preflight, and credential-free deterministic/emulator profiles for SGT1 (#46).
 - Added atomic concurrency-safe harness budget accounting, structured artifact/database/error redaction, and a bounded final secret scan whose findings fail the run (#46).
 - Added independent `token-basis-v1` vectors and finite script goldens for the SGT2 daemon fixture prerequisite (#46, MycelDB/mycel#237).
+- Added `k3d-commonfolio-procedure-replay-recovery`, an artifact-backed negative control for retained-volume replay of an older `procedure.create` over an updated automation procedure (MycelDB/mycel#236).
 
 ### Changed
 
 - Definition import/export and catalog storage now include provider profiles; semantic scenarios may use `providerProfileRef` or `--provider-profile`, while required provider-owned limits fail unless their enforcement source is advertised.
 - Documentation checks now parse JSON contracts and examples in addition to Markdown and reliability YAML.
 - Strengthened the SGT0 contract with typed graph mutation operations, node/edge fixture shapes, explicit minimum-score and artifact-capture safety, Level 1-only baseline examples, bounded decoder annotations, Admin Maintenance lifecycle ownership, direct semantic filter prerequisites, and compose artifact topology.
+- CommonFolio automation fixtures can now generate explicit procedure and binding versions and distinct procedure definitions for deterministic create/update replay scenarios.
 
 ## [v0.20.0] - 2026-10-20
 
