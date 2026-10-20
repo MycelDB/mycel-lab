@@ -8,6 +8,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added SGT3 public-API semantic resource provisioning, reverse cleanup, finite semantic events, bounded maintenance convergence, and credential-free dry-run plans (#46).
+- Added the compose-first SGT4 semantic graph-index contract scenario covering backfill, deterministic ranking/pagination/filtering, projection lifecycle, update/delete, transaction negatives, isolation, disabled rules, and rebuild (#46).
+- Added SGT5 Level 3 provenance, analyzed/fresh frontier, bounded-capacity, record-identity, direct pagination, and minimum capability assertions (#46, MycelDB/mycel#238).
 - Added the SGT0 proof/compatibility inventory and versioned corpus, semantic-evidence, and final-report schema drafts for provider-neutral semantic graph-index reliability issue #46.
 - Added Draft 2020-12 schema compilation tests plus positive and contract-negative fixtures for isolated false-success conditions, operation shapes, artifact classification, and decoder/schema bounds.
 - Added strict cataloged `ProviderProfile` definitions, scenario/CLI selection, redacted source-hashed resolution artifacts, typed finite budgets, enforcement-capability preflight, and credential-free deterministic/emulator profiles for SGT1 (#46).

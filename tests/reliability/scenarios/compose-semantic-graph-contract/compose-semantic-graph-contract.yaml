@@ -1,0 +1,372 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-semantic-graph-contract
+  description: Credential-free deterministic semantic graph-index contract with bounded lifecycle convergence.
+seed: 4604
+providerProfileRef: deterministic-token-basis-v1
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+    projectNamePrefix: mycel-lab-semantic
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: semantic-controller
+    profileRef: semantic-controller
+    count: 1
+    rate:
+      mode: per-actor
+      commitsPerSecond: 1
+  - name: semantic-outsider
+    profileRef: semantic-controller
+    count: 1
+    rate:
+      mode: per-actor
+      commitsPerSecond: 1
+semantic:
+  targetActorGroup: semantic-controller
+  rule:
+    deferProvisioning: true
+    key: deterministic-document-search
+    displayName: Deterministic document search
+    description: Run-scoped semantic rule for the provider-neutral graph-index contract.
+    targetLabels: [Document]
+    bindingKey: search
+    purpose: semantic_search
+    sourceMode: self
+    includeProperties: [text]
+    minimumTextLength: 1
+    physicalIndex: exact
+    dirtyCooldown: 0s
+    maxBatchSize: 16
+    workerConcurrency: 1
+  maintenance:
+    timeout: 30s
+    pollInterval: 100ms
+    analyzeLimit: 64
+    processLimit: 64
+phases:
+  - name: seed-before-rule
+    duration: 1ms
+    events:
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000101
+          labels: [Document]
+          text: axis-0
+          properties:
+            title: primary-axis-zero
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000102
+          labels: [Document]
+          text: axis-1
+          properties:
+            title: lexical-axis-0-confounder
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000103
+          labels: [Document]
+          text: axis-2
+          properties:
+            title: secondary-confounder
+  - name: create-rule-backfill-and-converge
+    duration: 1ms
+    events:
+      - type: semantic-rule-create
+        target:
+          semantic: deferred
+      - type: semantic-backfill
+        target:
+          force: false
+          limit: 16
+          expectedSelected: 3
+          minimumGenerated: 3
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 1
+  - name: prove-direct-indexed-retrieval
+    duration: 1ms
+    events:
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          captureRecordAs: primary-v1
+          expectedScores: [1.0]
+          scoreTolerance: 0.000000001
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000101
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000000102
+            - 00000000-0000-4000-8000-000000000103
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 1
+          allPages: true
+          expectedResultCount: 3
+          requireProvenance: true
+          expectedScores: [1.0, 0.0, 0.0]
+          scoreTolerance: 0.000000001
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000101
+            - 00000000-0000-4000-8000-000000000102
+            - 00000000-0000-4000-8000-000000000103
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 1
+          filterNodeLabels: [Document]
+          filterNodeIds:
+            - 00000000-0000-4000-8000-000000000102
+            - 00000000-0000-4000-8000-000000000103
+          filterProperties:
+            title: lexical-axis-0-confounder
+          expectedResultCount: 1
+          requireProvenance: true
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000102
+  - name: post-rule-create-and-converge
+    duration: 1ms
+    events:
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000105
+          labels: [Document]
+          text: axis-5
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+      - type: semantic-search-assert
+        target:
+          query: axis-5
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000105
+  - name: excluded-field-update-keeps-record
+    duration: 1ms
+    events:
+      - type: semantic-node-update
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000101
+          properties:
+            title: excluded-title-changed
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 3
+          minimumScore: 0.99
+          expectRecordFrom: primary-v1
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000101
+  - name: transaction-negative-boundaries
+    duration: 1ms
+    events:
+      - type: semantic-transaction-negative
+        target:
+          rollbackNodeId: 00000000-0000-4000-8000-000000000106
+          failedNodeId: 00000000-0000-4000-8000-000000000107
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-search-assert
+        target:
+          query: axis-6
+          limit: 3
+          minimumScore: 0.99
+          expectedResultCount: 0
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000000106
+            - 00000000-0000-4000-8000-000000000107
+  - name: isolation-and-authorization
+    duration: 1ms
+    events:
+      - type: semantic-node-create
+        target:
+          actorGroup: semantic-outsider
+          nodeId: 00000000-0000-4000-8000-000000000108
+          labels: [Document]
+          text: axis-0
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 3
+          minimumScore: 0.99
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000000108
+      - type: semantic-unauthorized-search
+        target:
+          actorGroup: semantic-outsider
+  - name: update-and-converge
+    duration: 1ms
+    events:
+      - type: semantic-node-update
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000101
+          text: axis-3
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+      - type: semantic-search-assert
+        target:
+          query: axis-3
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          rejectRecordFrom: primary-v1
+          captureRecordAs: primary-v2
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000101
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 3
+          minimumScore: 0.99
+          rejectRecordFrom: primary-v1
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000000101
+  - name: delete-and-converge
+    duration: 1ms
+    events:
+      - type: semantic-node-delete
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000101
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+      - type: semantic-search-assert
+        target:
+          query: axis-3
+          limit: 3
+          minimumScore: 0.99
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000000101
+  - name: disabled-rule-negative-control
+    duration: 1ms
+    events:
+      - type: semantic-rule-enable
+        target:
+          enabled: false
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000104
+          labels: [Document]
+          text: axis-4
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-search-assert
+        target:
+          query: axis-4
+          limit: 3
+          minimumScore: 0.99
+          expectFailureCode: FailedPrecondition
+  - name: reenable-backfill-and-prove-catch-up
+    duration: 1ms
+    events:
+      - type: semantic-rule-enable
+        target:
+          enabled: true
+      - type: semantic-backfill
+        target:
+          force: false
+          limit: 16
+          minimumGenerated: 1
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-search-assert
+        target:
+          query: axis-4
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000104
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+      - type: semantic-rule-projection-update
+        target:
+          includeProperties: [text, title]
+      - type: semantic-reliability-assert
+        target:
+          expectRebuildRequired: true
+      - type: semantic-search-assert
+        target:
+          query: axis-4
+          limit: 3
+          minimumScore: 0.99
+          expectedResultCount: 0
+          allowWarnings: true
+      - type: semantic-rebuild
+        target:
+          backfillLimit: 16
+          maintenanceBatchLimit: 64
+          maxCatchupIterations: 64
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 2
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 60s
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

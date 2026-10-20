@@ -1,10 +1,16 @@
 package provision
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
+	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
 
 func TestPlanScenarioCreatesWriterResourcesAndReaderAssignments(t *testing.T) {
@@ -48,5 +54,58 @@ func TestPlanScenarioCreatesWriterResourcesAndReaderAssignments(t *testing.T) {
 	}
 	if writers != 4 || readers != 2 {
 		t.Fatalf("writers=%d readers=%d, want 4/2", writers, readers)
+	}
+}
+
+func TestPlanScenarioCreatesDeterministicSafeSemanticPlan(t *testing.T) {
+	scenario, err := catalog.ResolveScenarioFile(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml"), catalog.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{DryRun: true, Manifest: provider.BuiltInHarnessManifest()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.ProviderProfileRef = "deterministic-token-basis-v1"
+	scenario.ProviderProfile = &resolved
+	scenario.Semantic = &spec.SemanticScenarioSpec{
+		TargetActorGroup: "journal-users",
+		Rule:             spec.SemanticRuleSpec{Key: "fixture-search", DisplayName: "Fixture search", TargetLabels: []string{"Document"}, BindingKey: "search", Purpose: "semantic_search", SourceMode: "self", PhysicalIndex: "exact", MaxBatchSize: 16, WorkerConcurrency: 1},
+		Maintenance:      spec.SemanticMaintenanceSpec{Timeout: spec.Duration{Duration: time.Minute}, PollInterval: spec.Duration{Duration: time.Second}, AnalyzeLimit: 64, ProcessLimit: 64},
+	}
+	first, err := PlanScenario(scenario, Options{RunID: "semantic-contract-fixed", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := PlanScenario(scenario, Options{RunID: "semantic-contract-fixed", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Semantic == nil || !reflect.DeepEqual(first.Semantic, second.Semantic) {
+		t.Fatalf("semantic plans are not deterministic: first=%#v second=%#v", first.Semantic, second.Semantic)
+	}
+	wantOperations := []string{"inference-package", "intelligence-profile", "credential", "credential-grant", "access-policy", "semantic-rule"}
+	for index, want := range wantOperations {
+		if got := first.Semantic.Operations[index]; got.Sequence != index+1 || got.Resource != want || got.Status != "planned" {
+			t.Fatalf("operation[%d]=%#v want resource %q", index, got, want)
+		}
+	}
+	wantCleanup := []string{"semantic-rule", "access-policy", "credential-grant", "credential", "intelligence-profile", "capability", "vector-store", "model", "endpoint"}
+	for index, want := range wantCleanup {
+		if got := first.Semantic.Cleanup[index]; got.Sequence != index+1 || got.Resource != want {
+			t.Fatalf("cleanup[%d]=%#v want resource %q", index, got, want)
+		}
+	}
+	raw, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "Password") || strings.Contains(string(raw), "secretValue") {
+		t.Fatalf("semantic plan contains secret-bearing fields: %s", raw)
 	}
 }

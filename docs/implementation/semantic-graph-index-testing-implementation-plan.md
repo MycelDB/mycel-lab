@@ -561,6 +561,8 @@ Release dependency:
 
 ### SGT3: Semantic provisioning and finite event engine
 
+Implementation status (unreleased): implemented on the issue #46 feature branch; exact-head review and real compose validation remain pending.
+
 Repository: `mycel-lab`
 Risk: high
 
@@ -588,6 +590,8 @@ Acceptance:
 - interrupted provisioning leaves a complete cleanup ledger.
 
 ### SGT4: `semantic-graph-index-contract`
+
+Implementation status (unreleased): compose-first scenario and deterministic assertions implemented; the environment-mutating run remains pending explicit operator approval.
 
 Repository: `mycel-lab`
 Risk: high
@@ -652,6 +656,8 @@ Acceptance:
 - a deliberately corrupted expected ranking produces a failing run.
 
 ### SGT5: Persisted revision/provenance semantics and public diagnostics
+
+Implementation status (unreleased): additive API/SDK contracts and daemon/Lab implementation candidate complete; exact-head review and full cross-repository integration evidence remain pending.
 
 Repositories: daemon domain/storage design in `mycel` → `mycel-api` → `mycel-go-sdk` → daemon implementation in `mycel` → `mycel-lab`
 

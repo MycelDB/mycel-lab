@@ -123,16 +123,117 @@ type ActorProfile struct {
 
 type Scenario struct {
 	TypeMeta           `yaml:",inline" json:",inline"`
-	Metadata           Metadata         `yaml:"metadata" json:"metadata"`
-	Seed               int64            `yaml:"seed" json:"seed"`
-	Environment        EnvironmentSpec  `yaml:"environment" json:"environment"`
-	ClusterRef         string           `yaml:"clusterRef" json:"clusterRef"`
-	ProviderProfileRef string           `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
-	ClusterOverrides   map[string]any   `yaml:"clusterOverrides,omitempty" json:"clusterOverrides,omitempty"`
-	ActorGroups        []ActorGroupSpec `yaml:"actorGroups" json:"actorGroups"`
-	Phases             []PhaseSpec      `yaml:"phases" json:"phases"`
-	Assertions         map[string]any   `yaml:"assertions,omitempty" json:"assertions,omitempty"`
-	Artifacts          map[string]bool  `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	Metadata           Metadata              `yaml:"metadata" json:"metadata"`
+	Seed               int64                 `yaml:"seed" json:"seed"`
+	Environment        EnvironmentSpec       `yaml:"environment" json:"environment"`
+	ClusterRef         string                `yaml:"clusterRef" json:"clusterRef"`
+	ProviderProfileRef string                `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
+	Semantic           *SemanticScenarioSpec `yaml:"semantic,omitempty" json:"semantic,omitempty"`
+	ClusterOverrides   map[string]any        `yaml:"clusterOverrides,omitempty" json:"clusterOverrides,omitempty"`
+	ActorGroups        []ActorGroupSpec      `yaml:"actorGroups" json:"actorGroups"`
+	Phases             []PhaseSpec           `yaml:"phases" json:"phases"`
+	Assertions         map[string]any        `yaml:"assertions,omitempty" json:"assertions,omitempty"`
+	Artifacts          map[string]bool       `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+}
+
+type SemanticScenarioSpec struct {
+	TargetActorGroup string                  `yaml:"targetActorGroup" json:"targetActorGroup"`
+	Rule             SemanticRuleSpec        `yaml:"rule" json:"rule"`
+	Maintenance      SemanticMaintenanceSpec `yaml:"maintenance,omitempty" json:"maintenance,omitempty"`
+}
+
+type SemanticRuleSpec struct {
+	DeferProvisioning bool     `yaml:"deferProvisioning,omitempty" json:"deferProvisioning,omitempty"`
+	Key               string   `yaml:"key" json:"key"`
+	DisplayName       string   `yaml:"displayName,omitempty" json:"displayName,omitempty"`
+	Description       string   `yaml:"description,omitempty" json:"description,omitempty"`
+	TargetLabels      []string `yaml:"targetLabels" json:"targetLabels"`
+	BindingKey        string   `yaml:"bindingKey,omitempty" json:"bindingKey,omitempty"`
+	Purpose           string   `yaml:"purpose,omitempty" json:"purpose,omitempty"`
+	SourceMode        string   `yaml:"sourceMode,omitempty" json:"sourceMode,omitempty"`
+	IncludeProperties []string `yaml:"includeProperties,omitempty" json:"includeProperties,omitempty"`
+	ExcludeProperties []string `yaml:"excludeProperties,omitempty" json:"excludeProperties,omitempty"`
+	MinimumTextLength int      `yaml:"minimumTextLength,omitempty" json:"minimumTextLength,omitempty"`
+	PhysicalIndex     string   `yaml:"physicalIndex,omitempty" json:"physicalIndex,omitempty"`
+	DirtyCooldown     Duration `yaml:"dirtyCooldown,omitempty" json:"dirtyCooldown,omitempty"`
+	MaxBatchSize      int      `yaml:"maxBatchSize,omitempty" json:"maxBatchSize,omitempty"`
+	WorkerConcurrency int      `yaml:"workerConcurrency,omitempty" json:"workerConcurrency,omitempty"`
+}
+
+type SemanticMaintenanceSpec struct {
+	Timeout      Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	PollInterval Duration `yaml:"pollInterval,omitempty" json:"pollInterval,omitempty"`
+	AnalyzeLimit int      `yaml:"analyzeLimit,omitempty" json:"analyzeLimit,omitempty"`
+	ProcessLimit int      `yaml:"processLimit,omitempty" json:"processLimit,omitempty"`
+}
+
+func (s *SemanticScenarioSpec) setDefaults() {
+	if s == nil {
+		return
+	}
+	if strings.TrimSpace(s.Rule.DisplayName) == "" {
+		s.Rule.DisplayName = s.Rule.Key
+	}
+	if strings.TrimSpace(s.Rule.BindingKey) == "" {
+		s.Rule.BindingKey = "search"
+	}
+	if strings.TrimSpace(s.Rule.Purpose) == "" {
+		s.Rule.Purpose = "semantic_search"
+	}
+	if strings.TrimSpace(s.Rule.SourceMode) == "" {
+		s.Rule.SourceMode = "self"
+	}
+	if strings.TrimSpace(s.Rule.PhysicalIndex) == "" {
+		s.Rule.PhysicalIndex = "exact"
+	}
+	if s.Rule.MaxBatchSize == 0 {
+		s.Rule.MaxBatchSize = 16
+	}
+	if s.Rule.WorkerConcurrency == 0 {
+		s.Rule.WorkerConcurrency = 1
+	}
+	if s.Maintenance.Timeout.Duration == 0 {
+		s.Maintenance.Timeout.Duration = 2 * time.Minute
+	}
+	if s.Maintenance.PollInterval.Duration == 0 {
+		s.Maintenance.PollInterval.Duration = 250 * time.Millisecond
+	}
+	if s.Maintenance.AnalyzeLimit == 0 {
+		s.Maintenance.AnalyzeLimit = 256
+	}
+	if s.Maintenance.ProcessLimit == 0 {
+		s.Maintenance.ProcessLimit = 256
+	}
+}
+
+func (s SemanticScenarioSpec) Validate(actorGroups map[string]bool, providerProfileRef string) error {
+	if strings.TrimSpace(providerProfileRef) == "" {
+		return errors.New("semantic provisioning requires providerProfileRef")
+	}
+	if !actorGroups[strings.TrimSpace(s.TargetActorGroup)] {
+		return fmt.Errorf("semantic.targetActorGroup %q does not name an actor group", s.TargetActorGroup)
+	}
+	if strings.TrimSpace(s.Rule.Key) == "" {
+		return errors.New("semantic.rule.key is required")
+	}
+	if len(s.Rule.TargetLabels) == 0 {
+		return errors.New("semantic.rule.targetLabels must not be empty")
+	}
+	for _, label := range s.Rule.TargetLabels {
+		if strings.TrimSpace(label) == "" {
+			return errors.New("semantic.rule.targetLabels contains an empty label")
+		}
+	}
+	if s.Rule.MinimumTextLength < 0 || s.Rule.MaxBatchSize <= 0 || s.Rule.WorkerConcurrency <= 0 {
+		return errors.New("semantic rule limits must be non-negative and concurrency/batch size positive")
+	}
+	if s.Maintenance.Timeout.Duration <= 0 || s.Maintenance.PollInterval.Duration <= 0 || s.Maintenance.PollInterval.Duration > s.Maintenance.Timeout.Duration {
+		return errors.New("semantic maintenance timeout and pollInterval must be positive and bounded")
+	}
+	if s.Maintenance.AnalyzeLimit <= 0 || s.Maintenance.ProcessLimit <= 0 || s.Maintenance.AnalyzeLimit > 4096 || s.Maintenance.ProcessLimit > 4096 {
+		return errors.New("semantic maintenance limits must be between 1 and 4096")
+	}
+	return nil
 }
 
 type EnvironmentSpec struct {
@@ -209,6 +310,7 @@ type ResolvedScenario struct {
 	Cluster            ClusterSpec               `yaml:"cluster" json:"cluster"`
 	ProviderProfileRef string                    `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
 	ProviderProfile    *provider.ResolvedProfile `yaml:"providerProfile,omitempty" json:"providerProfile,omitempty"`
+	Semantic           *SemanticScenarioSpec     `yaml:"semantic,omitempty" json:"semantic,omitempty"`
 	ActorGroups        []ResolvedActorGroup      `yaml:"actorGroups" json:"actorGroups"`
 	Phases             []PhaseSpec               `yaml:"phases" json:"phases"`
 	Assertions         map[string]any            `yaml:"assertions,omitempty" json:"assertions,omitempty"`
@@ -349,6 +451,7 @@ func DefaultScenario(s *Scenario) {
 			s.ActorGroups[i].Rate.Mode = "group-total"
 		}
 	}
+	s.Semantic.setDefaults()
 	for i := range s.Phases {
 		for name, override := range s.Phases[i].ActorGroupOverrides {
 			if override.Rate.Mode == "" && (override.Rate.CommitsPerSecond != 0 || override.Rate.QueriesPerSecond != 0) {
@@ -400,6 +503,11 @@ func (s Scenario) Validate() error {
 			return fmt.Errorf("actor group %q rate must specify commitsPerSecond or queriesPerSecond", group.Name)
 		}
 	}
+	if s.Semantic != nil {
+		if err := s.Semantic.Validate(seenActors, s.ProviderProfileRef); err != nil {
+			return err
+		}
+	}
 	if len(s.Phases) == 0 {
 		return errors.New("phases must not be empty")
 	}
@@ -446,7 +554,7 @@ func validateEnvironmentSpec(environment EnvironmentSpec) error {
 
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "statefulset-image-upgrade", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "identity-duplicate-principal-replay":
+	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "statefulset-image-upgrade", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "identity-duplicate-principal-replay", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild":
 		return true
 	default:
 		return false

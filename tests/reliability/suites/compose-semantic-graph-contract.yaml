@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-semantic-graph-contract
+  description: Credential-free deterministic semantic graph-index contract and lifecycle convergence.
+scenarios:
+  - path: ../scenarios/compose-semantic-graph-contract/compose-semantic-graph-contract.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

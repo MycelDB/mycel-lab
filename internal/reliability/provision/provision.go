@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,16 +21,18 @@ const (
 )
 
 type ScenarioResources struct {
-	ScenarioName string            `json:"scenarioName"`
-	RunID        string            `json:"runId"`
-	DryRun       bool              `json:"dryRun"`
-	AdminAddr    string            `json:"adminAddr,omitempty"`
-	Principals   []Principal       `json:"principals"`
-	Spaces       []Space           `json:"spaces"`
-	Domains      []Domain          `json:"domains"`
-	Assignments  []ActorAssignment `json:"assignments"`
-	Cleanup      CleanupStatus     `json:"cleanup,omitempty"`
-	CreatedAt    time.Time         `json:"createdAt"`
+	ScenarioName string             `json:"scenarioName"`
+	RunID        string             `json:"runId"`
+	DryRun       bool               `json:"dryRun"`
+	AdminAddr    string             `json:"adminAddr,omitempty"`
+	Principals   []Principal        `json:"principals"`
+	Spaces       []Space            `json:"spaces"`
+	Domains      []Domain           `json:"domains"`
+	Assignments  []ActorAssignment  `json:"assignments"`
+	Semantic     *SemanticResources `json:"semantic,omitempty"`
+	Cleanup      CleanupStatus      `json:"cleanup,omitempty"`
+	semanticPlan *semanticProvisionPlan
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 type Principal struct {
@@ -83,6 +86,63 @@ type CleanupStatus struct {
 	Errors    []string `json:"errors,omitempty"`
 }
 
+type SemanticResources struct {
+	TargetActorID           string              `json:"targetActorId"`
+	SpaceID                 string              `json:"spaceId,omitempty"`
+	DomainID                string              `json:"domainId,omitempty"`
+	PackageName             string              `json:"packageName"`
+	PackageVersion          string              `json:"packageVersion"`
+	PackageID               string              `json:"packageId,omitempty"`
+	EndpointKey             string              `json:"endpointKey"`
+	EndpointID              string              `json:"endpointId,omitempty"`
+	ModelKey                string              `json:"modelKey"`
+	ModelID                 string              `json:"modelId,omitempty"`
+	CapabilityID            string              `json:"capabilityId,omitempty"`
+	VectorStoreKey          string              `json:"vectorStoreKey"`
+	VectorStoreID           string              `json:"vectorStoreId,omitempty"`
+	IntelligenceProfileKey  string              `json:"intelligenceProfileKey"`
+	IntelligenceProfileID   string              `json:"intelligenceProfileId,omitempty"`
+	CredentialKey           string              `json:"credentialKey"`
+	CredentialID            string              `json:"credentialId,omitempty"`
+	CredentialGrantID       string              `json:"credentialGrantId,omitempty"`
+	AccessPolicyID          string              `json:"accessPolicyId,omitempty"`
+	SemanticRuleKey         string              `json:"semanticRuleKey"`
+	SemanticRuleID          string              `json:"semanticRuleId,omitempty"`
+	EmbeddingBindingKey     string              `json:"embeddingBindingKey"`
+	Operations              []SemanticOperation `json:"operations"`
+	Cleanup                 []SemanticOperation `json:"cleanup"`
+	MaintenanceTimeout      time.Duration       `json:"maintenanceTimeout"`
+	MaintenancePollInterval time.Duration       `json:"maintenancePollInterval"`
+	MaintenanceAnalyzeLimit int                 `json:"maintenanceAnalyzeLimit"`
+	MaintenanceProcessLimit int                 `json:"maintenanceProcessLimit"`
+	EvidenceValues          map[string]string   `json:"evidenceValues,omitempty"`
+}
+
+type SemanticOperation struct {
+	Sequence int            `json:"sequence"`
+	Action   string         `json:"action"`
+	Resource string         `json:"resource"`
+	Status   string         `json:"status"`
+	Details  map[string]any `json:"details,omitempty"`
+	Error    string         `json:"error,omitempty"`
+}
+
+type semanticProvisionPlan struct {
+	Spec       spec.SemanticScenarioSpec
+	Capability providerCapability
+	Secret     string
+}
+
+type providerCapability struct {
+	ConnectorType   string
+	BaseURL         string
+	Dimensions      int
+	VectorSpaceKey  string
+	FixtureStrategy string
+	ProviderModel   string
+	Mode            string
+}
+
 type Options struct {
 	RunID         string
 	DaemonAddrs   []string
@@ -105,7 +165,7 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 	for _, group := range scenario.ActorGroups {
 		behaviorType := behaviorType(group)
 		switch behaviorType {
-		case "graph-transaction":
+		case "graph-transaction", "semantic-control":
 			for i := 0; i < group.Count; i++ {
 				actorID := fmt.Sprintf("%s-%d", group.Name, i)
 				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, sanitizeName(group.Name), i)
@@ -141,7 +201,74 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 			}
 		}
 	}
+	if scenario.Semantic != nil {
+		semanticResources, plan, err := planSemanticResources(scenario, resources, shortRun)
+		if err != nil {
+			return ScenarioResources{}, err
+		}
+		resources.Semantic = semanticResources
+		resources.semanticPlan = plan
+	}
 	return resources, nil
+}
+
+func planSemanticResources(scenario spec.ResolvedScenario, resources ScenarioResources, shortRun string) (*SemanticResources, *semanticProvisionPlan, error) {
+	if scenario.Semantic == nil || scenario.ProviderProfile == nil || scenario.ProviderProfile.Profile.Capabilities.Embedding == nil {
+		return nil, nil, errors.New("semantic provisioning requires a resolved embedding provider profile")
+	}
+	var target ActorAssignment
+	for _, assignment := range resources.Assignments {
+		if assignment.GroupName == scenario.Semantic.TargetActorGroup {
+			target = assignment
+			break
+		}
+	}
+	if target.ActorID == "" {
+		return nil, nil, fmt.Errorf("semantic target actor group %q has no assignment", scenario.Semantic.TargetActorGroup)
+	}
+	capability := scenario.ProviderProfile.Profile.Capabilities.Embedding
+	prefix := "mlab-" + shortRun
+	semanticResources := &SemanticResources{
+		TargetActorID:           target.ActorID,
+		PackageName:             prefix + "-semantic",
+		PackageVersion:          "1",
+		EndpointKey:             prefix + "-endpoint",
+		ModelKey:                prefix + "-model",
+		VectorStoreKey:          prefix + "-vectors",
+		IntelligenceProfileKey:  prefix + "-profile",
+		CredentialKey:           prefix + "-credential",
+		SemanticRuleKey:         scenario.Semantic.Rule.Key,
+		EmbeddingBindingKey:     scenario.Semantic.Rule.BindingKey,
+		MaintenanceTimeout:      scenario.Semantic.Maintenance.Timeout.Duration,
+		MaintenancePollInterval: scenario.Semantic.Maintenance.PollInterval.Duration,
+		MaintenanceAnalyzeLimit: scenario.Semantic.Maintenance.AnalyzeLimit,
+		MaintenanceProcessLimit: scenario.Semantic.Maintenance.ProcessLimit,
+		EvidenceValues:          map[string]string{},
+	}
+	operationNames := []struct{ action, resource string }{
+		{"apply", "inference-package"},
+		{"create", "intelligence-profile"},
+		{"create", "credential"},
+		{"create", "credential-grant"},
+		{"create", "access-policy"},
+		{"create", "semantic-rule"},
+	}
+	for index, operation := range operationNames {
+		semanticResources.Operations = append(semanticResources.Operations, SemanticOperation{Sequence: index + 1, Action: operation.action, Resource: operation.resource, Status: "planned"})
+	}
+	cleanupResources := []string{"semantic-rule", "access-policy", "credential-grant", "credential", "intelligence-profile", "capability", "vector-store", "model", "endpoint"}
+	for index, resource := range cleanupResources {
+		semanticResources.Cleanup = append(semanticResources.Cleanup, SemanticOperation{Sequence: index + 1, Action: "delete", Resource: resource, Status: "planned"})
+	}
+	secret := ""
+	if values := scenario.ProviderProfile.RuntimeSecretValues(); len(values) > 0 {
+		secret = values[0]
+	}
+	return semanticResources, &semanticProvisionPlan{Spec: *scenario.Semantic, Secret: secret, Capability: providerCapability{
+		ConnectorType: capability.ConnectorType, BaseURL: capability.BaseURL, Dimensions: capability.Dimensions,
+		VectorSpaceKey: capability.VectorSpaceKey, FixtureStrategy: capability.FixtureStrategy,
+		ProviderModel: capability.ProviderModelName, Mode: string(scenario.ProviderProfile.Profile.Mode),
+	}}, nil
 }
 
 func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts Options) error {
@@ -228,6 +355,24 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 			}
 		}
 	}
+	if resources.Semantic != nil {
+		for _, assignment := range resources.Assignments {
+			if assignment.ActorID == resources.Semantic.TargetActorID {
+				resources.Semantic.SpaceID = assignment.SpaceID
+				resources.Semantic.DomainID = assignment.DomainID
+				break
+			}
+		}
+		if err := provisionSemanticResources(ctx, admin, resources); err != nil {
+			rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			rollbackFailures := cleanupSemanticResources(rollbackCtx, admin, resources.Semantic)
+			rollbackCancel()
+			if len(rollbackFailures) > 0 {
+				return errors.Join(fmt.Errorf("provision semantic resources: %w", err), fmt.Errorf("semantic rollback: %s", strings.Join(rollbackFailures, "; ")))
+			}
+			return fmt.Errorf("provision semantic resources: %w", err)
+		}
+	}
 	for i := range resources.Assignments {
 		a := &resources.Assignments[i]
 		if a.PrincipalID == "" {
@@ -272,6 +417,7 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 	}
 	defer admin.Close()
 	var errs []string
+	errs = append(errs, cleanupSemanticResources(ctx, admin, resources.Semantic)...)
 	seenSpaces := map[string]bool{}
 	spaces := append([]Space(nil), resources.Spaces...)
 	sort.Slice(spaces, func(i, j int) bool { return spaces[i].Name > spaces[j].Name })
