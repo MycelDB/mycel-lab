@@ -38,6 +38,14 @@ func TestPhaseTransitionsAreValid(t *testing.T) {
 	}
 }
 
+func TestMarkLastPassedPhaseFailedKeepsClosedBudgetEvidenceConsistent(t *testing.T) {
+	phases := []PhaseState{{Name: "warmup", Status: PhasePassed}, {Name: "steady", Status: PhasePassed}}
+	markLastPassedPhaseFailed(phases)
+	if phases[0].Status != PhasePassed || phases[1].Status != PhaseFailed {
+		t.Fatalf("phase states = %#v", phases)
+	}
+}
+
 func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), Store: store.NewMemoryStore()})
@@ -79,6 +87,63 @@ func TestRunScenarioProviderBudgetExhaustionStopsScheduling(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(result.ArtifactRoot, "provider", "budget-final.json")); err != nil {
 		t.Fatalf("budget artifact missing: %v", err)
+	}
+}
+
+func TestReserveProviderOperationPreservesEarlierParentDeadline(t *testing.T) {
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := provider.NewLedger(resolved.Profile.Budgets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancelParent()
+	operationCtx, release, err := reserveProviderOperation(parent, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-operationCtx.Done()
+	if err := release(); err != nil {
+		t.Fatalf("parent deadline was misclassified: %v", err)
+	}
+	if snapshot := ledger.Snapshot(); snapshot.Closed {
+		t.Fatalf("parent deadline closed provider ledger: %#v", snapshot)
+	}
+}
+
+func TestReserveProviderOperationReleaseLinearizesBeforeDeadline(t *testing.T) {
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	profile, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved.Profile.Budgets.RequestTimeout = provider.Duration{Duration: 5 * time.Millisecond}
+	ledger, err := provider.NewLedger(resolved.Profile.Budgets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := reserveProviderOperation(context.Background(), ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("completed operation release error: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if snapshot := ledger.Snapshot(); snapshot.Closed || snapshot.ConcurrentOperations != 0 {
+		t.Fatalf("completed operation later timed out: %#v", snapshot)
 	}
 }
 

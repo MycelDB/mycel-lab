@@ -12,6 +12,8 @@ import (
 var (
 	ErrBudgetExhausted = errors.New("provider orchestration budget exhausted")
 	ErrBudgetClosed    = errors.New("provider orchestration budget closed")
+	ErrRequestTimeout  = errors.New("provider request timeout reached")
+	ErrTotalTimeout    = errors.New("provider total timeout reached")
 )
 
 type Demand struct {
@@ -131,19 +133,21 @@ func (l *Ledger) TotalContext(parent context.Context) (context.Context, context.
 	l.mu.Lock()
 	deadline := l.state.Deadline
 	l.mu.Unlock()
-	return context.WithDeadline(parent, deadline)
+	return context.WithDeadlineCause(parent, deadline, ErrTotalTimeout)
 }
 
 func (l *Ledger) RequestContext(parent context.Context) (context.Context, context.CancelFunc) {
 	l.mu.Lock()
-	deadline := l.state.Deadline
-	requestTimeout := l.budget.RequestTimeout.Duration
+	totalDeadline := l.state.Deadline
+	requestDeadline := l.clock().Add(l.budget.RequestTimeout.Duration)
 	l.mu.Unlock()
-	requestDeadline := l.clock().Add(requestTimeout)
-	if deadline.Before(requestDeadline) {
-		requestDeadline = deadline
+
+	base, cancelTotal := context.WithDeadlineCause(parent, totalDeadline, ErrTotalTimeout)
+	requestCtx, cancelRequest := context.WithDeadlineCause(base, requestDeadline, ErrRequestTimeout)
+	return requestCtx, func() {
+		cancelRequest()
+		cancelTotal()
 	}
-	return context.WithDeadline(parent, requestDeadline)
 }
 
 func (l *Ledger) Close(reason string) {

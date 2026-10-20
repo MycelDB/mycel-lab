@@ -161,15 +161,18 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	finish := func(status RunStatus, runErr error) (Result, error) {
 		if budgetLedger != nil {
 			snapshot := budgetLedger.Snapshot()
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) && !time.Now().UTC().Before(snapshot.Deadline) {
+			if errors.Is(context.Cause(ctx), provider.ErrTotalTimeout) || !time.Now().UTC().Before(snapshot.Deadline) {
 				budgetLedger.Close("total timeout reached")
 				runErr = errors.Join(runErr, fmt.Errorf("%w: total timeout reached", provider.ErrBudgetExhausted))
 				status = RunFailed
 				snapshot = budgetLedger.Snapshot()
 			}
-			if snapshot.Closed && status == RunPassed {
-				runErr = errors.Join(runErr, fmt.Errorf("%w: provider budget closed before successful completion", provider.ErrBudgetExhausted))
-				status = RunFailed
+			if snapshot.Closed {
+				markLastPassedPhaseFailed(result.Phases)
+				if status == RunPassed {
+					runErr = errors.Join(runErr, fmt.Errorf("%w: provider budget closed before successful completion", provider.ErrBudgetExhausted))
+					status = RunFailed
+				}
 			}
 			result.ProviderBudget = &snapshot
 			if _, writeErr := sink.WriteJSON("provider/budget-final.json", snapshot); writeErr != nil {
@@ -295,7 +298,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	provisionErr := provision.ProvisionScenario(provisionCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun})
-	releaseProvision()
+	provisionErr = errors.Join(provisionErr, releaseProvision())
 	if provisionErr != nil {
 		return failAfterEnvironmentCreate(RunFailed, provisionErr)
 	}
@@ -431,6 +434,21 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
 	return finish(RunPassed, nil)
+}
+
+func markLastPassedPhaseFailed(phases []PhaseState) {
+	for index := range phases {
+		if phases[index].Status == PhaseFailed || phases[index].Status == PhaseAborted {
+			return
+		}
+	}
+	for index := len(phases) - 1; index >= 0; index-- {
+		if phases[index].Status == PhasePassed {
+			phases[index].Status = PhaseFailed
+			phases[index].FinishedAt = time.Now().UTC()
+			return
+		}
+	}
 }
 
 func mergeEnvironmentOverride(base spec.EnvironmentSpec, override spec.EnvironmentSpec) spec.EnvironmentSpec {
@@ -1008,21 +1026,29 @@ type runRecorder struct {
 	failedWrites    int
 }
 
-func reserveProviderOperation(ctx context.Context, ledger *provider.Ledger) (context.Context, func(), error) {
+func reserveProviderOperation(ctx context.Context, ledger *provider.Ledger) (context.Context, func() error, error) {
 	if ledger == nil {
-		return ctx, func() {}, nil
+		return ctx, func() error { return nil }, nil
 	}
 	reservation, err := ledger.Reserve(ctx, provider.Demand{Operations: 1})
 	if err != nil {
 		return nil, nil, err
 	}
 	requestCtx, cancel := ledger.RequestContext(ctx)
-	return requestCtx, func() {
-		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			ledger.Close("operation deadline reached")
-		}
+	return requestCtx, func() error {
 		cancel()
+		cause := context.Cause(requestCtx)
 		reservation.Release()
+		switch {
+		case errors.Is(cause, provider.ErrRequestTimeout):
+			ledger.Close("operation deadline reached")
+			return fmt.Errorf("%w: operation deadline reached", provider.ErrBudgetExhausted)
+		case errors.Is(cause, provider.ErrTotalTimeout):
+			ledger.Close("total timeout reached")
+			return fmt.Errorf("%w: total timeout reached", provider.ErrBudgetExhausted)
+		default:
+			return nil
+		}
 	}, nil
 }
 
@@ -1033,10 +1059,8 @@ func (r *runRecorder) reserveOperation(ctx context.Context) (context.Context, fu
 		return nil, nil, err
 	}
 	return operationCtx, func() {
-		timedOut := errors.Is(operationCtx.Err(), context.DeadlineExceeded)
-		release()
-		if timedOut {
-			r.recordBudgetError(fmt.Errorf("%w: operation deadline reached", provider.ErrBudgetExhausted))
+		if err := release(); err != nil {
+			r.recordBudgetError(err)
 		}
 	}, nil
 }

@@ -125,6 +125,22 @@ func TestLedgerTotalContextUsesRunDeadline(t *testing.T) {
 	}
 }
 
+func TestLedgerTotalContextAttributesTotalTimeout(t *testing.T) {
+	budget := testBudget()
+	budget.RequestTimeout = Duration{Duration: time.Millisecond}
+	budget.TotalTimeout = Duration{Duration: 2 * time.Millisecond}
+	ledger, err := NewLedger(budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := ledger.TotalContext(context.Background())
+	defer cancel()
+	<-ctx.Done()
+	if cause := context.Cause(ctx); !errors.Is(cause, ErrTotalTimeout) {
+		t.Fatalf("total context cause = %v", cause)
+	}
+}
+
 func TestLedgerRequestContextUsesBoundedDeadline(t *testing.T) {
 	ledger, err := NewLedger(testBudget())
 	if err != nil {
@@ -138,6 +154,36 @@ func TestLedgerRequestContextUsesBoundedDeadline(t *testing.T) {
 	}
 	if remaining := time.Until(deadline); remaining <= 0 || remaining > 2*time.Second {
 		t.Fatalf("unexpected deadline remaining %s", remaining)
+	}
+}
+
+func TestLedgerRequestContextAttributesRequestTimeout(t *testing.T) {
+	budget := testBudget()
+	budget.RequestTimeout = Duration{Duration: time.Millisecond}
+	ledger, err := NewLedger(budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := ledger.RequestContext(context.Background())
+	defer cancel()
+	<-ctx.Done()
+	if cause := context.Cause(ctx); !errors.Is(cause, ErrRequestTimeout) {
+		t.Fatalf("request context cause = %v", cause)
+	}
+}
+
+func TestLedgerRequestContextPreservesEarlierParentDeadline(t *testing.T) {
+	ledger, err := NewLedger(testBudget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancelParent()
+	ctx, cancel := ledger.RequestContext(parent)
+	defer cancel()
+	<-ctx.Done()
+	if cause := context.Cause(ctx); !errors.Is(cause, context.DeadlineExceeded) || errors.Is(cause, ErrRequestTimeout) || errors.Is(cause, ErrTotalTimeout) {
+		t.Fatalf("request context inherited cause = %v", cause)
 	}
 }
 
