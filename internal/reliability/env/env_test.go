@@ -141,8 +141,10 @@ func TestK3DDriverCaptureStateWritesArtifacts(t *testing.T) {
 		t.Fatalf("CaptureState() error=%v", err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	if !strings.Contains(joined, "get all,pvc") || !strings.Contains(joined, "describe pods") || !strings.Contains(joined, "logs statefulset/myceld") {
-		t.Fatalf("capture commands missing expected kubectl calls:\n%s", joined)
+	for _, want := range []string{"get all,pvc", "describe pods", "logs statefulset/myceld", "logs -l app=myceld --all-containers=true --prefix=true --tail=5000", "logs -l app=myceld --all-containers=true --prefix=true --previous --tail=5000"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("capture commands missing %q:\n%s", want, joined)
+		}
 	}
 }
 

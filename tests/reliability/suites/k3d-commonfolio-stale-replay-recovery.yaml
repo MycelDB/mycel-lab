@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-commonfolio-stale-replay-recovery
+  description: Deterministic retained-PVC stale automation replay recovery regression.
+scenarios:
+  - path: ../scenarios/k3d-commonfolio-stale-replay-recovery/k3d-commonfolio-stale-replay-recovery.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

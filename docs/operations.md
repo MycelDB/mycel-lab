@@ -162,6 +162,7 @@ mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
+mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run
 mycel-lab run suite cluster-release-gate --dry-run
 ```
@@ -193,12 +194,21 @@ mycel-lab run suite-file tests/reliability/suites/raft-reliability-baseline.yaml
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```
 
-Suites execute scenarios sequentially and honor `stopOnFailure`.
+Suites execute scenarios sequentially and honor `stopOnFailure`. Use `--image`
+to replace every resolved scenario's daemon image while preserving the rest of
+the scenario, which supports exact A/B candidate validation. For example:
+
+```sh
+mycel-lab run suite k3d-commonfolio-stale-replay-recovery \
+  --confirm-destructive \
+  --image myceldb/mycel:v0.20.0
+```
 
 ## Interpreting results
 
 Each run writes a filesystem artifact directory containing:
 
+- `harness-build.json` — Go module and VCS build identity, when embedded by the build;
 - `resolved-scenario.json` — full resolved scenario snapshot;
 - `events.jsonl` — run, phase, actor, and pod lifecycle events;
 - `metrics.jsonl` — metric samples such as commits and latency placeholders;

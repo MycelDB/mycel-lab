@@ -271,7 +271,7 @@ func runDelete(args []string, stdout, stderr io.Writer) int {
 
 func runRun(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--image <tag>] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
 		return 0
 	}
 	if len(nonFlagArgs(args)) < 2 {
@@ -361,6 +361,11 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 		fmt.Fprintf(stderr, "invalid environment override: %v\n", err)
 		return runner.Options{}, false
 	}
+	imageOverride, err := imageOverrideFromArgs(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid --image: %v\n", err)
+		return runner.Options{}, false
+	}
 	return runner.Options{
 		DryRun:                   hasFlag(args, "--dry-run"),
 		ArtifactRoot:             flagValue(args, "--artifact-root"),
@@ -369,8 +374,33 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 		ConsoleEndpoints:         hasFlag(args, "--console-endpoints") || hasFlag(args, "--expose-console-ports"),
 		ConsolePortBase:          consolePortBase,
 		EnvironmentOverride:      environmentOverride,
+		ImageOverride:            imageOverride,
 		ProgressWriter:           stdout,
 	}, true
+}
+
+func imageOverrideFromArgs(args []string) (string, error) {
+	var value string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		imageArg := false
+		switch {
+		case arg == "--image":
+			imageArg = true
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("requires a nonempty image reference")
+			}
+			value = strings.TrimSpace(args[i+1])
+			i++
+		case strings.HasPrefix(arg, "--image="):
+			imageArg = true
+			value = strings.TrimSpace(strings.TrimPrefix(arg, "--image="))
+		}
+		if imageArg && (value == "" || strings.HasPrefix(value, "-")) {
+			return "", fmt.Errorf("requires a nonempty image reference that does not begin with '-'")
+		}
+	}
+	return value, nil
 }
 
 func environmentOverrideFromArgs(args []string) (*spec.EnvironmentSpec, error) {
@@ -517,7 +547,7 @@ func flagTakesValue(arg string) bool {
 		return false
 	}
 	switch arg {
-	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base":
+	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base", "--image":
 		return true
 	default:
 		return false

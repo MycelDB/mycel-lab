@@ -43,7 +43,7 @@ func TestSubcommandSkeletons(t *testing.T) {
 		{"list", "--help"},
 		{"show", "--help"},
 		{"delete", "--help"},
-		{"run", "scenario-file", scenarioPath, "--dry-run", "--artifact-root", artifactRoot},
+		{"run", "scenario-file", scenarioPath, "--dry-run", "--image", "myceldb/mycel:test", "--artifact-root", artifactRoot},
 		{"version"},
 	}
 	for _, args := range tests {
@@ -97,7 +97,7 @@ func TestRunRequiresTarget(t *testing.T) {
 
 func TestRunOptionsParseEnvironmentOverride(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	opts, ok := runOptionsFromArgs([]string{"--environment-driver", "compose", "--environment-namespace", "lab", "--environment-option", "composeFile=/tmp/compose.yml", "--environment-option", "grpcPorts=19091,19092"}, &stdout, &stderr)
+	opts, ok := runOptionsFromArgs([]string{"--image", " myceldb/mycel:candidate ", "--environment-driver", "compose", "--environment-namespace", "lab", "--environment-option", "composeFile=/tmp/compose.yml", "--environment-option", "grpcPorts=19091,19092"}, &stdout, &stderr)
 	if !ok {
 		t.Fatalf("runOptionsFromArgs ok=false stderr=%q", stderr.String())
 	}
@@ -109,6 +109,21 @@ func TestRunOptionsParseEnvironmentOverride(t *testing.T) {
 	}
 	if opts.EnvironmentOverride.Options["composeFile"] != "/tmp/compose.yml" || opts.EnvironmentOverride.Options["grpcPorts"] != "19091,19092" {
 		t.Fatalf("options=%+v", opts.EnvironmentOverride.Options)
+	}
+	if opts.ImageOverride != "myceldb/mycel:candidate" {
+		t.Fatalf("ImageOverride=%q", opts.ImageOverride)
+	}
+}
+
+func TestRunOptionsRejectInvalidImageOverride(t *testing.T) {
+	for _, args := range [][]string{{"--image"}, {"--image="}, {"--image", "--dry-run"}, {"--image=--dry-run"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			_, ok := runOptionsFromArgs(args, &stdout, &stderr)
+			if ok || !strings.Contains(stderr.String(), "invalid --image") {
+				t.Fatalf("runOptionsFromArgs(%v) ok=%t stderr=%q", args, ok, stderr.String())
+			}
+		})
 	}
 }
 

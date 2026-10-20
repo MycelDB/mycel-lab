@@ -93,7 +93,7 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "image") == "" {
 			return fmt.Errorf("%s requires target.image", event.Type)
 		}
-	case "commonfolio-automation-seed", "commonfolio-automation-diagnostics", "log-assert-absent":
+	case "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent":
 		return nil
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {

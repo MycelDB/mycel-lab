@@ -54,6 +54,21 @@ type clusterAssertionNodeReport struct {
 	Errors           []string `json:"errors,omitempty"`
 }
 
+func captureClusterAssertionsOnce(ctx context.Context, sink *artifacts.Sink, scenario spec.ResolvedScenario, driver env.EnvironmentDriver, environment env.Environment, nodes []env.Node) error {
+	required := finalClusterAssertionOptions(scenario.Assertions)
+	report := evaluateClusterAssertions(ctx, required, driver, environment, nodes, scenario.Cluster.Nodes)
+	now := time.Now().UTC()
+	report.Attempts = 1
+	report.FirstAttempt = now
+	report.LastAttempt = now
+	_, _ = sink.WriteJSON("oracle/cluster-report.json", report)
+	_, _ = sink.WriteText("oracle/cluster-report.md", formatClusterAssertionReport(report))
+	if !report.OK {
+		return fmt.Errorf("cluster assertions failed: %s", strings.Join(report.Errors, "; "))
+	}
+	return nil
+}
+
 func runFinalClusterAssertions(ctx context.Context, sink *artifacts.Sink, scenario spec.ResolvedScenario, driver env.EnvironmentDriver, environment env.Environment, nodes []env.Node, live bool) error {
 	required := finalClusterAssertionOptions(scenario.Assertions)
 	if !required.RequireHealthyCluster && !required.RequireSharedClusterIdentity {
