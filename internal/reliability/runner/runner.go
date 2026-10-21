@@ -200,8 +200,8 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	} else if opts.DryRun {
 		effectiveEnvironment.Driver = "dry-run"
 	}
+	applyComposeImageOverride(&effectiveEnvironment, imageOverride)
 	scenario.Environment = effectiveEnvironment
-	applyComposeImageOverride(&scenario.Environment, imageOverride)
 	if err := writeInitialArtifacts(sink, scenario); err != nil {
 		return finish(RunFailed, err)
 	}

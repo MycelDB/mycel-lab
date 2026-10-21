@@ -20,7 +20,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
-- Compose runs now apply `--image` as a Compose-only `MYCEL_IMAGE` override to every lifecycle command and require one nonempty resolved image ID for every configured daemon service before capture can succeed, binding semantic acceptance artifacts to an exact-head tag without leaking Compose options into k3d runs (#46).
+- Compose runs now carry `--image` through the effective environment passed to driver preflight and creation, apply it as a Compose-only `MYCEL_IMAGE` override to every lifecycle command, and require one nonempty resolved image ID for every configured daemon service before capture can succeed, binding semantic acceptance artifacts to an exact-head tag without leaking Compose options into k3d runs (#46).
 - The SGT4 rebuild phase now creates an eligible semantic record while rebuild state is running and asserts exact pinned-target baseline, delta-record, freshness, generation, and epoch provenance (#46).
 - Definition import/export and catalog storage now include provider profiles; semantic scenarios may use `providerProfileRef` or `--provider-profile`, while required provider-owned limits fail unless their enforcement source is advertised.
 - Documentation checks now parse JSON contracts and examples in addition to Markdown and reliability YAML.

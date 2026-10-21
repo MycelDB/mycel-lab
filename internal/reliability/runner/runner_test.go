@@ -245,6 +245,29 @@ func TestRunScenarioRoutesImageOverrideThroughK3DClusterImageOnly(t *testing.T) 
 	}
 }
 
+func TestRunScenarioRoutesImageOverrideThroughComposeCreate(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	scenario.Environment.Driver = "compose"
+	scenario.Environment.Options = map[string]any{"composeFile": "compose.yml"}
+	scenario.ActorGroups = nil
+	scenario.Phases = nil
+	scenario.Assertions = nil
+	driver := &recordingDriver{}
+	const image = "local/mycel:exact-head"
+	if _, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ImageOverride: image, EnvironmentDriver: driver}); err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	if got := driver.createdScenario.Environment.Options["imageOverride"]; got != image {
+		t.Fatalf("Compose scenario imageOverride=%v, want %q", got, image)
+	}
+	if got := driver.preflightEnvironmentSpec.Options["imageOverride"]; got != image {
+		t.Fatalf("Compose Preflight environment imageOverride=%v, want %q", got, image)
+	}
+	if got := driver.createdEnvironmentSpec.Options["imageOverride"]; got != image {
+		t.Fatalf("Compose Create environment imageOverride=%v, want %q", got, image)
+	}
+}
+
 func TestApplyComposeImageOverrideDoesNotLeakIntoK3D(t *testing.T) {
 	compose := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": "compose.yml"}}
 	applyComposeImageOverride(&compose, " local/mycel:head ")
@@ -560,19 +583,25 @@ func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
 }
 
 type recordingDriver struct {
-	deleted         bool
-	captured        int
-	createdScenario spec.ResolvedScenario
+	deleted                  bool
+	captured                 int
+	createdScenario          spec.ResolvedScenario
+	preflightEnvironmentSpec spec.EnvironmentSpec
+	createdEnvironmentSpec   spec.EnvironmentSpec
 }
 
 func (d *recordingDriver) Name() string { return "test" }
 func (d *recordingDriver) Capabilities() env.CapabilitySet {
 	return env.NewCapabilitySet(env.CapabilityArtifacts, env.CapabilityPerNodeEndpoints)
 }
-func (d *recordingDriver) Validate(spec.EnvironmentSpec) error                   { return nil }
-func (d *recordingDriver) Preflight(context.Context, spec.EnvironmentSpec) error { return nil }
-func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenario, _ spec.EnvironmentSpec) (env.Environment, error) {
+func (d *recordingDriver) Validate(spec.EnvironmentSpec) error { return nil }
+func (d *recordingDriver) Preflight(_ context.Context, environmentSpec spec.EnvironmentSpec) error {
+	d.preflightEnvironmentSpec = environmentSpec
+	return nil
+}
+func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenario, environmentSpec spec.EnvironmentSpec) (env.Environment, error) {
 	d.createdScenario = scenario
+	d.createdEnvironmentSpec = environmentSpec
 	return env.Environment{Name: scenario.Metadata.Name, Driver: "test", Namespace: "test", Metadata: map[string]string{"nodeCount": "1"}}, nil
 }
 func (d *recordingDriver) WaitReady(context.Context, env.Environment) error { return nil }
