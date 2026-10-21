@@ -54,7 +54,7 @@ semantic:
     includeProperties: [text]
     minimumTextLength: 1
     physicalIndex: exact
-    dirtyCooldown: 0s
+    dirtyCooldown: 1ms
     maxBatchSize: 16
     workerConcurrency: 1
   maintenance:

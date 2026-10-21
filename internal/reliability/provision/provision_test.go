@@ -57,6 +57,63 @@ func TestPlanScenarioCreatesWriterResourcesAndReaderAssignments(t *testing.T) {
 	}
 }
 
+func TestPlanScenarioQualifiesWriterResourcesByActorGroup(t *testing.T) {
+	profile := spec.ActorProfile{Behavior: map[string]any{
+		"type": "semantic-control",
+		"dataScope": map[string]any{
+			"space":  map[string]any{"prefix": "semantic-contract-space"},
+			"domain": map[string]any{"prefix": "semantic-contract-domain"},
+		},
+	}}
+	scenario := spec.ResolvedScenario{ActorGroups: []spec.ResolvedActorGroup{
+		{ActorGroupSpec: spec.ActorGroupSpec{Name: "semantic-controller", Count: 1}, Profile: profile},
+		{ActorGroupSpec: spec.ActorGroupSpec{Name: "semantic-outsider", Count: 1}, Profile: profile},
+	}}
+	resources, err := PlanScenario(scenario, Options{RunID: "semantic-contract-20261021-103741", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources.Spaces) != 2 || len(resources.Domains) != 2 {
+		t.Fatalf("spaces=%d domains=%d, want 2/2", len(resources.Spaces), len(resources.Domains))
+	}
+	if resources.Spaces[0].Name == resources.Spaces[1].Name {
+		t.Fatalf("actor groups share space name %q", resources.Spaces[0].Name)
+	}
+	if resources.Domains[0].Key == resources.Domains[1].Key {
+		t.Fatalf("actor groups share domain key %q", resources.Domains[0].Key)
+	}
+	for i, group := range []string{"semantic-controller", "semantic-outsider"} {
+		if !strings.Contains(resources.Spaces[i].Name, group) || !strings.Contains(resources.Domains[i].Key, group) {
+			t.Fatalf("resource scope does not include actor group %q: space=%q domain=%q", group, resources.Spaces[i].Name, resources.Domains[i].Key)
+		}
+	}
+}
+
+func TestComposeSemanticContractTimingCanReachMaintenanceDeadline(t *testing.T) {
+	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-semantic-graph-contract", "compose-semantic-graph-contract.yaml")
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
+	scenario, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{
+		ProviderProfileOverride: profilePath,
+		ProviderDryRun:          true,
+		ProviderManifest:        provider.BuiltInHarnessManifest(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scenario.Semantic == nil || scenario.ProviderProfile == nil {
+		t.Fatal("semantic scenario or provider profile was not resolved")
+	}
+	cooldown := scenario.Semantic.Rule.DirtyCooldown.Duration
+	maintenanceTimeout := scenario.Semantic.Maintenance.Timeout.Duration
+	requestTimeout := scenario.ProviderProfile.Profile.Budgets.RequestTimeout.Duration
+	if cooldown <= 0 || cooldown >= maintenanceTimeout {
+		t.Fatalf("dirty cooldown=%s must be positive and below maintenance timeout=%s", cooldown, maintenanceTimeout)
+	}
+	if requestTimeout <= maintenanceTimeout {
+		t.Fatalf("request timeout=%s must exceed maintenance timeout=%s", requestTimeout, maintenanceTimeout)
+	}
+}
+
 func TestPlanScenarioCreatesDeterministicSafeSemanticPlan(t *testing.T) {
 	scenario, err := catalog.ResolveScenarioFile(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml"), catalog.ResolveOptions{})
 	if err != nil {

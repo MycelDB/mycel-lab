@@ -170,8 +170,8 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 				actorID := fmt.Sprintf("%s-%d", group.Name, i)
 				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, sanitizeName(group.Name), i)
 				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, sanitizeName(group.Name), i)
-				spaceName := scopedName(shortRun, stringFromNested(group.Profile.Behavior, "dataScope", "space", "prefix", "space"), i)
-				domainKey := scopedName(shortRun, stringFromNested(group.Profile.Behavior, "dataScope", "domain", "prefix", "domain"), i)
+				spaceName := scopedActorResourceName(shortRun, group.Name, stringFromNested(group.Profile.Behavior, "dataScope", "space", "prefix", "space"), i)
+				domainKey := scopedActorResourceName(shortRun, group.Name, stringFromNested(group.Profile.Behavior, "dataScope", "domain", "prefix", "domain"), i)
 				domainName := domainKey
 				addr := daemonAddr(opts.DaemonAddrs, len(resources.Assignments))
 				resources.Principals = append(resources.Principals, Principal{ActorID: actorID, GroupName: group.Name, Username: username, Password: password, Role: "writer"})
@@ -530,8 +530,8 @@ func daemonAddr(addrs []string, index int) string {
 	return addrs[index%len(addrs)]
 }
 
-func scopedName(run, prefix string, index int) string {
-	return fmt.Sprintf("mlab-%s-%s-%d", sanitizeName(run), sanitizeName(prefix), index)
+func scopedActorResourceName(run, group, prefix string, index int) string {
+	return fmt.Sprintf("mlab-%s-%s-%s-%d", sanitizeName(run), sanitizeName(group), sanitizeName(prefix), index)
 }
 
 func shortRunID(runID string) string {

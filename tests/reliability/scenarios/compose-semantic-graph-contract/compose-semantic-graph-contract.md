@@ -46,7 +46,7 @@ flowchart LR
 
 ## Tunable parameters
 
-The scenario fixes bounded 30-second maintenance deadlines, 100-millisecond polling, finite backfill/maintenance batches, explicit page sizes, and deterministic score tolerances. Change these only with corresponding contract and artifact review.
+The scenario fixes a positive 1-millisecond rule cooldown, bounded 30-second maintenance deadlines, a finite 45-second harness operation timeout, 100-millisecond polling, finite backfill/maintenance batches, explicit page sizes, and deterministic score tolerances. The operation timeout intentionally exceeds the maintenance deadline so the scenario can report its own bounded convergence result. Change these only with corresponding contract and artifact review.
 
 ## Evidence and artifacts
 
