@@ -225,6 +225,26 @@ func TestRunScenarioImageOverrideIsRecordedInResolvedArtifacts(t *testing.T) {
 	}
 }
 
+func TestRunScenarioRoutesImageOverrideThroughK3DClusterImageOnly(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	scenario.Environment.Driver = "k3d"
+	scenario.Environment.Options = map[string]any{"clusterNamePrefix": "mlab"}
+	scenario.ActorGroups = nil
+	scenario.Phases = nil
+	scenario.Assertions = nil
+	driver := &recordingDriver{}
+	const image = "local/mycel:exact-head"
+	if _, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ImageOverride: image, EnvironmentDriver: driver}); err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	if driver.createdScenario.Cluster.Image != image {
+		t.Fatalf("K3D scenario image=%q, want %q", driver.createdScenario.Cluster.Image, image)
+	}
+	if _, leaked := driver.createdScenario.Environment.Options["imageOverride"]; leaked {
+		t.Fatalf("K3D scenario received Compose-only imageOverride: %+v", driver.createdScenario.Environment.Options)
+	}
+}
+
 func TestApplyComposeImageOverrideDoesNotLeakIntoK3D(t *testing.T) {
 	compose := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": "compose.yml"}}
 	applyComposeImageOverride(&compose, " local/mycel:head ")
@@ -540,8 +560,9 @@ func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
 }
 
 type recordingDriver struct {
-	deleted  bool
-	captured int
+	deleted         bool
+	captured        int
+	createdScenario spec.ResolvedScenario
 }
 
 func (d *recordingDriver) Name() string { return "test" }
@@ -551,6 +572,7 @@ func (d *recordingDriver) Capabilities() env.CapabilitySet {
 func (d *recordingDriver) Validate(spec.EnvironmentSpec) error                   { return nil }
 func (d *recordingDriver) Preflight(context.Context, spec.EnvironmentSpec) error { return nil }
 func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenario, _ spec.EnvironmentSpec) (env.Environment, error) {
+	d.createdScenario = scenario
 	return env.Environment{Name: scenario.Metadata.Name, Driver: "test", Namespace: "test", Metadata: map[string]string{"nodeCount": "1"}}, nil
 }
 func (d *recordingDriver) WaitReady(context.Context, env.Environment) error { return nil }
