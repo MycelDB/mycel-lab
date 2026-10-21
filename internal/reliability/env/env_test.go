@@ -199,6 +199,24 @@ func TestK3DDriverUpdateStatefulSetImageWaitsForRollout(t *testing.T) {
 
 type fakeRunner struct{ commands []string }
 
+type composeCaptureRunner struct {
+	commands     []string
+	missingImage bool
+}
+
+func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, " images --format json ") {
+		if r.missingImage {
+			return executil.Result{Command: cmd, Stdout: "[]\n"}, nil
+		}
+		service := args[len(args)-1]
+		return executil.Result{Command: cmd, Stdout: `[{"ID":"sha256:` + service + `","ContainerName":"mlab-test-` + service + `-1","Repository":"local/mycel","Tag":"head"}]` + "\n"}, nil
+	}
+	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
@@ -275,6 +293,46 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
 		}
+	}
+}
+
+func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
+	environment := Environment{Name: "mlab-test", Driver: "compose", Metadata: map[string]string{"composeFile": "compose.yml", "projectName": "mlab-test", "serviceNames": "myceld-a,myceld-b", "imageOverride": "local/mycel:head"}}
+	for _, tc := range []struct {
+		name         string
+		missingImage bool
+		wantError    bool
+	}{
+		{name: "complete"},
+		{name: "missing", missingImage: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &composeCaptureRunner{missingImage: tc.missingImage}
+			driver := ComposeDriver{Confirmed: true, Runner: runner}
+			sink, err := artifacts.NewSink(t.TempDir())
+			if err != nil {
+				t.Fatalf("NewSink() error=%v", err)
+			}
+			err = driver.CaptureState(context.Background(), environment, sink)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "image evidence") {
+					t.Fatalf("CaptureState() error=%v, want image evidence failure", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CaptureState() error=%v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "compose-images.jsonl"))
+			if err != nil {
+				t.Fatalf("read compose image evidence: %v", err)
+			}
+			for _, want := range []string{"sha256:myceld-a", "sha256:myceld-b", "local/mycel:head"} {
+				if !strings.Contains(string(data), want) {
+					t.Fatalf("compose image evidence missing %q: %s", want, data)
+				}
+			}
+		})
 	}
 }
 

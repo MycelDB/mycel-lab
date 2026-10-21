@@ -217,8 +217,24 @@ func TestRunScenarioImageOverrideIsRecordedInResolvedArtifacts(t *testing.T) {
 	if resolved.Cluster.Image != candidateImage {
 		t.Fatalf("resolved image=%q, want %q", resolved.Cluster.Image, candidateImage)
 	}
+	if _, leaked := resolved.Environment.Options["imageOverride"]; leaked {
+		t.Fatalf("dry-run/non-Compose environment received Compose-only imageOverride: %+v", resolved.Environment.Options)
+	}
 	if scenario.Cluster.Image != originalImage {
 		t.Fatalf("input scenario image mutated to %q", scenario.Cluster.Image)
+	}
+}
+
+func TestApplyComposeImageOverrideDoesNotLeakIntoK3D(t *testing.T) {
+	compose := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": "compose.yml"}}
+	applyComposeImageOverride(&compose, " local/mycel:head ")
+	if got := compose.Options["imageOverride"]; got != "local/mycel:head" {
+		t.Fatalf("Compose imageOverride=%v", got)
+	}
+	k3d := spec.EnvironmentSpec{Driver: "k3d", Options: map[string]any{"clusterNamePrefix": "mlab"}}
+	applyComposeImageOverride(&k3d, "local/mycel:head")
+	if _, exists := k3d.Options["imageOverride"]; exists {
+		t.Fatalf("k3d received Compose-only imageOverride: %+v", k3d.Options)
 	}
 }
 

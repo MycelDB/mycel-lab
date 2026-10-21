@@ -185,12 +185,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if opts.EnvironmentOverride != nil {
 		scenario.Environment = mergeEnvironmentOverride(scenario.Environment, *opts.EnvironmentOverride)
 	}
-	if image := strings.TrimSpace(opts.ImageOverride); image != "" {
-		scenario.Cluster.Image = image
-		if scenario.Environment.Options == nil {
-			scenario.Environment.Options = map[string]any{}
-		}
-		scenario.Environment.Options["imageOverride"] = image
+	imageOverride := strings.TrimSpace(opts.ImageOverride)
+	if imageOverride != "" {
+		scenario.Cluster.Image = imageOverride
 	}
 	driver := opts.EnvironmentDriver
 	effectiveEnvironment := scenario.Environment
@@ -204,6 +201,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		effectiveEnvironment.Driver = "dry-run"
 	}
 	scenario.Environment = effectiveEnvironment
+	applyComposeImageOverride(&scenario.Environment, imageOverride)
 	if err := writeInitialArtifacts(sink, scenario); err != nil {
 		return finish(RunFailed, err)
 	}
@@ -453,6 +451,18 @@ func markLastPassedPhaseFailed(phases []PhaseState) {
 			return
 		}
 	}
+}
+
+func applyComposeImageOverride(environment *spec.EnvironmentSpec, image string) {
+	if environment == nil || strings.TrimSpace(image) == "" || !strings.EqualFold(strings.TrimSpace(environment.Driver), "compose") {
+		return
+	}
+	options := make(map[string]any, len(environment.Options)+1)
+	for key, value := range environment.Options {
+		options[key] = value
+	}
+	options["imageOverride"] = strings.TrimSpace(image)
+	environment.Options = options
 }
 
 func mergeEnvironmentOverride(base spec.EnvironmentSpec, override spec.EnvironmentSpec) spec.EnvironmentSpec {
