@@ -168,8 +168,9 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 		case "graph-transaction", "semantic-control":
 			for i := 0; i < group.Count; i++ {
 				actorID := fmt.Sprintf("%s-%d", group.Name, i)
-				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, sanitizeName(group.Name), i)
-				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, sanitizeName(group.Name), i)
+				groupResourceName := spec.NormalizeActorGroupResourceName(group.Name)
+				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, groupResourceName, i)
+				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, groupResourceName, i)
 				spaceName := scopedActorResourceName(shortRun, group.Name, stringFromNested(group.Profile.Behavior, "dataScope", "space", "prefix", "space"), i)
 				domainKey := scopedActorResourceName(shortRun, group.Name, stringFromNested(group.Profile.Behavior, "dataScope", "domain", "prefix", "domain"), i)
 				domainName := domainKey
@@ -192,8 +193,9 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 			}
 			for i := 0; i < group.Count; i++ {
 				actorID := fmt.Sprintf("%s-%d", group.Name, i)
-				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, sanitizeName(group.Name), i)
-				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, sanitizeName(group.Name), i)
+				groupResourceName := spec.NormalizeActorGroupResourceName(group.Name)
+				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, groupResourceName, i)
+				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, groupResourceName, i)
 				target := targets[i%len(targets)]
 				addr := daemonAddr(opts.DaemonAddrs, len(resources.Assignments))
 				resources.Principals = append(resources.Principals, Principal{ActorID: actorID, GroupName: group.Name, Username: username, Password: password, Role: "reader"})
@@ -531,7 +533,7 @@ func daemonAddr(addrs []string, index int) string {
 }
 
 func scopedActorResourceName(run, group, prefix string, index int) string {
-	return fmt.Sprintf("mlab-%s-%s-%s-%d", sanitizeName(run), sanitizeName(group), sanitizeName(prefix), index)
+	return fmt.Sprintf("mlab-%s-%s-%s-%d", sanitizeName(run), spec.NormalizeActorGroupResourceName(group), sanitizeName(prefix), index)
 }
 
 func shortRunID(runID string) string {

@@ -71,6 +71,7 @@ phases:
           nodeId: 00000000-0000-4000-8000-000000000101
           labels: [Document]
           text: axis-0
+          captureRevisionAs: initial-baseline-revision
           properties:
             title: primary-axis-zero
       - type: semantic-node-create
@@ -85,7 +86,6 @@ phases:
           nodeId: 00000000-0000-4000-8000-000000000103
           labels: [Document]
           text: axis-2
-          captureRevisionAs: initial-baseline-revision
           properties:
             title: secondary-confounder
   - name: create-rule-backfill-and-converge

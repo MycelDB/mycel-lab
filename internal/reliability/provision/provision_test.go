@@ -112,6 +112,30 @@ func TestComposeSemanticContractTimingCanReachMaintenanceDeadline(t *testing.T) 
 	if requestTimeout <= maintenanceTimeout {
 		t.Fatalf("request timeout=%s must exceed maintenance timeout=%s", requestTimeout, maintenanceTimeout)
 	}
+	var capturedNodeID, assertedNodeID string
+	for _, phase := range scenario.Phases {
+		for _, event := range phase.Events {
+			if event.Target["captureRevisionAs"] == "initial-baseline-revision" {
+				capturedNodeID, _ = event.Target["nodeId"].(string)
+			}
+			if event.Target["expectSourceRevisionFrom"] != "initial-baseline-revision" {
+				continue
+			}
+			switch ids := event.Target["expectedNodeIds"].(type) {
+			case []any:
+				if len(ids) > 0 {
+					assertedNodeID, _ = ids[0].(string)
+				}
+			case []string:
+				if len(ids) > 0 {
+					assertedNodeID = ids[0]
+				}
+			}
+		}
+	}
+	if capturedNodeID == "" || capturedNodeID != assertedNodeID {
+		t.Fatalf("initial source-revision capture node=%q does not match asserted result node=%q", capturedNodeID, assertedNodeID)
+	}
 }
 
 func TestPlanScenarioCreatesDeterministicSafeSemanticPlan(t *testing.T) {

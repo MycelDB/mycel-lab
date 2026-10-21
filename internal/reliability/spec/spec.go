@@ -442,6 +442,24 @@ func (p ActorProfile) Validate() error {
 	return nil
 }
 
+func NormalizeActorGroupResourceName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
 func DefaultScenario(s *Scenario) {
 	if s.Environment.Driver == "" {
 		s.Environment.Driver = "k3d"
@@ -482,14 +500,23 @@ func (s Scenario) Validate() error {
 		return errors.New("actorGroups must not be empty")
 	}
 	seenActors := map[string]bool{}
+	seenActorResourceNames := map[string]string{}
 	for _, group := range s.ActorGroups {
-		if group.Name == "" {
+		if strings.TrimSpace(group.Name) == "" {
 			return errors.New("actorGroups[].name is required")
 		}
 		if seenActors[group.Name] {
 			return fmt.Errorf("duplicate actor group %q", group.Name)
 		}
 		seenActors[group.Name] = true
+		resourceName := NormalizeActorGroupResourceName(group.Name)
+		if resourceName == "" {
+			return fmt.Errorf("actor group %q does not contain a resource-safe letter or digit", group.Name)
+		}
+		if existing, ok := seenActorResourceNames[resourceName]; ok {
+			return fmt.Errorf("actor groups %q and %q normalize to the same resource name %q", existing, group.Name, resourceName)
+		}
+		seenActorResourceNames[resourceName] = group.Name
 		if group.ProfileRef == "" {
 			return fmt.Errorf("actor group %q profileRef is required", group.Name)
 		}
