@@ -114,11 +114,18 @@ func TestComposeSemanticContractTimingAndInitialBackfillProvenance(t *testing.T)
 	}
 	const initialBackfillTarget = "initial-backfill-target-revision"
 	var seedEvents []spec.EventSpec
+	initialBackfillForced := false
 	initialAssertions := 0
 	for _, phase := range scenario.Phases {
 		switch phase.Name {
 		case "seed-before-rule":
 			seedEvents = phase.Events
+		case "create-rule-backfill-and-converge":
+			for _, event := range phase.Events {
+				if event.Type == "semantic-backfill" {
+					initialBackfillForced, _ = event.Target["force"].(bool)
+				}
+			}
 		case "prove-direct-indexed-retrieval":
 			for _, event := range phase.Events {
 				if event.Type != "semantic-search-assert" {
@@ -133,6 +140,9 @@ func TestComposeSemanticContractTimingAndInitialBackfillProvenance(t *testing.T)
 	}
 	if len(seedEvents) != 3 {
 		t.Fatalf("initial seed event count=%d, want 3", len(seedEvents))
+	}
+	if !initialBackfillForced {
+		t.Fatal("initial pinned semantic backfill must force publication over racing historical maintenance")
 	}
 	for index, event := range seedEvents {
 		capture, _ := event.Target["captureRevisionAs"].(string)

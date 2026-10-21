@@ -96,7 +96,7 @@ phases:
           semantic: deferred
       - type: semantic-backfill
         target:
-          force: false
+          force: true
           limit: 16
           expectedSelected: 3
           minimumGenerated: 3
