@@ -35,7 +35,7 @@ flowchart LR
 
 1. Seed graph fixtures before creating the rule.
 2. Create the deferred rule, backfill, and reach the Level 2/3 barrier.
-3. Prove ranking, pagination, provenance, and filtering.
+3. Prove ranking, pagination, provenance, and filtering. Initial backfill results must carry the exact pinned target revision captured from the final pre-rule graph mutation; later incremental results remain bound to their own acknowledged mutation revisions.
 4. Exercise post-rule create, excluded/projected update, transaction negatives, isolation, and deletion.
 5. Disable and re-enable the rule.
 6. Rotate projection generation, prove old records stale, create an eligible `Document` while the rebuild is running, then prove pinned baseline provenance plus the delta record's exact later revision, generation, and rebuild epoch.
@@ -50,7 +50,7 @@ The scenario fixes a positive 1-millisecond rule cooldown, bounded 30-second mai
 
 ## Evidence and artifacts
 
-Required events emit graph transaction/revision evidence, maintenance observations, reliability frontiers, direct semantic results, record IDs, safe provenance, filter diagnostics, rebuild state, and cleanup outcomes. Compose capture also requires a nonempty resolved image ID for each configured daemon service and records it in `environment/compose-images.jsonl`; missing or malformed image evidence fails the run. Final artifacts must pass the redaction scan. Dry-run output is planning evidence only.
+Required events emit graph transaction/revision evidence, maintenance observations, reliability frontiers, direct semantic results, record IDs, safe provenance, filter diagnostics, rebuild state, and cleanup outcomes. The initial full backfill is evaluated against its graph snapshot revision rather than the creation revision of whichever result happens to rank first. Compose capture also requires a nonempty resolved image ID for each configured daemon service and records it in `environment/compose-images.jsonl`; missing or malformed image evidence fails the run. Final artifacts must pass the redaction scan. Dry-run output is planning evidence only.
 
 ## Common failure modes
 

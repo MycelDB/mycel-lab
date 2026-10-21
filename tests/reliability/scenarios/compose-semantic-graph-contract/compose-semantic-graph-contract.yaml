@@ -71,7 +71,6 @@ phases:
           nodeId: 00000000-0000-4000-8000-000000000101
           labels: [Document]
           text: axis-0
-          captureRevisionAs: initial-baseline-revision
           properties:
             title: primary-axis-zero
       - type: semantic-node-create
@@ -86,6 +85,7 @@ phases:
           nodeId: 00000000-0000-4000-8000-000000000103
           labels: [Document]
           text: axis-2
+          captureRevisionAs: initial-backfill-target-revision
           properties:
             title: secondary-confounder
   - name: create-rule-backfill-and-converge
@@ -119,7 +119,7 @@ phases:
           limit: 3
           minimumScore: 0.99
           requireProvenance: true
-          expectSourceRevisionFrom: initial-baseline-revision
+          expectSourceRevisionFrom: initial-backfill-target-revision
           expectGenerationFrom: generation-v1
           captureRecordAs: primary-v1
           captureConfigurationHashAs: configuration-v1
@@ -137,6 +137,7 @@ phases:
           allPages: true
           expectedResultCount: 3
           requireProvenance: true
+          expectSourceRevisionFrom: initial-backfill-target-revision
           expectedScores: [1.0, 0.0, 0.0]
           scoreTolerance: 0.000000001
           expectedNodeIds:
@@ -155,6 +156,7 @@ phases:
             title: lexical-axis-0-confounder
           expectedResultCount: 1
           requireProvenance: true
+          expectSourceRevisionFrom: initial-backfill-target-revision
           expectedNodeIds:
             - 00000000-0000-4000-8000-000000000102
   - name: post-rule-create-and-converge

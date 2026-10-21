@@ -89,7 +89,7 @@ func TestPlanScenarioQualifiesWriterResourcesByActorGroup(t *testing.T) {
 	}
 }
 
-func TestComposeSemanticContractTimingCanReachMaintenanceDeadline(t *testing.T) {
+func TestComposeSemanticContractTimingAndInitialBackfillProvenance(t *testing.T) {
 	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-semantic-graph-contract", "compose-semantic-graph-contract.yaml")
 	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
 	scenario, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{
@@ -112,29 +112,40 @@ func TestComposeSemanticContractTimingCanReachMaintenanceDeadline(t *testing.T) 
 	if requestTimeout <= maintenanceTimeout {
 		t.Fatalf("request timeout=%s must exceed maintenance timeout=%s", requestTimeout, maintenanceTimeout)
 	}
-	var capturedNodeID, assertedNodeID string
+	const initialBackfillTarget = "initial-backfill-target-revision"
+	var seedEvents []spec.EventSpec
+	initialAssertions := 0
 	for _, phase := range scenario.Phases {
-		for _, event := range phase.Events {
-			if event.Target["captureRevisionAs"] == "initial-baseline-revision" {
-				capturedNodeID, _ = event.Target["nodeId"].(string)
-			}
-			if event.Target["expectSourceRevisionFrom"] != "initial-baseline-revision" {
-				continue
-			}
-			switch ids := event.Target["expectedNodeIds"].(type) {
-			case []any:
-				if len(ids) > 0 {
-					assertedNodeID, _ = ids[0].(string)
+		switch phase.Name {
+		case "seed-before-rule":
+			seedEvents = phase.Events
+		case "prove-direct-indexed-retrieval":
+			for _, event := range phase.Events {
+				if event.Type != "semantic-search-assert" {
+					continue
 				}
-			case []string:
-				if len(ids) > 0 {
-					assertedNodeID = ids[0]
+				initialAssertions++
+				if got := event.Target["expectSourceRevisionFrom"]; got != initialBackfillTarget {
+					t.Fatalf("initial retrieval source-revision capture=%v, want %q", got, initialBackfillTarget)
 				}
 			}
 		}
 	}
-	if capturedNodeID == "" || capturedNodeID != assertedNodeID {
-		t.Fatalf("initial source-revision capture node=%q does not match asserted result node=%q", capturedNodeID, assertedNodeID)
+	if len(seedEvents) != 3 {
+		t.Fatalf("initial seed event count=%d, want 3", len(seedEvents))
+	}
+	for index, event := range seedEvents {
+		capture, _ := event.Target["captureRevisionAs"].(string)
+		if index == len(seedEvents)-1 {
+			if capture != initialBackfillTarget {
+				t.Fatalf("final pre-rule revision capture=%q, want %q", capture, initialBackfillTarget)
+			}
+		} else if capture != "" {
+			t.Fatalf("pre-rule event %d unexpectedly captures revision %q", index, capture)
+		}
+	}
+	if initialAssertions != 3 {
+		t.Fatalf("initial semantic retrieval assertions=%d, want 3", initialAssertions)
 	}
 }
 
