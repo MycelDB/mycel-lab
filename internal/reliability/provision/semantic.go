@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	mycel "github.com/myceldb/mycel-go-sdk"
@@ -290,6 +291,10 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 		err := step.call(callCtx)
 		cancel()
 		if err != nil && status.Code(err) != codes.NotFound {
+			if semanticCleanupRetainedByAudit(err) {
+				setSemanticCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit references")
+				continue
+			}
 			message := fmt.Sprintf("delete %s %s: %v", step.resource, step.id, err)
 			failures = append(failures, message)
 			setSemanticCleanupStatus(resources, step.resource, "failed", err.Error())
@@ -298,6 +303,57 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 		setSemanticCleanupStatus(resources, step.resource, "completed", "")
 	}
 	return failures
+}
+
+func semanticCleanupRetainedByAudit(err error) bool {
+	if status.Code(err) != codes.FailedPrecondition {
+		return false
+	}
+	message := status.Convert(err).Message()
+	const marker = " is referenced by "
+	index := strings.Index(message, marker)
+	if index < 0 {
+		return false
+	}
+	references := strings.Split(message[index+len(marker):], ",")
+	if len(references) == 0 {
+		return false
+	}
+	auditReferenceCount := 0
+	for index, reference := range references {
+		reference = strings.TrimSpace(reference)
+		if semanticAuditReferenceToken(reference) {
+			auditReferenceCount++
+			continue
+		}
+		if auditReferenceCount > 0 && index == len(references)-1 && semanticAuditTruncationToken(reference) {
+			continue
+		}
+		return false
+	}
+	return auditReferenceCount > 0
+}
+
+var semanticAuditReferencePattern = regexp.MustCompile(`^(usage_event|policy_decision):[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func semanticAuditReferenceToken(reference string) bool {
+	return semanticAuditReferencePattern.MatchString(reference)
+}
+
+func semanticAuditTruncationToken(reference string) bool {
+	if !strings.HasPrefix(reference, "...") || !strings.HasSuffix(reference, " more") {
+		return false
+	}
+	digits := strings.TrimSuffix(strings.TrimPrefix(reference, "..."), " more")
+	if digits == "" || digits[0] == '0' {
+		return false
+	}
+	for _, digit := range digits {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func setSemanticCleanupStatus(resources *SemanticResources, resource, state, message string) {

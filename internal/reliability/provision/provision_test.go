@@ -11,6 +11,8 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestPlanScenarioCreatesWriterResourcesAndReaderAssignments(t *testing.T) {
@@ -194,6 +196,39 @@ func TestCleanupAcrossSpaceBarrierRetriesAuditReferencedResources(t *testing.T) 
 			}
 			if want := []string{"semantic", "spaces", "semantic"}; !reflect.DeepEqual(calls, want) {
 				t.Fatalf("cleanup order=%v, want %v", calls, want)
+			}
+		})
+	}
+}
+
+func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
+	const (
+		usageOne    = "usage_event:11111111-1111-4111-8111-111111111111"
+		usageTwo    = "usage_event:22222222-2222-4222-8222-222222222222"
+		decisionOne = "policy_decision:33333333-3333-4333-8333-333333333333"
+	)
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "usage events", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", "+usageTwo), want: true},
+		{name: "policy decisions with truncated tail", err: status.Error(codes.FailedPrecondition, "access policy is referenced by "+decisionOne+", ...6 more"), want: true},
+		{name: "mixed audit types", err: status.Error(codes.FailedPrecondition, "resource is referenced by "+usageOne+", "+decisionOne), want: true},
+		{name: "mixed reference types", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", credential_grant:44444444-4444-4444-8444-444444444444")},
+		{name: "audit token with trailing reference", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+" credential_grant:44444444-4444-4444-8444-444444444444")},
+		{name: "empty audit id", err: status.Error(codes.FailedPrecondition, "credential is referenced by usage_event:")},
+		{name: "malformed truncation", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", ...credential_grant:grant-1 more")},
+		{name: "zero truncation", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", ...0 more")},
+		{name: "truncation only", err: status.Error(codes.FailedPrecondition, "credential is referenced by ...6 more")},
+		{name: "truncation is not final", err: status.Error(codes.FailedPrecondition, "credential is referenced by ...6 more, "+usageOne)},
+		{name: "unrecognized precondition", err: status.Error(codes.FailedPrecondition, "credential cannot be deleted")},
+		{name: "wrong status", err: status.Error(codes.Internal, "credential is referenced by "+usageOne)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := semanticCleanupRetainedByAudit(test.err); got != test.want {
+				t.Fatalf("semanticCleanupRetainedByAudit()=%t, want %t", got, test.want)
 			}
 		})
 	}
