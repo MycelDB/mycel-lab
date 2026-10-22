@@ -560,6 +560,11 @@ func (s Scenario) Validate() error {
 			if len(event.Target) == 0 {
 				return fmt.Errorf("phase %q event %q target is required", phase.Name, event.Type)
 			}
+			if strings.HasPrefix(event.Type, "semantic-") {
+				if err := ValidateSemanticEventTarget(event.Type, event.Target); err != nil {
+					return fmt.Errorf("phase %q: %w", phase.Name, err)
+				}
+			}
 		}
 	}
 	return nil

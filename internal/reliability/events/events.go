@@ -95,6 +95,9 @@ func reserveRuntimeOperation(ctx context.Context, recorder Recorder, phaseName, 
 }
 
 func validateEvent(event spec.EventSpec) error {
+	if strings.HasPrefix(event.Type, "semantic-") {
+		return spec.ValidateSemanticEventTarget(event.Type, event.Target)
+	}
 	switch event.Type {
 	case "pod-stop", "pod-restart", "pod-delete":
 		if PodName(event.Target) == "" {
