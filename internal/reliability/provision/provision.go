@@ -418,23 +418,28 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 		return err
 	}
 	defer admin.Close()
-	var errs []string
-	errs = append(errs, cleanupSemanticResources(ctx, admin, resources.Semantic)...)
-	seenSpaces := map[string]bool{}
-	spaces := append([]Space(nil), resources.Spaces...)
-	sort.Slice(spaces, func(i, j int) bool { return spaces[i].Name > spaces[j].Name })
-	for _, sp := range spaces {
-		if sp.SpaceID == "" || seenSpaces[sp.SpaceID] {
-			continue
-		}
-		seenSpaces[sp.SpaceID] = true
-		callCtx, cancel := admin.AuthCallContext(ctx)
-		_, err := admin.Spaces.DeleteSpace(callCtx, &adminv1.DeleteSpaceRequest{SpaceId: sp.SpaceID})
-		cancel()
-		if err != nil && status.Code(err) != codes.NotFound {
-			errs = append(errs, fmt.Sprintf("delete space %s: %v", sp.SpaceID, err))
-		}
-	}
+	errs := cleanupAcrossSpaceBarrier(
+		func() []string { return cleanupSemanticResources(ctx, admin, resources.Semantic) },
+		func() []string {
+			var failures []string
+			seenSpaces := map[string]bool{}
+			spaces := append([]Space(nil), resources.Spaces...)
+			sort.Slice(spaces, func(i, j int) bool { return spaces[i].Name > spaces[j].Name })
+			for _, sp := range spaces {
+				if sp.SpaceID == "" || seenSpaces[sp.SpaceID] {
+					continue
+				}
+				seenSpaces[sp.SpaceID] = true
+				callCtx, cancel := admin.AuthCallContext(ctx)
+				_, err := admin.Spaces.DeleteSpace(callCtx, &adminv1.DeleteSpaceRequest{SpaceId: sp.SpaceID})
+				cancel()
+				if err != nil && status.Code(err) != codes.NotFound {
+					failures = append(failures, fmt.Sprintf("delete space %s: %v", sp.SpaceID, err))
+				}
+			}
+			return failures
+		},
+	)
 	for _, p := range resources.Principals {
 		if p.PrincipalID == "" {
 			continue
@@ -452,6 +457,15 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 		return fmt.Errorf("cleanup scenario resources: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func cleanupAcrossSpaceBarrier(cleanupSemantic, deleteSpaces func() []string) []string {
+	// The first pass removes resources that are not retained by inference audit
+	// history. Policy decisions and usage events are immutable while their space
+	// exists, so only failures from the retry after space deletion are final.
+	_ = cleanupSemantic()
+	failures := deleteSpaces()
+	return append(failures, cleanupSemantic()...)
 }
 
 func dialAdminWithRetry(ctx context.Context, addr string, opts Options) (*mycel.AdminClient, error) {

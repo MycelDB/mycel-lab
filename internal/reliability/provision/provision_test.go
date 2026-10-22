@@ -159,6 +159,46 @@ func TestComposeSemanticContractTimingAndInitialBackfillProvenance(t *testing.T)
 	}
 }
 
+func TestCleanupAcrossSpaceBarrierRetriesAuditReferencedResources(t *testing.T) {
+	tests := []struct {
+		name            string
+		barrierFailures []string
+		retryFailures   []string
+		wantFailures    []string
+	}{
+		{name: "retry succeeds"},
+		{name: "barrier failure remains final", barrierFailures: []string{"space delete failed"}, wantFailures: []string{"space delete failed"}},
+		{name: "retry failure remains final", retryFailures: []string{"semantic retry failed"}, wantFailures: []string{"semantic retry failed"}},
+		{name: "barrier and retry failures remain final", barrierFailures: []string{"space delete failed"}, retryFailures: []string{"semantic retry failed"}, wantFailures: []string{"space delete failed", "semantic retry failed"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls []string
+			semanticAttempts := 0
+			failures := cleanupAcrossSpaceBarrier(
+				func() []string {
+					semanticAttempts++
+					calls = append(calls, "semantic")
+					if semanticAttempts == 1 {
+						return []string{"transient immutable audit reference"}
+					}
+					return append([]string(nil), test.retryFailures...)
+				},
+				func() []string {
+					calls = append(calls, "spaces")
+					return append([]string(nil), test.barrierFailures...)
+				},
+			)
+			if !reflect.DeepEqual(failures, test.wantFailures) {
+				t.Fatalf("cleanup failures=%v, want %v", failures, test.wantFailures)
+			}
+			if want := []string{"semantic", "spaces", "semantic"}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("cleanup order=%v, want %v", calls, want)
+			}
+		})
+	}
+}
+
 func TestPlanScenarioCreatesDeterministicSafeSemanticPlan(t *testing.T) {
 	scenario, err := catalog.ResolveScenarioFile(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml"), catalog.ResolveOptions{})
 	if err != nil {
