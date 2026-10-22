@@ -73,6 +73,34 @@ phases:
 	}
 }
 
+func TestScenarioRejectsActorGroupsWithCollidingResourceNames(t *testing.T) {
+	_, err := Load([]byte(`
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: colliding-actor-groups
+seed: 99
+clusterRef: raft-3-node
+actorGroups:
+  - name: team-a
+    profileRef: graph-committer
+    count: 1
+    rate:
+      commitsPerSecond: 1
+  - name: team_a
+    profileRef: graph-committer
+    count: 1
+    rate:
+      commitsPerSecond: 1
+phases:
+  - name: warmup
+    duration: 1m
+`))
+	if err == nil || !strings.Contains(err.Error(), `normalize to the same resource name "team-a"`) {
+		t.Fatalf("Load() error = %v, want normalized actor-group collision", err)
+	}
+}
+
 func TestLoadSuite(t *testing.T) {
 	loaded, err := Load([]byte(`
 apiVersion: myceldb.io/reliability/v1

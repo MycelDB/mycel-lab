@@ -217,8 +217,67 @@ func TestRunScenarioImageOverrideIsRecordedInResolvedArtifacts(t *testing.T) {
 	if resolved.Cluster.Image != candidateImage {
 		t.Fatalf("resolved image=%q, want %q", resolved.Cluster.Image, candidateImage)
 	}
+	if _, leaked := resolved.Environment.Options["imageOverride"]; leaked {
+		t.Fatalf("dry-run/non-Compose environment received Compose-only imageOverride: %+v", resolved.Environment.Options)
+	}
 	if scenario.Cluster.Image != originalImage {
 		t.Fatalf("input scenario image mutated to %q", scenario.Cluster.Image)
+	}
+}
+
+func TestRunScenarioRoutesImageOverrideThroughK3DClusterImageOnly(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	scenario.Environment.Driver = "k3d"
+	scenario.Environment.Options = map[string]any{"clusterNamePrefix": "mlab"}
+	scenario.ActorGroups = nil
+	scenario.Phases = nil
+	scenario.Assertions = nil
+	driver := &recordingDriver{omitEndpoints: true}
+	const image = "local/mycel:exact-head"
+	if _, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ImageOverride: image, EnvironmentDriver: driver}); err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	if driver.createdScenario.Cluster.Image != image {
+		t.Fatalf("K3D scenario image=%q, want %q", driver.createdScenario.Cluster.Image, image)
+	}
+	if _, leaked := driver.createdScenario.Environment.Options["imageOverride"]; leaked {
+		t.Fatalf("K3D scenario received Compose-only imageOverride: %+v", driver.createdScenario.Environment.Options)
+	}
+}
+
+func TestRunScenarioRoutesImageOverrideThroughComposeCreate(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	scenario.Environment.Driver = "compose"
+	scenario.Environment.Options = map[string]any{"composeFile": "compose.yml"}
+	scenario.ActorGroups = nil
+	scenario.Phases = nil
+	scenario.Assertions = nil
+	driver := &recordingDriver{omitEndpoints: true}
+	const image = "local/mycel:exact-head"
+	if _, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ImageOverride: image, EnvironmentDriver: driver}); err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	if got := driver.createdScenario.Environment.Options["imageOverride"]; got != image {
+		t.Fatalf("Compose scenario imageOverride=%v, want %q", got, image)
+	}
+	if got := driver.preflightEnvironmentSpec.Options["imageOverride"]; got != image {
+		t.Fatalf("Compose Preflight environment imageOverride=%v, want %q", got, image)
+	}
+	if got := driver.createdEnvironmentSpec.Options["imageOverride"]; got != image {
+		t.Fatalf("Compose Create environment imageOverride=%v, want %q", got, image)
+	}
+}
+
+func TestApplyComposeImageOverrideDoesNotLeakIntoK3D(t *testing.T) {
+	compose := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": "compose.yml"}}
+	applyComposeImageOverride(&compose, " local/mycel:head ")
+	if got := compose.Options["imageOverride"]; got != "local/mycel:head" {
+		t.Fatalf("Compose imageOverride=%v", got)
+	}
+	k3d := spec.EnvironmentSpec{Driver: "k3d", Options: map[string]any{"clusterNamePrefix": "mlab"}}
+	applyComposeImageOverride(&k3d, "local/mycel:head")
+	if _, exists := k3d.Options["imageOverride"]; exists {
+		t.Fatalf("k3d received Compose-only imageOverride: %+v", k3d.Options)
 	}
 }
 
@@ -524,17 +583,26 @@ func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
 }
 
 type recordingDriver struct {
-	deleted  bool
-	captured int
+	deleted                  bool
+	captured                 int
+	omitEndpoints            bool
+	createdScenario          spec.ResolvedScenario
+	preflightEnvironmentSpec spec.EnvironmentSpec
+	createdEnvironmentSpec   spec.EnvironmentSpec
 }
 
 func (d *recordingDriver) Name() string { return "test" }
 func (d *recordingDriver) Capabilities() env.CapabilitySet {
 	return env.NewCapabilitySet(env.CapabilityArtifacts, env.CapabilityPerNodeEndpoints)
 }
-func (d *recordingDriver) Validate(spec.EnvironmentSpec) error                   { return nil }
-func (d *recordingDriver) Preflight(context.Context, spec.EnvironmentSpec) error { return nil }
-func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenario, _ spec.EnvironmentSpec) (env.Environment, error) {
+func (d *recordingDriver) Validate(spec.EnvironmentSpec) error { return nil }
+func (d *recordingDriver) Preflight(_ context.Context, environmentSpec spec.EnvironmentSpec) error {
+	d.preflightEnvironmentSpec = environmentSpec
+	return nil
+}
+func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenario, environmentSpec spec.EnvironmentSpec) (env.Environment, error) {
+	d.createdScenario = scenario
+	d.createdEnvironmentSpec = environmentSpec
 	return env.Environment{Name: scenario.Metadata.Name, Driver: "test", Namespace: "test", Metadata: map[string]string{"nodeCount": "1"}}, nil
 }
 func (d *recordingDriver) WaitReady(context.Context, env.Environment) error { return nil }
@@ -542,6 +610,9 @@ func (d *recordingDriver) Nodes(context.Context, env.Environment) ([]env.Node, e
 	return []env.Node{{Name: "myceld-0", Ordinal: 0, Resource: "test/myceld-0"}}, nil
 }
 func (d *recordingDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
+	if d.omitEndpoints {
+		return nil, nil
+	}
 	return []env.Endpoint{{NodeName: "myceld-0", DaemonAddr: "127.0.0.1:19091", LocalAddress: "127.0.0.1", LocalPort: 19091, RemotePort: 9091}}, nil
 }
 func (d *recordingDriver) Exec(context.Context, env.Environment, env.NodeRef, env.ExecRequest) (env.ExecResult, error) {

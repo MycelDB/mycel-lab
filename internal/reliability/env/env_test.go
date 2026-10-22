@@ -2,6 +2,7 @@ package env
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -199,6 +200,28 @@ func TestK3DDriverUpdateStatefulSetImageWaitsForRollout(t *testing.T) {
 
 type fakeRunner struct{ commands []string }
 
+type composeCaptureRunner struct {
+	commands    []string
+	imageOutput string
+	imageError  error
+}
+
+func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, " images --format json ") {
+		if r.imageError != nil {
+			return executil.Result{Command: cmd, Stderr: r.imageError.Error()}, r.imageError
+		}
+		if r.imageOutput != "" {
+			return executil.Result{Command: cmd, Stdout: r.imageOutput}, nil
+		}
+		service := args[len(args)-1]
+		return executil.Result{Command: cmd, Stdout: `[{"ID":"sha256:` + service + `","ContainerName":"mlab-test-` + service + `-1","Repository":"local/mycel","Tag":"head"}]` + "\n"}, nil
+	}
+	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
@@ -254,7 +277,7 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 	}
 	runner := &fakeRunner{}
 	driver := ComposeDriver{Confirmed: true, Runner: runner}
-	environmentSpec := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "projectName": "mlab-test", "serviceNames": []any{"myceld-a", "myceld-b"}, "grpcPorts": []any{19091, 19092}}}
+	environmentSpec := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "projectName": "mlab-test", "serviceNames": []any{"myceld-a", "myceld-b"}, "grpcPorts": []any{19091, 19092}, "imageOverride": "local/mycel:head"}}
 	if err := driver.Preflight(context.Background(), environmentSpec); err != nil {
 		t.Fatalf("Preflight() error=%v", err)
 	}
@@ -271,10 +294,58 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 		t.Fatalf("RestartNode() error=%v", err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"docker compose version", "docker compose -f " + composeFile + " -p mlab-test down --volumes --remove-orphans", "docker compose -f " + composeFile + " -p mlab-test up -d --wait", "docker compose -f " + composeFile + " -p mlab-test restart myceld-b"} {
+	for _, want := range []string{"docker compose version", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test down --volumes --remove-orphans", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test up -d --wait", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test restart myceld-b"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
 		}
+	}
+}
+
+func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
+	environment := Environment{Name: "mlab-test", Driver: "compose", Metadata: map[string]string{"composeFile": "compose.yml", "projectName": "mlab-test", "serviceNames": "myceld-a,myceld-b", "imageOverride": "local/mycel:head"}}
+	for _, tc := range []struct {
+		name         string
+		imageOutput  string
+		imageError   error
+		wantError    bool
+		wantFragment string
+	}{
+		{name: "complete"},
+		{name: "command failure", imageError: errors.New("docker unavailable"), wantError: true, wantFragment: "capture compose image"},
+		{name: "malformed JSON", imageOutput: "{not-json", wantError: true, wantFragment: "parse compose image"},
+		{name: "empty output", imageOutput: " \n", wantError: true, wantFragment: "parse compose image"},
+		{name: "missing record", imageOutput: "[]\n", wantError: true, wantFragment: "image evidence"},
+		{name: "empty ID", imageOutput: `[{"ContainerName":"mlab-test-myceld-a-1"}]`, wantError: true, wantFragment: "image evidence"},
+		{name: "empty container name", imageOutput: `[{"ID":"sha256:test"}]`, wantError: true, wantFragment: "image evidence"},
+		{name: "multiple records", imageOutput: `[{"ID":"sha256:a","ContainerName":"a"},{"ID":"sha256:b","ContainerName":"b"}]`, wantError: true, wantFragment: "exactly one"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &composeCaptureRunner{imageOutput: tc.imageOutput, imageError: tc.imageError}
+			driver := ComposeDriver{Confirmed: true, Runner: runner}
+			sink, err := artifacts.NewSink(t.TempDir())
+			if err != nil {
+				t.Fatalf("NewSink() error=%v", err)
+			}
+			err = driver.CaptureState(context.Background(), environment, sink)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), tc.wantFragment) {
+					t.Fatalf("CaptureState() error=%v, want fragment %q", err, tc.wantFragment)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CaptureState() error=%v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "compose-images.jsonl"))
+			if err != nil {
+				t.Fatalf("read compose image evidence: %v", err)
+			}
+			for _, want := range []string{"sha256:myceld-a", "sha256:myceld-b", "local/mycel:head"} {
+				if !strings.Contains(string(data), want) {
+					t.Fatalf("compose image evidence missing %q: %s", want, data)
+				}
+			}
+		})
 	}
 }
 

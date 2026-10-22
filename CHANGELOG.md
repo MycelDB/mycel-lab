@@ -8,6 +8,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added SGT3 public-API semantic resource provisioning, reverse cleanup, finite semantic events, bounded maintenance convergence, and credential-free dry-run plans (#46).
+- Added the compose-first SGT4 semantic graph-index contract scenario covering backfill, deterministic ranking/pagination/filtering, projection lifecycle, update/delete, transaction negatives, isolation, disabled rules, and rebuild (#46).
+- Added SGT5 Level 3 provenance, analyzed/fresh frontier, bounded-capacity, record-identity, direct pagination, and minimum capability assertions (#46, MycelDB/mycel#238).
 - Added the SGT0 proof/compatibility inventory and versioned corpus, semantic-evidence, and final-report schema drafts for provider-neutral semantic graph-index reliability issue #46.
 - Added Draft 2020-12 schema compilation tests plus positive and contract-negative fixtures for isolated false-success conditions, operation shapes, artifact classification, and decoder/schema bounds.
 - Added strict cataloged `ProviderProfile` definitions, scenario/CLI selection, redacted source-hashed resolution artifacts, typed finite budgets, enforcement-capability preflight, and credential-free deterministic/emulator profiles for SGT1 (#46).
@@ -17,6 +20,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- Compose runs now carry `--image` through the effective environment passed to driver preflight and creation, apply it as a Compose-only `MYCEL_IMAGE` override to every lifecycle command, and require one nonempty resolved image ID for every configured daemon service before capture can succeed, binding semantic acceptance artifacts to an exact-head tag without leaking Compose options into k3d runs (#46).
+- Actor-owned space and domain names now include actor-group identity, and scenario validation rejects actor-group names that normalize to the same resource scope, preventing groups that share one profile from collapsing onto the same resources; the deterministic semantic contract also uses a positive near-zero rule cooldown, an operation timeout longer than its maintenance deadline, node-bound incremental revision captures, and a forced initial backfill tied to the final pre-rule pinned snapshot revision so racing historical maintenance cannot retain an earlier same-source provenance revision (#46).
+- The SGT4 rebuild phase now creates an eligible semantic record while rebuild state is running and asserts exact pinned-target baseline, delta-record, freshness, generation, and epoch provenance (#46).
 - Definition import/export and catalog storage now include provider profiles; semantic scenarios may use `providerProfileRef` or `--provider-profile`, while required provider-owned limits fail unless their enforcement source is advertised.
 - Documentation checks now parse JSON contracts and examples in addition to Markdown and reliability YAML.
 - Strengthened the SGT0 contract with typed graph mutation operations, node/edge fixture shapes, explicit minimum-score and artifact-capture safety, Level 1-only baseline examples, bounded decoder annotations, Admin Maintenance lifecycle ownership, direct semantic filter prerequisites, and compose artifact topology.

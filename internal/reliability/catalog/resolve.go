@@ -128,6 +128,7 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 		Cluster:            cluster,
 		ProviderProfileRef: selectedProviderRef,
 		ProviderProfile:    resolvedProvider,
+		Semantic:           scenario.Semantic,
 		ActorGroups:        groups,
 		Phases:             scenario.Phases,
 		Assertions:         scenario.Assertions,

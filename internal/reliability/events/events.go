@@ -95,6 +95,9 @@ func reserveRuntimeOperation(ctx context.Context, recorder Recorder, phaseName, 
 }
 
 func validateEvent(event spec.EventSpec) error {
+	if strings.HasPrefix(event.Type, "semantic-") {
+		return spec.ValidateSemanticEventTarget(event.Type, event.Target)
+	}
 	switch event.Type {
 	case "pod-stop", "pod-restart", "pod-delete":
 		if PodName(event.Target) == "" {
@@ -110,7 +113,7 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "image") == "" {
 			return fmt.Errorf("%s requires target.image", event.Type)
 		}
-	case "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent":
+	case "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild":
 		return nil
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {

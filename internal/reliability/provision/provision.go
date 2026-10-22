@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,16 +21,18 @@ const (
 )
 
 type ScenarioResources struct {
-	ScenarioName string            `json:"scenarioName"`
-	RunID        string            `json:"runId"`
-	DryRun       bool              `json:"dryRun"`
-	AdminAddr    string            `json:"adminAddr,omitempty"`
-	Principals   []Principal       `json:"principals"`
-	Spaces       []Space           `json:"spaces"`
-	Domains      []Domain          `json:"domains"`
-	Assignments  []ActorAssignment `json:"assignments"`
-	Cleanup      CleanupStatus     `json:"cleanup,omitempty"`
-	CreatedAt    time.Time         `json:"createdAt"`
+	ScenarioName string             `json:"scenarioName"`
+	RunID        string             `json:"runId"`
+	DryRun       bool               `json:"dryRun"`
+	AdminAddr    string             `json:"adminAddr,omitempty"`
+	Principals   []Principal        `json:"principals"`
+	Spaces       []Space            `json:"spaces"`
+	Domains      []Domain           `json:"domains"`
+	Assignments  []ActorAssignment  `json:"assignments"`
+	Semantic     *SemanticResources `json:"semantic,omitempty"`
+	Cleanup      CleanupStatus      `json:"cleanup,omitempty"`
+	semanticPlan *semanticProvisionPlan
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 type Principal struct {
@@ -83,6 +86,63 @@ type CleanupStatus struct {
 	Errors    []string `json:"errors,omitempty"`
 }
 
+type SemanticResources struct {
+	TargetActorID           string              `json:"targetActorId"`
+	SpaceID                 string              `json:"spaceId,omitempty"`
+	DomainID                string              `json:"domainId,omitempty"`
+	PackageName             string              `json:"packageName"`
+	PackageVersion          string              `json:"packageVersion"`
+	PackageID               string              `json:"packageId,omitempty"`
+	EndpointKey             string              `json:"endpointKey"`
+	EndpointID              string              `json:"endpointId,omitempty"`
+	ModelKey                string              `json:"modelKey"`
+	ModelID                 string              `json:"modelId,omitempty"`
+	CapabilityID            string              `json:"capabilityId,omitempty"`
+	VectorStoreKey          string              `json:"vectorStoreKey"`
+	VectorStoreID           string              `json:"vectorStoreId,omitempty"`
+	IntelligenceProfileKey  string              `json:"intelligenceProfileKey"`
+	IntelligenceProfileID   string              `json:"intelligenceProfileId,omitempty"`
+	CredentialKey           string              `json:"credentialKey"`
+	CredentialID            string              `json:"credentialId,omitempty"`
+	CredentialGrantID       string              `json:"credentialGrantId,omitempty"`
+	AccessPolicyID          string              `json:"accessPolicyId,omitempty"`
+	SemanticRuleKey         string              `json:"semanticRuleKey"`
+	SemanticRuleID          string              `json:"semanticRuleId,omitempty"`
+	EmbeddingBindingKey     string              `json:"embeddingBindingKey"`
+	Operations              []SemanticOperation `json:"operations"`
+	Cleanup                 []SemanticOperation `json:"cleanup"`
+	MaintenanceTimeout      time.Duration       `json:"maintenanceTimeout"`
+	MaintenancePollInterval time.Duration       `json:"maintenancePollInterval"`
+	MaintenanceAnalyzeLimit int                 `json:"maintenanceAnalyzeLimit"`
+	MaintenanceProcessLimit int                 `json:"maintenanceProcessLimit"`
+	EvidenceValues          map[string]string   `json:"evidenceValues,omitempty"`
+}
+
+type SemanticOperation struct {
+	Sequence int            `json:"sequence"`
+	Action   string         `json:"action"`
+	Resource string         `json:"resource"`
+	Status   string         `json:"status"`
+	Details  map[string]any `json:"details,omitempty"`
+	Error    string         `json:"error,omitempty"`
+}
+
+type semanticProvisionPlan struct {
+	Spec       spec.SemanticScenarioSpec
+	Capability providerCapability
+	Secret     string
+}
+
+type providerCapability struct {
+	ConnectorType   string
+	BaseURL         string
+	Dimensions      int
+	VectorSpaceKey  string
+	FixtureStrategy string
+	ProviderModel   string
+	Mode            string
+}
+
 type Options struct {
 	RunID         string
 	DaemonAddrs   []string
@@ -105,13 +165,14 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 	for _, group := range scenario.ActorGroups {
 		behaviorType := behaviorType(group)
 		switch behaviorType {
-		case "graph-transaction":
+		case "graph-transaction", "semantic-control":
 			for i := 0; i < group.Count; i++ {
 				actorID := fmt.Sprintf("%s-%d", group.Name, i)
-				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, sanitizeName(group.Name), i)
-				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, sanitizeName(group.Name), i)
-				spaceName := scopedName(shortRun, stringFromNested(group.Profile.Behavior, "dataScope", "space", "prefix", "space"), i)
-				domainKey := scopedName(shortRun, stringFromNested(group.Profile.Behavior, "dataScope", "domain", "prefix", "domain"), i)
+				groupResourceName := spec.NormalizeActorGroupResourceName(group.Name)
+				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, groupResourceName, i)
+				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, groupResourceName, i)
+				spaceName := scopedActorResourceName(shortRun, group.Name, stringFromNested(group.Profile.Behavior, "dataScope", "space", "prefix", "space"), i)
+				domainKey := scopedActorResourceName(shortRun, group.Name, stringFromNested(group.Profile.Behavior, "dataScope", "domain", "prefix", "domain"), i)
 				domainName := domainKey
 				addr := daemonAddr(opts.DaemonAddrs, len(resources.Assignments))
 				resources.Principals = append(resources.Principals, Principal{ActorID: actorID, GroupName: group.Name, Username: username, Password: password, Role: "writer"})
@@ -132,8 +193,9 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 			}
 			for i := 0; i < group.Count; i++ {
 				actorID := fmt.Sprintf("%s-%d", group.Name, i)
-				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, sanitizeName(group.Name), i)
-				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, sanitizeName(group.Name), i)
+				groupResourceName := spec.NormalizeActorGroupResourceName(group.Name)
+				username := fmt.Sprintf("mlab-%s-%s-%d", shortRun, groupResourceName, i)
+				password := fmt.Sprintf("mlab-%s-%s-%d-password", shortRun, groupResourceName, i)
 				target := targets[i%len(targets)]
 				addr := daemonAddr(opts.DaemonAddrs, len(resources.Assignments))
 				resources.Principals = append(resources.Principals, Principal{ActorID: actorID, GroupName: group.Name, Username: username, Password: password, Role: "reader"})
@@ -141,7 +203,74 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 			}
 		}
 	}
+	if scenario.Semantic != nil {
+		semanticResources, plan, err := planSemanticResources(scenario, resources, shortRun)
+		if err != nil {
+			return ScenarioResources{}, err
+		}
+		resources.Semantic = semanticResources
+		resources.semanticPlan = plan
+	}
 	return resources, nil
+}
+
+func planSemanticResources(scenario spec.ResolvedScenario, resources ScenarioResources, shortRun string) (*SemanticResources, *semanticProvisionPlan, error) {
+	if scenario.Semantic == nil || scenario.ProviderProfile == nil || scenario.ProviderProfile.Profile.Capabilities.Embedding == nil {
+		return nil, nil, errors.New("semantic provisioning requires a resolved embedding provider profile")
+	}
+	var target ActorAssignment
+	for _, assignment := range resources.Assignments {
+		if assignment.GroupName == scenario.Semantic.TargetActorGroup {
+			target = assignment
+			break
+		}
+	}
+	if target.ActorID == "" {
+		return nil, nil, fmt.Errorf("semantic target actor group %q has no assignment", scenario.Semantic.TargetActorGroup)
+	}
+	capability := scenario.ProviderProfile.Profile.Capabilities.Embedding
+	prefix := "mlab-" + shortRun
+	semanticResources := &SemanticResources{
+		TargetActorID:           target.ActorID,
+		PackageName:             prefix + "-semantic",
+		PackageVersion:          "1",
+		EndpointKey:             prefix + "-endpoint",
+		ModelKey:                prefix + "-model",
+		VectorStoreKey:          prefix + "-vectors",
+		IntelligenceProfileKey:  prefix + "-profile",
+		CredentialKey:           prefix + "-credential",
+		SemanticRuleKey:         scenario.Semantic.Rule.Key,
+		EmbeddingBindingKey:     scenario.Semantic.Rule.BindingKey,
+		MaintenanceTimeout:      scenario.Semantic.Maintenance.Timeout.Duration,
+		MaintenancePollInterval: scenario.Semantic.Maintenance.PollInterval.Duration,
+		MaintenanceAnalyzeLimit: scenario.Semantic.Maintenance.AnalyzeLimit,
+		MaintenanceProcessLimit: scenario.Semantic.Maintenance.ProcessLimit,
+		EvidenceValues:          map[string]string{},
+	}
+	operationNames := []struct{ action, resource string }{
+		{"apply", "inference-package"},
+		{"create", "intelligence-profile"},
+		{"create", "credential"},
+		{"create", "credential-grant"},
+		{"create", "access-policy"},
+		{"create", "semantic-rule"},
+	}
+	for index, operation := range operationNames {
+		semanticResources.Operations = append(semanticResources.Operations, SemanticOperation{Sequence: index + 1, Action: operation.action, Resource: operation.resource, Status: "planned"})
+	}
+	cleanupResources := []string{"semantic-rule", "access-policy", "credential-grant", "credential", "intelligence-profile", "capability", "vector-store", "model", "endpoint"}
+	for index, resource := range cleanupResources {
+		semanticResources.Cleanup = append(semanticResources.Cleanup, SemanticOperation{Sequence: index + 1, Action: "delete", Resource: resource, Status: "planned"})
+	}
+	secret := ""
+	if values := scenario.ProviderProfile.RuntimeSecretValues(); len(values) > 0 {
+		secret = values[0]
+	}
+	return semanticResources, &semanticProvisionPlan{Spec: *scenario.Semantic, Secret: secret, Capability: providerCapability{
+		ConnectorType: capability.ConnectorType, BaseURL: capability.BaseURL, Dimensions: capability.Dimensions,
+		VectorSpaceKey: capability.VectorSpaceKey, FixtureStrategy: capability.FixtureStrategy,
+		ProviderModel: capability.ProviderModelName, Mode: string(scenario.ProviderProfile.Profile.Mode),
+	}}, nil
 }
 
 func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts Options) error {
@@ -228,6 +357,24 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 			}
 		}
 	}
+	if resources.Semantic != nil {
+		for _, assignment := range resources.Assignments {
+			if assignment.ActorID == resources.Semantic.TargetActorID {
+				resources.Semantic.SpaceID = assignment.SpaceID
+				resources.Semantic.DomainID = assignment.DomainID
+				break
+			}
+		}
+		if err := provisionSemanticResources(ctx, admin, resources); err != nil {
+			rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			rollbackFailures := cleanupSemanticResources(rollbackCtx, admin, resources.Semantic)
+			rollbackCancel()
+			if len(rollbackFailures) > 0 {
+				return errors.Join(fmt.Errorf("provision semantic resources: %w", err), fmt.Errorf("semantic rollback: %s", strings.Join(rollbackFailures, "; ")))
+			}
+			return fmt.Errorf("provision semantic resources: %w", err)
+		}
+	}
 	for i := range resources.Assignments {
 		a := &resources.Assignments[i]
 		if a.PrincipalID == "" {
@@ -271,22 +418,28 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 		return err
 	}
 	defer admin.Close()
-	var errs []string
-	seenSpaces := map[string]bool{}
-	spaces := append([]Space(nil), resources.Spaces...)
-	sort.Slice(spaces, func(i, j int) bool { return spaces[i].Name > spaces[j].Name })
-	for _, sp := range spaces {
-		if sp.SpaceID == "" || seenSpaces[sp.SpaceID] {
-			continue
-		}
-		seenSpaces[sp.SpaceID] = true
-		callCtx, cancel := admin.AuthCallContext(ctx)
-		_, err := admin.Spaces.DeleteSpace(callCtx, &adminv1.DeleteSpaceRequest{SpaceId: sp.SpaceID})
-		cancel()
-		if err != nil && status.Code(err) != codes.NotFound {
-			errs = append(errs, fmt.Sprintf("delete space %s: %v", sp.SpaceID, err))
-		}
-	}
+	errs := cleanupAcrossSpaceBarrier(
+		func() []string { return cleanupSemanticResources(ctx, admin, resources.Semantic) },
+		func() []string {
+			var failures []string
+			seenSpaces := map[string]bool{}
+			spaces := append([]Space(nil), resources.Spaces...)
+			sort.Slice(spaces, func(i, j int) bool { return spaces[i].Name > spaces[j].Name })
+			for _, sp := range spaces {
+				if sp.SpaceID == "" || seenSpaces[sp.SpaceID] {
+					continue
+				}
+				seenSpaces[sp.SpaceID] = true
+				callCtx, cancel := admin.AuthCallContext(ctx)
+				_, err := admin.Spaces.DeleteSpace(callCtx, &adminv1.DeleteSpaceRequest{SpaceId: sp.SpaceID})
+				cancel()
+				if err != nil && status.Code(err) != codes.NotFound {
+					failures = append(failures, fmt.Sprintf("delete space %s: %v", sp.SpaceID, err))
+				}
+			}
+			return failures
+		},
+	)
 	for _, p := range resources.Principals {
 		if p.PrincipalID == "" {
 			continue
@@ -304,6 +457,15 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 		return fmt.Errorf("cleanup scenario resources: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func cleanupAcrossSpaceBarrier(cleanupSemantic, deleteSpaces func() []string) []string {
+	// The first pass removes resources that are not retained by inference audit
+	// history. Policy decisions and usage events are immutable while their space
+	// exists, so only failures from the retry after space deletion are final.
+	_ = cleanupSemantic()
+	failures := deleteSpaces()
+	return append(failures, cleanupSemantic()...)
 }
 
 func dialAdminWithRetry(ctx context.Context, addr string, opts Options) (*mycel.AdminClient, error) {
@@ -384,8 +546,8 @@ func daemonAddr(addrs []string, index int) string {
 	return addrs[index%len(addrs)]
 }
 
-func scopedName(run, prefix string, index int) string {
-	return fmt.Sprintf("mlab-%s-%s-%d", sanitizeName(run), sanitizeName(prefix), index)
+func scopedActorResourceName(run, group, prefix string, index int) string {
+	return fmt.Sprintf("mlab-%s-%s-%s-%d", sanitizeName(run), spec.NormalizeActorGroupResourceName(group), sanitizeName(prefix), index)
 }
 
 func shortRunID(runID string) string {

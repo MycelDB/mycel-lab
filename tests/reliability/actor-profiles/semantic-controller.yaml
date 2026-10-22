@@ -1,0 +1,17 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: semantic-controller
+  description: Provisions an isolated graph identity for finite semantic contract events without a background workload loop.
+behavior:
+  type: semantic-control
+  identity:
+    mode: per-instance
+    principalPrefix: semantic-controller
+  dataScope:
+    space:
+      mode: per-instance
+      prefix: semantic-contract-space
+    domain:
+      mode: per-instance
+      prefix: semantic-contract-domain

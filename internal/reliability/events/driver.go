@@ -103,6 +103,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "commonfolio-automation-await-terminal":
 		result, err := executeCommonFolioAwaitTerminalEvent(ctx, r.Driver, r.Environment, r.Resources, event.Target)
 		return map[string]any{"commonfolioTerminalFixture": result}, err
+	case "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild":
+		result, err := executeSemanticEvent(ctx, r.Resources, event.Type, event.Target)
+		return map[string]any{"semantic": result}, err
 	case "cluster-recovery-wait":
 		result, err := executeClusterRecoveryWaitEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Target)
 		return map[string]any{"clusterRecovery": result}, err

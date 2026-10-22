@@ -2,8 +2,10 @@ package env
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -818,7 +820,7 @@ func (d ComposeDriver) Capabilities() CapabilitySet {
 }
 
 func (d ComposeDriver) Validate(environment spec.EnvironmentSpec) error {
-	return rejectUnknownOptions(environment.Options, "composeFile", "composeFiles", "projectName", "projectNamePrefix", "serviceNames", "grpcPorts", "objectStoreFixture")
+	return rejectUnknownOptions(environment.Options, "composeFile", "composeFiles", "projectName", "projectNamePrefix", "serviceNames", "grpcPorts", "objectStoreFixture", "imageOverride")
 }
 
 func (d ComposeDriver) Preflight(ctx context.Context, environment spec.EnvironmentSpec) error {
@@ -888,6 +890,9 @@ func (d ComposeDriver) Create(ctx context.Context, scenario spec.ResolvedScenari
 		projectName = composeProjectName(scenario.Metadata.Name, stringOption(environmentSpec.Options, "projectNamePrefix", "mycel-lab"))
 	}
 	metadata := map[string]string{"composeFile": composeFiles[0], "composeFiles": strings.Join(composeFiles, string(os.PathListSeparator)), "projectName": projectName, "nodeCount": strconv.Itoa(scenario.Cluster.Nodes)}
+	if image := strings.TrimSpace(stringOption(environmentSpec.Options, "imageOverride", "")); image != "" {
+		metadata["imageOverride"] = image
+	}
 	if serviceNames := stringSliceOption(environmentSpec.Options, "serviceNames"); len(serviceNames) > 0 {
 		metadata["serviceNames"] = strings.Join(serviceNames, ",")
 	}
@@ -1009,6 +1014,45 @@ func (d ComposeDriver) CopyToNode(ctx context.Context, environment Environment, 
 	return d.compose(ctx, environment, "cp", hostPath, service+":"+containerPath)
 }
 
+type composeImageEvidence struct {
+	Service       string `json:"service,omitempty"`
+	ImageOverride string `json:"imageOverride,omitempty"`
+	ID            string `json:"id"`
+	ContainerName string `json:"containerName"`
+	Repository    string `json:"repository,omitempty"`
+	Tag           string `json:"tag,omitempty"`
+	Platform      string `json:"platform,omitempty"`
+}
+
+func parseComposeImageEvidence(raw string) ([]composeImageEvidence, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("compose image output is empty")
+	}
+	var images []composeImageEvidence
+	if strings.HasPrefix(raw, "[") {
+		if err := json.Unmarshal([]byte(raw), &images); err != nil {
+			return nil, err
+		}
+		return images, nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	for {
+		var image composeImageEvidence
+		if err := decoder.Decode(&image); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		images = append(images, image)
+	}
+	if len(images) == 0 {
+		return nil, errors.New("compose image output contains no records")
+	}
+	return images, nil
+}
+
 func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment, sink *artifacts.Sink) error {
 	if _, err := sink.WriteJSON("environment/state.json", environment); err != nil {
 		return err
@@ -1026,7 +1070,44 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 			return writeErr
 		}
 	}
-	for _, service := range composeServiceNames(environment) {
+	services := composeServiceNames(environment)
+	imageEvidence := make([]composeImageEvidence, 0, len(services))
+	for _, service := range services {
+		result, err := d.compose(ctx, environment, "images", "--format", "json", service)
+		if _, writeErr := sink.WriteText(filepath.Join("environment", "images", service+".txt"), formatCommandResult(result, err)); writeErr != nil {
+			return writeErr
+		}
+		if err != nil {
+			return fmt.Errorf("capture compose image for %s: %w", service, err)
+		}
+		images, err := parseComposeImageEvidence(result.Stdout)
+		if err != nil {
+			return fmt.Errorf("parse compose image for %s: %w", service, err)
+		}
+		if len(images) != 1 || strings.TrimSpace(images[0].ID) == "" || strings.TrimSpace(images[0].ContainerName) == "" {
+			return fmt.Errorf("compose image evidence for %s must contain exactly one container with a nonempty image ID", service)
+		}
+		image := images[0]
+		image.Service = service
+		image.ImageOverride = environment.Metadata["imageOverride"]
+		imageEvidence = append(imageEvidence, image)
+	}
+	if len(imageEvidence) != len(services) {
+		return fmt.Errorf("compose image evidence is incomplete")
+	}
+	var encodedEvidence strings.Builder
+	for _, image := range imageEvidence {
+		encoded, err := json.Marshal(image)
+		if err != nil {
+			return err
+		}
+		encodedEvidence.Write(encoded)
+		encodedEvidence.WriteByte('\n')
+	}
+	if _, err := sink.WriteText("environment/compose-images.jsonl", encodedEvidence.String()); err != nil {
+		return err
+	}
+	for _, service := range services {
 		result, err := d.compose(ctx, environment, "logs", "--no-color", "--tail=200", service)
 		if _, writeErr := sink.WriteText(filepath.Join("environment", "logs", service+".log"), formatCommandResult(result, err)); writeErr != nil {
 			return writeErr
@@ -1055,7 +1136,11 @@ func (d ComposeDriver) compose(ctx context.Context, environment Environment, arg
 		base = append(base, "-p", project)
 	}
 	base = append(base, args...)
-	return d.runner().Run(ctx, "docker", append([]string{"compose"}, base...)...)
+	dockerArgs := append([]string{"compose"}, base...)
+	if image := strings.TrimSpace(environment.Metadata["imageOverride"]); image != "" {
+		return d.runner().Run(ctx, "env", append([]string{"MYCEL_IMAGE=" + image, "docker"}, dockerArgs...)...)
+	}
+	return d.runner().Run(ctx, "docker", dockerArgs...)
 }
 
 func (d ComposeDriver) runner() executil.Runner {
