@@ -232,7 +232,7 @@ func TestRunScenarioRoutesImageOverrideThroughK3DClusterImageOnly(t *testing.T) 
 	scenario.ActorGroups = nil
 	scenario.Phases = nil
 	scenario.Assertions = nil
-	driver := &recordingDriver{}
+	driver := &recordingDriver{omitEndpoints: true}
 	const image = "local/mycel:exact-head"
 	if _, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ImageOverride: image, EnvironmentDriver: driver}); err != nil {
 		t.Fatalf("RunScenario() error=%v", err)
@@ -252,7 +252,7 @@ func TestRunScenarioRoutesImageOverrideThroughComposeCreate(t *testing.T) {
 	scenario.ActorGroups = nil
 	scenario.Phases = nil
 	scenario.Assertions = nil
-	driver := &recordingDriver{}
+	driver := &recordingDriver{omitEndpoints: true}
 	const image = "local/mycel:exact-head"
 	if _, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ImageOverride: image, EnvironmentDriver: driver}); err != nil {
 		t.Fatalf("RunScenario() error=%v", err)
@@ -585,6 +585,7 @@ func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
 type recordingDriver struct {
 	deleted                  bool
 	captured                 int
+	omitEndpoints            bool
 	createdScenario          spec.ResolvedScenario
 	preflightEnvironmentSpec spec.EnvironmentSpec
 	createdEnvironmentSpec   spec.EnvironmentSpec
@@ -609,6 +610,9 @@ func (d *recordingDriver) Nodes(context.Context, env.Environment) ([]env.Node, e
 	return []env.Node{{Name: "myceld-0", Ordinal: 0, Resource: "test/myceld-0"}}, nil
 }
 func (d *recordingDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
+	if d.omitEndpoints {
+		return nil, nil
+	}
 	return []env.Endpoint{{NodeName: "myceld-0", DaemonAddr: "127.0.0.1:19091", LocalAddress: "127.0.0.1", LocalPort: 19091, RemotePort: 9091}}, nil
 }
 func (d *recordingDriver) Exec(context.Context, env.Environment, env.NodeRef, env.ExecRequest) (env.ExecResult, error) {
