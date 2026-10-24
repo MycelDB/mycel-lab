@@ -972,7 +972,7 @@ func captureK3DDaemonDiagnostics(ctx context.Context, runner executil.Runner, en
 	}
 	captureFailed := false
 	for _, pod := range pods {
-		result, captureErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", pod, "--", "sh", "-c", "test -f /data/mycel/log/myceld.log && tail -c 1048576 /data/mycel/log/myceld.log | tail -n 5000")
+		result, captureErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", pod, "--", "sh", "-c", boundedDaemonDiagnosticCommand("/data/mycel/log/myceld.log"))
 		diagnostics := parseProcedureInferenceDaemonDiagnostics(pod, result.Stdout)
 		if captureErr != nil {
 			diagnostics.CaptureStatus = "unavailable"
@@ -1566,7 +1566,7 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 				return writeErr
 			}
 		}
-		diagnosticResult, diagnosticErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", "test -f /data/mycel/log/myceld.log && tail -c 1048576 /data/mycel/log/myceld.log | tail -n 5000")
+		diagnosticResult, diagnosticErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", boundedDaemonDiagnosticCommand("/data/mycel/log/myceld.log"))
 		diagnostics := parseProcedureInferenceDaemonDiagnostics(service, diagnosticResult.Stdout)
 		if diagnosticErr != nil {
 			diagnostics.CaptureStatus = "unavailable"
@@ -1580,6 +1580,12 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		return errors.New("daemon diagnostic capture is incomplete")
 	}
 	return nil
+}
+
+func boundedDaemonDiagnosticCommand(path string) string {
+	quotedPath := strconv.Quote(path)
+	return "tmp=/tmp/mycel-lab-diagnostics.$$; trap 'rm -f \"$tmp\"' 0 1 2 3 15; " +
+		"test -f " + quotedPath + " && tail -c 1048576 " + quotedPath + " >\"$tmp\" && tail -n 5000 \"$tmp\""
 }
 
 type procedureInferenceDaemonDiagnostics struct {

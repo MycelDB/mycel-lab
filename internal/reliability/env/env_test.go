@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -674,6 +675,23 @@ func (r *composeDeleteRetryRunner) Run(_ context.Context, name string, args ...s
 		}
 	}
 	return executil.Result{Command: cmd}, nil
+}
+
+func TestBoundedDaemonDiagnosticCommandPropagatesProducerFailure(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "myceld.log")
+	if err := os.WriteFile(input, []byte("diagnostic\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeTail := filepath.Join(dir, "tail")
+	if err := os.WriteFile(fakeTail, []byte("#!/bin/sh\nif [ \"$1\" = \"-c\" ]; then exit 7; fi\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("sh", "-c", boundedDaemonDiagnosticCommand(input))
+	command.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := command.Run(); err == nil {
+		t.Fatal("byte-bounding producer failure was masked by the line-bound stage")
+	}
 }
 
 func TestParseProcedureInferenceDaemonDiagnosticsIsClosedAndSecretFree(t *testing.T) {
