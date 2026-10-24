@@ -157,6 +157,56 @@ func TestProcedureInferenceAwaitTimeoutReportsBoundedConvergenceCategory(t *test
 	}
 }
 
+func TestProcedureInferenceFailedEventPreservesOnlySafeObservedPublicationDisposition(t *testing.T) {
+	cases := []struct {
+		name        string
+		disposition string
+		expected    string
+		prohibited  string
+	}{
+		{name: "allowlisted", disposition: "publication_failed", expected: "publication_failed"},
+		{name: "unknown", disposition: "raw-provider-secret", expected: "invalid", prohibited: "raw-provider-secret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			list := procedureInferenceList{
+				Attempts:                  []procedureInferenceAttempt{{ID: "attempt-1", State: procedureInferenceSucceeded, PublicationDisposition: tc.disposition}},
+				SnapshotHighWaterSequence: 1, EarliestRetainedStateSequence: 1, SnapshotCursor: "opaque",
+			}
+			encoded, err := json.Marshal(list)
+			if err != nil {
+				t.Fatal(err)
+			}
+			driver := &recordingDriver{execResult: func(string) (env.ExecResult, error) {
+				return env.ExecResult{Stdout: string(encoded)}, nil
+			}}
+			resources := &provision.ScenarioResources{
+				ProcedureInference: &provision.ProcedureInferenceResources{ProcedureID: "procedure-1", BindingID: "binding-1", AuditActorID: "auditor-1"},
+				Assignments:        []provision.ActorAssignment{{ActorID: "auditor-1", Username: "auditor", Password: "password"}},
+			}
+			recorder := &recordingEventRecorder{}
+			runtime := NewDriverRuntimeWithResources(driver, env.Environment{Driver: "test"}, resources)
+			phase := spec.PhaseSpec{Name: "diagnostic", Events: []spec.EventSpec{{Type: "procedure-inference-await-terminal", Target: map[string]any{"timeout": "5ms", "interval": "1ms"}}}}
+			if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, recorder); err == nil {
+				t.Fatal("ExecutePhaseEvents() error=nil, want convergence timeout")
+			}
+			if len(recorder.records) != 2 || recorder.records[1].Type != "event-failed" {
+				t.Fatalf("records=%+v", recorder.records)
+			}
+			failedEvent, err := json.Marshal(recorder.records[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(failedEvent, []byte(`"observedPublicationDisposition":"`+tc.expected+`"`)) {
+				t.Fatalf("failed event does not contain safe observed disposition: %s", failedEvent)
+			}
+			if tc.prohibited != "" && bytes.Contains(failedEvent, []byte(tc.prohibited)) {
+				t.Fatalf("failed event leaked unknown disposition: %s", failedEvent)
+			}
+		})
+	}
+}
+
 func TestProcedureInferenceAwaitInvalidAttemptStillReportsFullStateAggregates(t *testing.T) {
 	list := procedureInferenceList{
 		Attempts: []procedureInferenceAttempt{
@@ -185,7 +235,7 @@ func TestProcedureInferenceAwaitInvalidAttemptStillReportsFullStateAggregates(t 
 	if err == nil || !strings.Contains(err.Error(), "did not converge") {
 		t.Fatalf("error=%v, want bounded convergence timeout", err)
 	}
-	if result.ConvergenceCategory != "attempt_invalid" || result.AttemptValidationCategory != "identity_version_mismatch" || result.AttemptCount != 5 || result.TerminalCount != 4 || result.SucceededCount != 1 || result.FailedCount != 1 || result.DeniedCount != 1 || result.CanceledCount != 1 || result.AmbiguousCount != 0 || result.SucceededOutcomeCount != 1 || result.AuthorizationDeniedCount != 1 || result.CanceledBeforeProviderCount != 1 || result.FailedBeforeProviderCount != 1 || result.ProviderUnknownCount != 0 || result.MissingOutcomeCount != 1 || result.UnknownOutcomeCount != 0 {
+	if result.ConvergenceCategory != "attempt_invalid" || result.AttemptValidationCategory != "identity_version_mismatch" || result.ObservedPublicationDisposition != "unset" || result.AttemptCount != 5 || result.TerminalCount != 4 || result.SucceededCount != 1 || result.FailedCount != 1 || result.DeniedCount != 1 || result.CanceledCount != 1 || result.AmbiguousCount != 0 || result.SucceededOutcomeCount != 1 || result.AuthorizationDeniedCount != 1 || result.CanceledBeforeProviderCount != 1 || result.FailedBeforeProviderCount != 1 || result.ProviderUnknownCount != 0 || result.MissingOutcomeCount != 1 || result.UnknownOutcomeCount != 0 {
 		t.Fatalf("result=%+v", result)
 	}
 }
@@ -233,6 +283,23 @@ func TestProcedureInferenceAwaitPreservesLastDecodedDiagnosticAcrossLaterFailure
 				t.Fatalf("serialized diagnostic leaked later failure: %s", serialized)
 			}
 		})
+	}
+}
+
+func TestProcedureInferenceObservedPublicationDispositionIsClosed(t *testing.T) {
+	cases := map[string]string{
+		"":                                    "unset",
+		" publication_pending ":               "publication_pending",
+		"publication_failed":                  "publication_failed",
+		"publication_precondition_failed":     "publication_precondition_failed",
+		"suppressed_procedure_control":        "suppressed_procedure_control",
+		"suppressed_authorization_or_control": "suppressed_authorization_or_control",
+		"raw provider body":                   "invalid",
+	}
+	for value, expected := range cases {
+		if actual := procedureInferenceObservedPublicationDisposition(value); actual != expected {
+			t.Fatalf("observed disposition for %q=%q, want %q", value, actual, expected)
+		}
 	}
 }
 

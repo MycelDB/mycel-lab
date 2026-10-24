@@ -55,8 +55,8 @@ func defaultTextDetectors() []textDetector {
 		{category: "bearer-token", pattern: regexp.MustCompile(`(?i)\bbearer[ \t]+[a-z0-9._~+/=-]{8,}`)},
 		{category: "api-key", pattern: regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}\b`)},
 		{category: "pem-material", pattern: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----`)},
-		{category: "credential-assignment", pattern: regexp.MustCompile(`(?i)(password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|set-cookie)[ \t]*[:=][ \t]*["'][^"'\r\n]+["']`)},
-		{category: "credential-assignment", pattern: regexp.MustCompile(`(?i)(password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|set-cookie)[ \t]*[:=][ \t]*[^\s,"']{3,}`)},
+		{category: "credential-assignment", pattern: regexp.MustCompile(`(?i)["']?\b((?:[a-z0-9]+[_-])*(?:password|secret|clientsecret|api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|authorization|private[_-]?key|static[_-]?key|encryption[_-]?key|credential|cookie)(?:[_-][a-z0-9]+)*)["']?[ \t]*[:=][ \t]*["'][^"'\r\n]+["']`)},
+		{category: "credential-assignment", pattern: regexp.MustCompile(`(?i)["']?\b((?:[a-z0-9]+[_-])*(?:password|secret|clientsecret|api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|authorization|private[_-]?key|static[_-]?key|encryption[_-]?key|credential|cookie)(?:[_-][a-z0-9]+)*)["']?[ \t]*[:=][ \t]*[^\s,"']+`)},
 	}
 }
 
@@ -198,8 +198,27 @@ func isSensitiveKey(key string) bool {
 			normalized.WriteRune(r)
 		}
 	}
-	_, ok := sensitiveKeys[normalized.String()]
-	return ok
+	if _, ok := sensitiveKeys[normalized.String()]; ok {
+		return true
+	}
+	tokens := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(key)), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for index, token := range tokens {
+		switch token {
+		case "password", "secret", "credential", "authorization", "bearer", "cookie":
+			return true
+		}
+		if index+1 >= len(tokens) {
+			continue
+		}
+		pair := token + tokens[index+1]
+		switch pair {
+		case "apikey", "authtoken", "accesstoken", "refreshtoken", "privatekey", "statickey", "encryptionkey", "clientsecret", "setcookie":
+			return true
+		}
+	}
+	return false
 }
 
 func isSensitiveFlag(value string) bool {

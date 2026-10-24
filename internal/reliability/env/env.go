@@ -1263,7 +1263,7 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		}
 	}
 	for _, service := range services {
-		result, err := d.compose(ctx, environment, "logs", "--no-color", "--tail=200", service)
+		result, err := d.compose(ctx, environment, "logs", "--no-color", "--tail=5000", service)
 		if _, writeErr := sink.WriteText(filepath.Join("environment", "logs", service+".log"), formatCommandResult(result, err)); writeErr != nil {
 			return writeErr
 		}

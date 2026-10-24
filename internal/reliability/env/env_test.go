@@ -336,6 +336,12 @@ func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CaptureState() error=%v", err)
 			}
+			joinedCommands := strings.Join(runner.commands, "\n")
+			for _, service := range []string{"myceld-a", "myceld-b"} {
+				if want := "logs --no-color --tail=5000 " + service; !strings.Contains(joinedCommands, want) {
+					t.Fatalf("CaptureState commands missing %q\n%s", want, joinedCommands)
+				}
+			}
 			data, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "compose-images.jsonl"))
 			if err != nil {
 				t.Fatalf("read compose image evidence: %v", err)

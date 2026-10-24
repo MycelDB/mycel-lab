@@ -30,47 +30,48 @@ const (
 )
 
 type ProcedureInferenceResult struct {
-	Operation                   string   `json:"operation"`
-	ProcedureID                 string   `json:"procedureId"`
-	BindingID                   string   `json:"bindingId"`
-	Configured                  bool     `json:"configured,omitempty"`
-	NodeID                      string   `json:"nodeId,omitempty"`
-	CommitID                    string   `json:"commitId,omitempty"`
-	CommittedRevision           int64    `json:"committedRevision,omitempty"`
-	AttemptCount                int      `json:"attemptCount"`
-	TerminalCount               int      `json:"terminalCount"`
-	SucceededCount              int      `json:"succeededCount"`
-	FailedCount                 int      `json:"failedCount"`
-	DeniedCount                 int      `json:"deniedCount"`
-	CanceledCount               int      `json:"canceledCount"`
-	AmbiguousCount              int      `json:"ambiguousCount"`
-	SucceededOutcomeCount       int      `json:"succeededOutcomeCount"`
-	AuthorizationDeniedCount    int      `json:"authorizationDeniedOutcomeCount"`
-	CanceledBeforeProviderCount int      `json:"canceledBeforeProviderOutcomeCount"`
-	FailedBeforeProviderCount   int      `json:"failedBeforeProviderOutcomeCount"`
-	ProviderUnknownCount        int      `json:"providerOutcomeUnknownCount"`
-	MissingOutcomeCount         int      `json:"missingOutcomeCount"`
-	UnknownOutcomeCount         int      `json:"unknownOutcomeCount"`
-	ChangeCount                 int      `json:"changeCount"`
-	HighWaterSequence           uint64   `json:"highWaterSequence,omitempty"`
-	EarliestRetainedSequence    uint64   `json:"earliestRetainedSequence,omitempty"`
-	EarliestStateSequence       uint64   `json:"earliestRetainedStateSequence,omitempty"`
-	SnapshotContinuityProved    bool     `json:"snapshotContinuityProved,omitempty"`
-	StableEventIDsProved        bool     `json:"stableEventIdsProved,omitempty"`
-	RunReferencesProved         bool     `json:"runReferencesProved,omitempty"`
-	SanitizedEvidenceProved     bool     `json:"sanitizedEvidenceProved,omitempty"`
-	ControlAction               string   `json:"controlAction,omitempty"`
-	ControlEpoch                uint64   `json:"controlEpoch,omitempty"`
-	AffectedPartitions          []uint32 `json:"affectedPartitions,omitempty"`
-	AcknowledgedPartitions      []uint32 `json:"acknowledgedPartitions,omitempty"`
-	ControlCompleted            bool     `json:"controlCompleted,omitempty"`
-	AuthorizationDenialsProved  bool     `json:"authorizationDenialsProved,omitempty"`
-	CapacityBoundsProved        bool     `json:"capacityBoundsProved,omitempty"`
-	PressureDiagnosticsProved   bool     `json:"pressureDiagnosticsProved,omitempty"`
-	DiagnosticRecordCount       int      `json:"diagnosticRecordCount,omitempty"`
-	ConvergenceCategory         string   `json:"convergenceCategory,omitempty"`
-	AttemptValidationCategory   string   `json:"attemptValidationCategory,omitempty"`
-	CheckpointProved            bool     `json:"checkpointProved,omitempty"`
+	Operation                      string   `json:"operation"`
+	ProcedureID                    string   `json:"procedureId"`
+	BindingID                      string   `json:"bindingId"`
+	Configured                     bool     `json:"configured,omitempty"`
+	NodeID                         string   `json:"nodeId,omitempty"`
+	CommitID                       string   `json:"commitId,omitempty"`
+	CommittedRevision              int64    `json:"committedRevision,omitempty"`
+	AttemptCount                   int      `json:"attemptCount"`
+	TerminalCount                  int      `json:"terminalCount"`
+	SucceededCount                 int      `json:"succeededCount"`
+	FailedCount                    int      `json:"failedCount"`
+	DeniedCount                    int      `json:"deniedCount"`
+	CanceledCount                  int      `json:"canceledCount"`
+	AmbiguousCount                 int      `json:"ambiguousCount"`
+	SucceededOutcomeCount          int      `json:"succeededOutcomeCount"`
+	AuthorizationDeniedCount       int      `json:"authorizationDeniedOutcomeCount"`
+	CanceledBeforeProviderCount    int      `json:"canceledBeforeProviderOutcomeCount"`
+	FailedBeforeProviderCount      int      `json:"failedBeforeProviderOutcomeCount"`
+	ProviderUnknownCount           int      `json:"providerOutcomeUnknownCount"`
+	MissingOutcomeCount            int      `json:"missingOutcomeCount"`
+	UnknownOutcomeCount            int      `json:"unknownOutcomeCount"`
+	ChangeCount                    int      `json:"changeCount"`
+	HighWaterSequence              uint64   `json:"highWaterSequence,omitempty"`
+	EarliestRetainedSequence       uint64   `json:"earliestRetainedSequence,omitempty"`
+	EarliestStateSequence          uint64   `json:"earliestRetainedStateSequence,omitempty"`
+	SnapshotContinuityProved       bool     `json:"snapshotContinuityProved,omitempty"`
+	StableEventIDsProved           bool     `json:"stableEventIdsProved,omitempty"`
+	RunReferencesProved            bool     `json:"runReferencesProved,omitempty"`
+	SanitizedEvidenceProved        bool     `json:"sanitizedEvidenceProved,omitempty"`
+	ControlAction                  string   `json:"controlAction,omitempty"`
+	ControlEpoch                   uint64   `json:"controlEpoch,omitempty"`
+	AffectedPartitions             []uint32 `json:"affectedPartitions,omitempty"`
+	AcknowledgedPartitions         []uint32 `json:"acknowledgedPartitions,omitempty"`
+	ControlCompleted               bool     `json:"controlCompleted,omitempty"`
+	AuthorizationDenialsProved     bool     `json:"authorizationDenialsProved,omitempty"`
+	CapacityBoundsProved           bool     `json:"capacityBoundsProved,omitempty"`
+	PressureDiagnosticsProved      bool     `json:"pressureDiagnosticsProved,omitempty"`
+	DiagnosticRecordCount          int      `json:"diagnosticRecordCount,omitempty"`
+	ConvergenceCategory            string   `json:"convergenceCategory,omitempty"`
+	AttemptValidationCategory      string   `json:"attemptValidationCategory,omitempty"`
+	ObservedPublicationDisposition string   `json:"observedPublicationDisposition,omitempty"`
+	CheckpointProved               bool     `json:"checkpointProved,omitempty"`
 }
 
 type procedureInferenceCheckpoint struct {
@@ -371,12 +372,16 @@ func awaitProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 				}
 				attemptsValid := true
 				result.AttemptValidationCategory = ""
+				result.ObservedPublicationDisposition = ""
 				for _, attempt := range list.Attempts {
 					if err := validateProcedureInferenceAttempt(attempt, configured, auditor, resources, true); err != nil {
 						attemptsValid = false
 						if result.AttemptValidationCategory == "" {
 							result.AttemptValidationCategory = procedureInferenceAttemptValidationCategory(err)
 						}
+					}
+					if attempt.State == procedureInferenceSucceeded && attempt.PublicationDisposition != "published" && result.ObservedPublicationDisposition == "" {
+						result.ObservedPublicationDisposition = procedureInferenceObservedPublicationDisposition(attempt.PublicationDisposition)
 					}
 					if attempt.State >= procedureInferenceSucceeded && attempt.State <= procedureInferenceAmbiguous {
 						terminal++
@@ -762,6 +767,17 @@ func validateProcedureInferenceAttempt(attempt procedureInferenceAttempt, config
 	}
 	_ = auditor
 	return nil
+}
+
+func procedureInferenceObservedPublicationDisposition(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "unset"
+	case "published", "not_published_provider_failure", "suppressed_procedure_control", "rejected_invalid_output", "publication_precondition_failed", "publication_pending", "publication_failed", "suppressed_authorization_or_control", "not_changed_or_duplicate":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "invalid"
+	}
 }
 
 func procedureInferenceAttemptValidationCategory(err error) string {

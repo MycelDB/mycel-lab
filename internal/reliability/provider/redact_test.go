@@ -41,6 +41,72 @@ func TestRedactorSanitizesStructuredTextAndSubprocessArguments(t *testing.T) {
 	}
 }
 
+func TestRedactorSanitizesCompoundCredentialEnvironmentAssignments(t *testing.T) {
+	redactor := NewRedactor(nil)
+	input := strings.Join([]string{
+		`AWS_SECRET_ACCESS_KEY: "fixture-access-secret"`,
+		`MYCELD_CLUSTER_BACKEND_AUTH_TOKEN=fixture-backend-token`,
+		`MYCELD_ENCRYPTION_STATIC_KEY_B64: fixture-encryption-key`,
+		`"AWS_SECRET_ACCESS_KEY": "quoted-access-secret"`,
+		`'MYCELD_ENCRYPTION_STATIC_KEY_B64': 'quoted-encryption-key'`,
+		`MYCELD_BOOTSTRAP_ADMIN_PASSWORD=x`,
+		`SAFE_TOKEN_COUNT: 3`,
+	}, "\n")
+	clean := redactor.SanitizeText(input)
+	for _, prohibited := range []string{"fixture-access-secret", "fixture-backend-token", "fixture-encryption-key", "quoted-access-secret", "quoted-encryption-key", "PASSWORD=x"} {
+		if strings.Contains(clean, prohibited) {
+			t.Fatalf("sanitized compound environment assignment contains %q: %s", prohibited, clean)
+		}
+	}
+	if !strings.Contains(clean, "SAFE_TOKEN_COUNT: 3") || strings.Count(clean, Redacted) != 6 {
+		t.Fatalf("unexpected compound environment sanitization: %s", clean)
+	}
+
+	structured, err := redactor.Sanitize(map[string]any{
+		"AWS_SECRET_ACCESS_KEY":             "fixture-access-secret",
+		"MYCELD_CLUSTER_BACKEND_AUTH_TOKEN": "fixture-backend-token",
+		"MYCELD_ENCRYPTION_STATIC_KEY_B64":  "fixture-encryption-key",
+		"MYCELD_BOOTSTRAP_ADMIN_PASSWORD":   "x",
+		"SAFE_TOKEN_COUNT":                  3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(structured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "fixture-") || !strings.Contains(string(raw), `"SAFE_TOKEN_COUNT":3`) {
+		t.Fatalf("unexpected structured compound environment sanitization: %s", raw)
+	}
+}
+
+func TestScannerFindsCompoundCredentialEnvironmentAssignments(t *testing.T) {
+	root := t.TempDir()
+	content := strings.Join([]string{
+		"AWS_SECRET_ACCESS_KEY=fixture-access-secret",
+		"MYCELD_CLUSTER_BACKEND_AUTH_TOKEN: fixture-backend-token",
+		"MYCELD_ENCRYPTION_STATIC_KEY_B64=fixture-encryption-key",
+		`"AWS_SECRET_ACCESS_KEY": "quoted-access-secret"`,
+		`'MYCELD_ENCRYPTION_STATIC_KEY_B64': 'quoted-encryption-key'`,
+		"MYCELD_BOOTSTRAP_ADMIN_PASSWORD=x",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(root, "compose.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := NewScanner(NewRedactor(nil), DefaultScanLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := scanner.Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OK || len(report.Findings) != 6 {
+		t.Fatalf("report=%#v", report)
+	}
+}
+
 func TestRedactorRejectsConfiguredSecretKeyCollisions(t *testing.T) {
 	redactor := NewRedactor([]string{"first-secret", "second-secret"})
 	_, err := redactor.Sanitize(map[string]any{"first-secret": 1, "second-secret": 2})
