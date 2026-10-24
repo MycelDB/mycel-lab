@@ -158,7 +158,23 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		ctx, budgetCancel = budgetLedger.TotalContext(ctx)
 		defer budgetCancel()
 	}
+	var sensitiveCleanup func() error
+	sensitiveCleanupDone := false
 	finish := func(status RunStatus, runErr error) (Result, error) {
+		if sensitiveCleanup != nil && !sensitiveCleanupDone {
+			sensitiveCleanupDone = true
+			cleanupErr := sensitiveCleanup()
+			cleanupEvidence := map[string]any{"completed": cleanupErr == nil}
+			if cleanupErr != nil {
+				cleanupEvidence["errorCategory"] = "sensitive_host_cleanup_failed"
+				runErr = errors.Join(runErr, errors.New("sensitive host artifact cleanup failed"))
+				status = RunFailed
+			}
+			if _, writeErr := sink.WriteJSON("environment/sensitive-host-cleanup.json", cleanupEvidence); writeErr != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("write sensitive host cleanup evidence: %w", writeErr))
+				status = RunFailed
+			}
+		}
 		if budgetLedger != nil {
 			snapshot := budgetLedger.Snapshot()
 			if errors.Is(context.Cause(ctx), provider.ErrTotalTimeout) || !time.Now().UTC().Before(snapshot.Deadline) {
@@ -206,12 +222,13 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return finish(RunFailed, err)
 	}
 	if opts.Store != nil {
-		resolvedJSON, sanitizeErr := sanitizedJSON(sink, scenario)
+		evidenceScenario := evidenceSafeResolvedScenario(scenario)
+		resolvedJSON, sanitizeErr := sanitizedJSON(sink, evidenceScenario)
 		if sanitizeErr != nil {
 			return finish(RunFailed, sanitizeErr)
 		}
 		var runPhases []store.RunPhase
-		for _, phase := range scenario.Phases {
+		for _, phase := range evidenceScenario.Phases {
 			phaseJSON, sanitizeErr := sanitizedJSON(sink, phase)
 			if sanitizeErr != nil {
 				return finish(RunFailed, sanitizeErr)
@@ -314,6 +331,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
 		eventRuntime = defaultEventRuntime(opts, driver, environment, scenario, &resources)
+	}
+	if cleaner, ok := eventRuntime.(interface{ CleanupSensitiveHostArtifacts() error }); ok {
+		sensitiveCleanup = cleaner.CleanupSensitiveHostArtifacts
 	}
 	assignmentMap := provision.AssignmentMap(resources)
 	if provisionDryRun {
@@ -566,11 +586,35 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 	return out, nil
 }
 
+func evidenceSafeResolvedScenario(scenario spec.ResolvedScenario) spec.ResolvedScenario {
+	copy := scenario
+	copy.Phases = append([]spec.PhaseSpec(nil), scenario.Phases...)
+	for phaseIndex := range copy.Phases {
+		copy.Phases[phaseIndex].Events = append([]spec.EventSpec(nil), scenario.Phases[phaseIndex].Events...)
+		for eventIndex := range copy.Phases[phaseIndex].Events {
+			event := &copy.Phases[phaseIndex].Events[eventIndex]
+			if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
+				continue
+			}
+			target := make(map[string]any, len(event.Target))
+			for key, value := range event.Target {
+				if key == "text" || key == "nodeId" || key == "blobPayload" {
+					continue
+				}
+				target[key] = value
+			}
+			target["graphContentRedacted"] = true
+			event.Target = target
+		}
+	}
+	return copy
+}
+
 func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario) error {
 	if _, err := sink.WriteJSON("harness-build.json", currentHarnessBuildIdentity()); err != nil {
 		return err
 	}
-	if _, err := sink.WriteJSON("resolved-scenario.json", scenario); err != nil {
+	if _, err := sink.WriteJSON("resolved-scenario.json", evidenceSafeResolvedScenario(scenario)); err != nil {
 		return err
 	}
 	if scenario.ProviderProfile != nil {

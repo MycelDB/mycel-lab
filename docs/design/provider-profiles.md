@@ -34,7 +34,7 @@ artifacts:
 
 Profiles live under `tests/reliability/provider-profiles/`. They are strict: unknown fields, unsupported versions, invalid dimensions, unbounded orchestration, unsupported declared capabilities, and inconsistent mode/secret combinations fail resolution. Profile documents are byte-bounded, fixed-depth typed structures.
 
-Capability slots are independent. The v1alpha1 harness resolves embeddings. Generation, enrichment, structured-output, and routing slots are reserved but fail as unavailable when declared. Deterministic mode supports the daemon's explicit `fake`/`token-basis-v1` contract. Emulator and live embedding profiles currently support `openai-compatible`; Anthropic and OpenRouter are not inferred from provider names and remain unsupported until matching connectors and pipelines exist.
+Capability slots are independent. The v1alpha1 harness resolves exactly one capability required by the scenario: semantic scenarios select embedding, while procedure-inference scenarios select generation. Other declared slots fail closed rather than being ignored. Deterministic mode supports the daemon's explicit embedding `fake`/`token-basis-v1` contract. Emulator and live embedding or generation profiles support `openai-compatible`; Anthropic and OpenRouter are not inferred from provider names and remain unsupported until matching connectors and pipelines exist.
 
 A scenario selects a profile with `providerProfileRef`. `--provider-profile <name-or-path>` overrides only that selection. Resolution records the selection source and SHA-256 of the exact profile bytes in `provider/provider-profile-resolved.json` and the resolved scenario.
 
@@ -48,6 +48,12 @@ secretRef:
 ```
 
 Deterministic and emulator profiles reject secret references. Live execution resolves referenced environment variables only after non-secret profile and enforcement validation. Dry-runs never read credential values. Resolved JSON, catalog records, events, metrics, errors, and artifacts never include resolved values.
+
+## Local protocol emulator scripts
+
+An emulator embedding or generation capability may include a bounded `emulatorScript` (`version: v1`). The schema accepts only a finite request ceiling and a finite digest-keyed outcome sequence. Inputs are selected by SHA-256; source text is never part of the profile. Supported OpenAI-compatible outcomes are success, HTTP error, malformed JSON, truncated JSON, refusal, and wrong dimensions, with bounded delay and `Retry-After` values. Safe request/model identity fields reject control characters and whitespace.
+
+The dedicated `mycel-provider-emulator` command serves only `/healthz`, `/v1/embeddings`, and `/v1/chat/completions`. Compose gives it no host port; k3d uses an internal ClusterIP Service. The environment driver records the exact runtime image ID, script hash, bounded logs, and sanitized JSONL observations. An observation contains method, path, content length, capability, bounded model identities, sequence, attempt, batch count, body/input digests, outcome/status, cancellation, and authorization presence plus an allowlisted `Bearer`/`Basic`/`Other` scheme classification—never body text, vectors, generation output, authorization/arbitrary header values, or credentials. Generation observations also omit provider request IDs. Scenario assertions require contiguous sequence numbers, valid digests, declared batching, bounded attempts/counts, and exact or minimum safe protocol categories.
 
 ## Budgets and enforcement
 

@@ -123,17 +123,18 @@ type ActorProfile struct {
 
 type Scenario struct {
 	TypeMeta           `yaml:",inline" json:",inline"`
-	Metadata           Metadata              `yaml:"metadata" json:"metadata"`
-	Seed               int64                 `yaml:"seed" json:"seed"`
-	Environment        EnvironmentSpec       `yaml:"environment" json:"environment"`
-	ClusterRef         string                `yaml:"clusterRef" json:"clusterRef"`
-	ProviderProfileRef string                `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
-	Semantic           *SemanticScenarioSpec `yaml:"semantic,omitempty" json:"semantic,omitempty"`
-	ClusterOverrides   map[string]any        `yaml:"clusterOverrides,omitempty" json:"clusterOverrides,omitempty"`
-	ActorGroups        []ActorGroupSpec      `yaml:"actorGroups" json:"actorGroups"`
-	Phases             []PhaseSpec           `yaml:"phases" json:"phases"`
-	Assertions         map[string]any        `yaml:"assertions,omitempty" json:"assertions,omitempty"`
-	Artifacts          map[string]bool       `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	Metadata           Metadata                        `yaml:"metadata" json:"metadata"`
+	Seed               int64                           `yaml:"seed" json:"seed"`
+	Environment        EnvironmentSpec                 `yaml:"environment" json:"environment"`
+	ClusterRef         string                          `yaml:"clusterRef" json:"clusterRef"`
+	ProviderProfileRef string                          `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
+	Semantic           *SemanticScenarioSpec           `yaml:"semantic,omitempty" json:"semantic,omitempty"`
+	ProcedureInference *ProcedureInferenceScenarioSpec `yaml:"procedureInference,omitempty" json:"procedureInference,omitempty"`
+	ClusterOverrides   map[string]any                  `yaml:"clusterOverrides,omitempty" json:"clusterOverrides,omitempty"`
+	ActorGroups        []ActorGroupSpec                `yaml:"actorGroups" json:"actorGroups"`
+	Phases             []PhaseSpec                     `yaml:"phases" json:"phases"`
+	Assertions         map[string]any                  `yaml:"assertions,omitempty" json:"assertions,omitempty"`
+	Artifacts          map[string]bool                 `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
 }
 
 type SemanticScenarioSpec struct {
@@ -303,18 +304,19 @@ type SuiteExecution struct {
 
 type ResolvedScenario struct {
 	TypeMeta           `yaml:",inline" json:",inline"`
-	Metadata           Metadata                  `yaml:"metadata" json:"metadata"`
-	Seed               int64                     `yaml:"seed" json:"seed"`
-	Environment        EnvironmentSpec           `yaml:"environment" json:"environment"`
-	ClusterRef         string                    `yaml:"clusterRef" json:"clusterRef"`
-	Cluster            ClusterSpec               `yaml:"cluster" json:"cluster"`
-	ProviderProfileRef string                    `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
-	ProviderProfile    *provider.ResolvedProfile `yaml:"providerProfile,omitempty" json:"providerProfile,omitempty"`
-	Semantic           *SemanticScenarioSpec     `yaml:"semantic,omitempty" json:"semantic,omitempty"`
-	ActorGroups        []ResolvedActorGroup      `yaml:"actorGroups" json:"actorGroups"`
-	Phases             []PhaseSpec               `yaml:"phases" json:"phases"`
-	Assertions         map[string]any            `yaml:"assertions,omitempty" json:"assertions,omitempty"`
-	Artifacts          map[string]bool           `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	Metadata           Metadata                        `yaml:"metadata" json:"metadata"`
+	Seed               int64                           `yaml:"seed" json:"seed"`
+	Environment        EnvironmentSpec                 `yaml:"environment" json:"environment"`
+	ClusterRef         string                          `yaml:"clusterRef" json:"clusterRef"`
+	Cluster            ClusterSpec                     `yaml:"cluster" json:"cluster"`
+	ProviderProfileRef string                          `yaml:"providerProfileRef,omitempty" json:"providerProfileRef,omitempty"`
+	ProviderProfile    *provider.ResolvedProfile       `yaml:"providerProfile,omitempty" json:"providerProfile,omitempty"`
+	Semantic           *SemanticScenarioSpec           `yaml:"semantic,omitempty" json:"semantic,omitempty"`
+	ProcedureInference *ProcedureInferenceScenarioSpec `yaml:"procedureInference,omitempty" json:"procedureInference,omitempty"`
+	ActorGroups        []ResolvedActorGroup            `yaml:"actorGroups" json:"actorGroups"`
+	Phases             []PhaseSpec                     `yaml:"phases" json:"phases"`
+	Assertions         map[string]any                  `yaml:"assertions,omitempty" json:"assertions,omitempty"`
+	Artifacts          map[string]bool                 `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
 }
 
 type ResolvedActorGroup struct {
@@ -470,6 +472,7 @@ func DefaultScenario(s *Scenario) {
 		}
 	}
 	s.Semantic.setDefaults()
+	s.ProcedureInference.setDefaults()
 	for i := range s.Phases {
 		for name, override := range s.Phases[i].ActorGroupOverrides {
 			if override.Rate.Mode == "" && (override.Rate.CommitsPerSecond != 0 || override.Rate.QueriesPerSecond != 0) {
@@ -530,8 +533,16 @@ func (s Scenario) Validate() error {
 			return fmt.Errorf("actor group %q rate must specify commitsPerSecond or queriesPerSecond", group.Name)
 		}
 	}
+	if s.Semantic != nil && s.ProcedureInference != nil {
+		return errors.New("semantic and procedureInference contracts must use separate scenarios")
+	}
 	if s.Semantic != nil {
 		if err := s.Semantic.Validate(seenActors, s.ProviderProfileRef); err != nil {
+			return err
+		}
+	}
+	if s.ProcedureInference != nil {
+		if err := s.ProcedureInference.Validate(seenActors, s.ProviderProfileRef); err != nil {
 			return err
 		}
 	}
@@ -565,6 +576,11 @@ func (s Scenario) Validate() error {
 					return fmt.Errorf("phase %q: %w", phase.Name, err)
 				}
 			}
+			if strings.HasPrefix(event.Type, "procedure-inference-") {
+				if err := ValidateProcedureInferenceEventTarget(event.Type, event.Target); err != nil {
+					return fmt.Errorf("phase %q: %w", phase.Name, err)
+				}
+			}
 		}
 	}
 	return nil
@@ -586,7 +602,7 @@ func validateEnvironmentSpec(environment EnvironmentSpec) error {
 
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "statefulset-image-upgrade", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "identity-duplicate-principal-replay", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild":
+	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "statefulset-image-upgrade", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "cluster-backup-cleanup", "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "identity-duplicate-principal-replay", "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-emulator-assert", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild":
 		return true
 	default:
 		return false

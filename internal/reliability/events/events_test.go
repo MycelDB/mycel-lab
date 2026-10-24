@@ -3,6 +3,8 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,6 +15,29 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
+
+func TestDriverRuntimeCleansSensitiveSystemBackupHostDirectories(t *testing.T) {
+	if safeSystemBackupHostDir(string(os.PathSeparator)) {
+		t.Fatal("filesystem root accepted as backup cleanup path")
+	}
+	hostDir := t.TempDir()
+	archive := filepath.Join(hostDir, "system-backup.tar")
+	if err := os.WriteFile(archive, []byte("sensitive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewDriverRuntime(nil, env.Environment{})
+	runtime.systemBackups["default"] = SystemBackupOperationResult{HostDir: hostDir}
+	if err := runtime.CleanupSensitiveHostArtifacts(); err != nil {
+		t.Fatalf("CleanupSensitiveHostArtifacts() error=%v", err)
+	}
+	if _, err := os.Stat(hostDir); !os.IsNotExist(err) {
+		t.Fatalf("host backup directory still exists: %v", err)
+	}
+	runtime.systemBackups["unsafe"] = SystemBackupOperationResult{HostDir: string(os.PathSeparator)}
+	if err := runtime.CleanupSensitiveHostArtifacts(); err == nil {
+		t.Fatal("unsafe sensitive cleanup path did not fail closed")
+	}
+}
 
 func TestEventScheduleStartsAtPhaseBoundary(t *testing.T) {
 	phase := spec.PhaseSpec{Name: "outage", Events: []spec.EventSpec{{Type: "pod-stop", Target: map[string]any{"pod": "myceld-1"}}}}

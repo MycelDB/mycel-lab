@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added issue #50 provider-neutral procedure-inference acceptance contracts: a credential-free generation emulator, authoritative attempt/run/change polling assertions, completed control-barrier checks, clustered restart recovery, and system backup/restore scenarios.
+- Added sanitized process-bound procedure-inference evidence validation and explicit separation between environment acceptance and daemon-only extreme capacity arithmetic.
+- Added the SGT6 deterministic k3d semantic recovery suite for follower/leader/sequential restart, pending work, persisted indexes, interrupted rebuild, stale-completion fencing, replica outage, and per-node convergence (#46).
+- Added SGT7 bounded credential-free OpenAI-compatible emulators for Compose and k3d, including scripted protocol failures, deadline cancellation, sanitized observation reconciliation, exact emulator image/script evidence, and fail-closed repair scenarios (#46).
+- Added SGT8 deterministic advanced semantic matrix coverage for Unicode/long inputs, repeated-embedding tie ordering, complete pagination, concurrent churn, tombstones, finite high-cardinality convergence, and graph-authoritative k3d backup/restore with public rebuild (#46).
+- Added fail-closed per-case SGT8 matrix artifacts binding required capabilities, proof level, profile/fixture hashes, negative controls, oracle text, evidence paths, and explicit `passed`, `failed`, or non-success `not-run` verdicts (#46).
 - Added SGT3 public-API semantic resource provisioning, reverse cleanup, finite semantic events, bounded maintenance convergence, and credential-free dry-run plans (#46).
 - Added the compose-first SGT4 semantic graph-index contract scenario covering backfill, deterministic ranking/pagination/filtering, projection lifecycle, update/delete, transaction negatives, isolation, disabled rules, and rebuild (#46).
 - Added SGT5 Level 3 provenance, analyzed/fresh frontier, bounded-capacity, record-identity, direct pagination, and minimum capability assertions (#46, MycelDB/mycel#238).

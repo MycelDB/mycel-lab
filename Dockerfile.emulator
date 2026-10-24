@@ -1,0 +1,16 @@
+FROM golang:1.25.5-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/mycel-provider-emulator ./cmd/mycel-provider-emulator \
+    && mkdir -p /out/emulator-data \
+    && chmod 0700 /out/emulator-data
+
+FROM scratch
+COPY --from=build /out/mycel-provider-emulator /mycel-provider-emulator
+COPY --from=build --chown=65532:65532 /out/emulator-data /var/lib/mycel-emulator
+USER 65532:65532
+EXPOSE 18080
+ENTRYPOINT ["/mycel-provider-emulator"]
+CMD ["serve"]

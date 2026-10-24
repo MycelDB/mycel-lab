@@ -176,12 +176,27 @@ mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
+mycel-lab run suite k3d-semantic-graph-index-recovery --dry-run
+mycel-lab run suite semantic-protocol-emulator --dry-run
+mycel-lab run suite semantic-advanced-matrix --dry-run
+mycel-lab run suite compose-procedure-inference-control-emulator --dry-run
+mycel-lab run suite k3d-procedure-inference-recovery --dry-run
+mycel-lab run suite k3d-procedure-inference-backup-restore --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run
 mycel-lab run suite cluster-release-gate --dry-run
 ```
 
 Destructive/operator variants use the same suite names with
-`--confirm-destructive`. Restart-soak suites are native Mycel Lab k3d scenarios
+`--confirm-destructive`. Procedure-inference suites are credential-free but still
+modify disposable Compose/k3d state; issue #50 requires fresh approval before
+each real run. Before a destructive SGT7 or procedure-inference emulator run,
+build or supply the exact emulator image declared by the scenarios:
+
+```sh
+make build-provider-emulator PROVIDER_EMULATOR_IMAGE=local/mycel-provider-emulator:dev
+```
+
+Restart-soak suites are native Mycel Lab k3d scenarios
 with repeated rotating `node-restart` events. `compose-user-backup-operations`
 is a native Compose smoke suite for `user-backup-export`,
 `user-backup-validate`, and `user-backup-import` operations through the

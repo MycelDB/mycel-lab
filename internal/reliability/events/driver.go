@@ -2,7 +2,9 @@ package events
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
@@ -11,24 +13,42 @@ import (
 )
 
 type DriverRuntime struct {
-	Driver        env.EnvironmentDriver
-	Environment   env.Environment
-	Scenario      spec.ResolvedScenario
-	Resources     *provision.ScenarioResources
-	userBackups   map[string]UserBackupOperationResult
-	systemBackups map[string]SystemBackupOperationResult
+	Driver                        env.EnvironmentDriver
+	Environment                   env.Environment
+	Scenario                      spec.ResolvedScenario
+	Resources                     *provision.ScenarioResources
+	userBackups                   map[string]UserBackupOperationResult
+	systemBackups                 map[string]SystemBackupOperationResult
+	procedureInferenceCheckpoints map[string]procedureInferenceCheckpoint
 }
 
 func NewDriverRuntime(driver env.EnvironmentDriver, environment env.Environment) *DriverRuntime {
-	return &DriverRuntime{Driver: driver, Environment: environment, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}}
+	return &DriverRuntime{Driver: driver, Environment: environment, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}, procedureInferenceCheckpoints: map[string]procedureInferenceCheckpoint{}}
 }
 
 func NewDriverRuntimeWithResources(driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources) *DriverRuntime {
-	return &DriverRuntime{Driver: driver, Environment: environment, Resources: resources, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}}
+	return &DriverRuntime{Driver: driver, Environment: environment, Resources: resources, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}, procedureInferenceCheckpoints: map[string]procedureInferenceCheckpoint{}}
 }
 
 func NewDriverRuntimeWithScenario(driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, resources *provision.ScenarioResources) *DriverRuntime {
-	return &DriverRuntime{Driver: driver, Environment: environment, Scenario: scenario, Resources: resources, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}}
+	return &DriverRuntime{Driver: driver, Environment: environment, Scenario: scenario, Resources: resources, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}, procedureInferenceCheckpoints: map[string]procedureInferenceCheckpoint{}}
+}
+
+func (r *DriverRuntime) CleanupSensitiveHostArtifacts() error {
+	var failures []error
+	for key, backup := range r.systemBackups {
+		if backup.HostDir != "" {
+			if !safeSystemBackupHostDir(backup.HostDir) {
+				failures = append(failures, errors.New("sensitive backup cleanup path is outside the managed temporary root"))
+			} else if err := os.RemoveAll(backup.HostDir); err != nil {
+				failures = append(failures, errors.New("remove sensitive backup host directory"))
+			} else if _, err := os.Stat(backup.HostDir); !os.IsNotExist(err) {
+				failures = append(failures, errors.New("sensitive backup host directory still exists after cleanup"))
+			}
+		}
+		delete(r.systemBackups, key)
+	}
+	return errors.Join(failures...)
 }
 
 func (r *DriverRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
@@ -48,7 +68,7 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 	defer release()
 	ctx = operationCtx
 	if recorder != nil {
-		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"dryRun": dryRun, "runtime": r.Environment.Driver}}); err != nil {
+		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"dryRun": dryRun, "runtime": r.Environment.Driver}}); err != nil {
 			return err
 		}
 	}
@@ -83,7 +103,7 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 		}
 	}
 	if recorder != nil {
-		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: completionPayload})
+		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: completionPayload})
 	}
 	return nil
 }
@@ -97,6 +117,12 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "statefulset-image-upgrade":
 		result, err := executeStatefulSetImageUpgradeEvent(ctx, r.Driver, r.Environment, event.Target)
 		return map[string]any{"statefulSetImageUpgrade": result}, err
+	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert":
+		result, err := executeProcedureInferenceEvent(ctx, r.Driver, r.Environment, r.Resources, r.procedureInferenceCheckpoints, event.Type, event.Target)
+		return map[string]any{"procedureInference": result}, err
+	case "procedure-inference-emulator-assert":
+		result, err := executeSemanticProviderEmulatorAssert(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"procedureInferenceEmulator": result}, err
 	case "commonfolio-automation-seed", "commonfolio-automation-diagnostics":
 		result, err := executeCommonFolioAutomationEvent(ctx, r.Driver, r.Environment, r.Resources, event.Type, event.Target)
 		return map[string]any{"commonfolioAutomation": result}, err
@@ -127,7 +153,7 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 			r.userBackups[userBackupKey(event.Target)] = result
 		}
 		return map[string]any{"userBackup": result}, err
-	case "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify":
+	case "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "cluster-backup-cleanup":
 		result, err := executeSystemBackupEvent(ctx, r.Driver, r.Environment, r.Scenario, r.Resources, event.Type, event.Target, r.systemBackups)
 		if event.Type == "cluster-backup-create" || event.Type == "cluster-restore-apply" {
 			r.systemBackups[systemBackupKey(event.Target)] = result
@@ -192,7 +218,7 @@ func (r *DriverRuntime) recordFailure(ctx context.Context, recorder Recorder, ph
 		for key, value := range eventPayload {
 			payload[key] = value
 		}
-		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: payload})
+		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: payload})
 	}
 	return err
 }

@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-procedure-inference-control-emulator
+  description: Credential-free procedure-inference lifecycle, polling, control, and sanitized emulator acceptance.
+scenarios:
+  - path: ../scenarios/compose-procedure-inference-control-emulator/compose-procedure-inference-control-emulator.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

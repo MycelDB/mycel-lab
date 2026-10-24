@@ -234,6 +234,34 @@ func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 	}
 }
 
+func TestProcedureInferenceCredentialGrantRequestRestrictsDelegationToWriter(t *testing.T) {
+	resources := &ProcedureInferenceResources{SpaceID: "space", DomainID: "domain", CredentialID: "credential", EndpointID: "endpoint", ModelID: "model"}
+	request := procedureInferenceCredentialGrantRequest(resources, " writer-principal ")
+	if request == nil || !reflect.DeepEqual(request.GetAllowOnBehalfOfPrincipalIds(), []string{"writer-principal"}) {
+		t.Fatalf("allow_on_behalf_of_principal_ids=%v", request.GetAllowOnBehalfOfPrincipalIds())
+	}
+	if request.GetSpaceId() != "space" || request.GetCredentialId() != "credential" || request.GetScope().GetDomainId() != "domain" || !request.GetAllowBackgroundUse() {
+		t.Fatalf("grant request=%+v", request)
+	}
+}
+
+func TestProcedureInferenceTargetPrincipalID(t *testing.T) {
+	resources := &ScenarioResources{
+		ProcedureInference: &ProcedureInferenceResources{TargetActorID: "writer"},
+		Assignments: []ActorAssignment{
+			{ActorID: "other", PrincipalID: "principal-other"},
+			{ActorID: "writer", PrincipalID: " principal-writer "},
+		},
+	}
+	if got := procedureInferenceTargetPrincipalID(resources); got != "principal-writer" {
+		t.Fatalf("procedureInferenceTargetPrincipalID()=%q", got)
+	}
+	resources.Assignments[1].PrincipalID = ""
+	if got := procedureInferenceTargetPrincipalID(resources); got != "" {
+		t.Fatalf("procedureInferenceTargetPrincipalID()=%q, want empty", got)
+	}
+}
+
 func TestPlanScenarioCreatesDeterministicSafeSemanticPlan(t *testing.T) {
 	scenario, err := catalog.ResolveScenarioFile(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml"), catalog.ResolveOptions{})
 	if err != nil {

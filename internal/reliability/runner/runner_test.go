@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,53 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
+
+type capturingRunStore struct {
+	*store.MemoryStore
+	run    store.Run
+	phases []store.RunPhase
+}
+
+func (s *capturingRunStore) CreateRun(ctx context.Context, run store.Run, actors []store.RunActorProfile, phases []store.RunPhase) error {
+	s.run = run
+	s.phases = append([]store.RunPhase(nil), phases...)
+	return s.MemoryStore.CreateRun(ctx, run, actors, phases)
+}
+
+func TestStoreSnapshotsRemoveProcedureGraphContent(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "graph-actor-smoke.yaml")
+	scenario.Phases[0].Events = []spec.EventSpec{{Type: "procedure-inference-node-create", Target: map[string]any{"nodeId": "private-node", "text": "private graph text", "timeout": "1s"}}}
+	st := &capturingRunStore{MemoryStore: store.NewMemoryStore()}
+	if _, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), Store: st, EnvironmentDriver: env.DryRunDriver{}}); err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	for name, raw := range map[string][]byte{"run": st.run.ResolvedJSON, "phase": st.phases[0].SpecSnapshotJSON} {
+		if bytes.Contains(raw, []byte("private-node")) || bytes.Contains(raw, []byte("private graph text")) {
+			t.Fatalf("%s store snapshot retained graph content: %s", name, raw)
+		}
+	}
+}
+
+func TestEvidenceSafeResolvedScenarioRemovesProcedureGraphContent(t *testing.T) {
+	scenario := spec.ResolvedScenario{Phases: []spec.PhaseSpec{{Events: []spec.EventSpec{
+		{Type: "procedure-inference-node-create", Target: map[string]any{"nodeId": "private-id", "text": "private text", "timeout": "1s"}},
+		{Type: "system-backup-fixture", Target: map[string]any{"blobPayload": "private payload", "ordinal": 0}},
+	}}}}
+	safe := evidenceSafeResolvedScenario(scenario)
+	for _, event := range safe.Phases[0].Events {
+		for _, field := range []string{"nodeId", "text", "blobPayload"} {
+			if _, exists := event.Target[field]; exists {
+				t.Fatalf("%s retained in %s evidence", field, event.Type)
+			}
+		}
+		if event.Target["graphContentRedacted"] != true {
+			t.Fatalf("redaction marker missing for %s", event.Type)
+		}
+	}
+	if scenario.Phases[0].Events[0].Target["text"] != "private text" {
+		t.Fatal("runtime scenario was mutated")
+	}
+}
 
 func TestPhaseTransitionsAreValid(t *testing.T) {
 	phase := PhaseState{Name: "warmup", Status: PhasePending}

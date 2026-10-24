@@ -1,0 +1,18 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: procedure-inference-writer
+  description: Ordinary graph writer used to trigger procedure-inference acceptance without inference-specific privileges.
+behavior:
+  type: semantic-control
+  identity:
+    mode: per-instance
+    principalPrefix: procedure-writer
+  dataScope:
+    space:
+      mode: per-instance
+      prefix: procedure-space
+    domain:
+      mode: per-instance
+      schema: procedure-fixture
+      prefix: procedure-domain

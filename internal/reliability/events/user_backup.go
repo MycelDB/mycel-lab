@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
@@ -340,7 +341,8 @@ func expandTargetPath(value string, environment env.Environment, resources *prov
 	if resources != nil {
 		runID = resources.RunID
 	}
-	out := strings.ReplaceAll(value, "{environment}", environment.Name)
+	out := strings.ReplaceAll(value, "{tempDir}", os.TempDir())
+	out = strings.ReplaceAll(out, "{environment}", environment.Name)
 	out = strings.ReplaceAll(out, "{runID}", runID)
 	return out
 }

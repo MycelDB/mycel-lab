@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -105,9 +106,39 @@ func executeSystemBackupEvent(ctx context.Context, driver env.EnvironmentDriver,
 		return executeClusterRestoreApply(ctx, driver, environment, scenario, state, target, result)
 	case "cluster-restore-verify":
 		return executeClusterRestoreVerify(ctx, driver, environment, resources, state, target, result)
+	case "cluster-backup-cleanup":
+		backup := state[systemBackupKey(target)]
+		if strings.TrimSpace(backup.HostDir) == "" {
+			return result, fmt.Errorf("no cluster backup host directory recorded for %q", systemBackupKey(target))
+		}
+		if !safeSystemBackupHostDir(backup.HostDir) {
+			return result, errors.New("cluster backup host cleanup path is outside the managed temporary root")
+		}
+		if err := os.RemoveAll(backup.HostDir); err != nil {
+			return result, errors.New("remove cluster backup host directory")
+		}
+		if _, err := os.Stat(backup.HostDir); !os.IsNotExist(err) {
+			return result, errors.New("cluster backup host directory still exists after cleanup")
+		}
+		delete(state, systemBackupKey(target))
+		result.HostDir = ""
+		return result, nil
 	default:
 		return result, fmt.Errorf("unsupported system backup event type %q", eventType)
 	}
+}
+
+func safeSystemBackupHostDir(path string) bool {
+	root, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return false
+	}
+	candidate, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil || candidate == root {
+		return false
+	}
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
 }
 
 func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {

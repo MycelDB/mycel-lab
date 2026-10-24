@@ -2,6 +2,9 @@ package env
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
 	"github.com/MycelDB/mycel-lab/internal/reliability/deploy"
+	"github.com/MycelDB/mycel-lab/internal/reliability/emulator"
 	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
@@ -33,6 +37,7 @@ const (
 	CapabilityObjectStoreFixture Capability = "object-store-fixture"
 	CapabilityVolumeReplacement  Capability = "volume-replacement"
 	CapabilityImageUpgrade       Capability = "image-upgrade"
+	CapabilityProviderEmulator   Capability = "provider-emulator"
 )
 
 type CapabilitySet map[Capability]struct{}
@@ -113,6 +118,31 @@ type ExecResult = executil.Result
 
 type EnvironmentResetter interface {
 	Reset(context.Context, Environment) error
+}
+
+type ProviderEmulatorInspector interface {
+	ProviderEmulatorObservations(context.Context, Environment) (ExecResult, error)
+}
+
+func PersistProviderEmulatorObservations(sink *artifacts.Sink, raw string, requireNonempty bool) error {
+	if sink == nil {
+		return errors.New("provider emulator observation sink is required")
+	}
+	persisted := raw
+	if sanitizer := sink.Sanitizer(); sanitizer != nil {
+		persisted = sanitizer.SanitizeText(raw)
+	}
+	observations, err := emulator.DecodeObservationEvidence(persisted)
+	if err != nil {
+		return errors.New("provider emulator observations failed validation")
+	}
+	if requireNonempty && len(observations) == 0 {
+		return errors.New("provider emulator observations are empty")
+	}
+	if _, err := sink.WriteText("provider/emulator-observations.jsonl", raw); err != nil {
+		return errors.New("write provider emulator observations failed")
+	}
+	return nil
 }
 
 type NodeFileStager interface {
@@ -325,14 +355,14 @@ type K3DDriver struct {
 func (d K3DDriver) Name() string { return "k3d" }
 
 func (d K3DDriver) Capabilities() CapabilitySet {
-	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityVolumeReplacement, CapabilityImageUpgrade)
+	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityVolumeReplacement, CapabilityImageUpgrade, CapabilityProviderEmulator)
 }
 
 func (d K3DDriver) Validate(environment spec.EnvironmentSpec) error {
-	return rejectUnknownOptions(environment.Options, "clusterNamePrefix", "createArguments", "consolePortBase")
+	return rejectUnknownOptions(environment.Options, "clusterNamePrefix", "createArguments", "consolePortBase", "providerEmulatorImage")
 }
 
-func (d K3DDriver) Preflight(ctx context.Context, _ spec.EnvironmentSpec) error {
+func (d K3DDriver) Preflight(ctx context.Context, environment spec.EnvironmentSpec) error {
 	if !d.Confirmed {
 		return RequireDestructiveConfirmation(Options{})
 	}
@@ -342,6 +372,11 @@ func (d K3DDriver) Preflight(ctx context.Context, _ spec.EnvironmentSpec) error 
 	}
 	if _, err := runner.Run(ctx, "kubectl", "version", "--client=true"); err != nil {
 		return fmt.Errorf("kubectl preflight failed: %w", err)
+	}
+	if image := strings.TrimSpace(stringOption(environment.Options, "providerEmulatorImage", "")); image != "" {
+		if _, err := runner.Run(ctx, "docker", "image", "inspect", image); err != nil {
+			return fmt.Errorf("provider emulator image %s is unavailable: %w", image, err)
+		}
 	}
 	return nil
 }
@@ -363,9 +398,25 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario, e
 		return Environment{}, err
 	}
 	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName, Metadata: map[string]string{"nodeCount": strconv.Itoa(scenario.Cluster.Nodes), "consolePortBase": strconv.Itoa(intOption(environmentSpec.Options, "consolePortBase", DefaultConsolePortBase))}}
+	if scenario.ProviderProfile != nil && string(scenario.ProviderProfile.Profile.Mode) == "emulator" {
+		scriptHash, err := providerEmulatorScriptSHA256(scenario)
+		if err != nil {
+			_ = d.Delete(context.Background(), environment)
+			return Environment{}, err
+		}
+		environment.Metadata["providerEmulator"] = "true"
+		environment.Metadata["providerEmulatorImage"] = stringOption(environmentSpec.Options, "providerEmulatorImage", "local/mycel-provider-emulator:dev")
+		environment.Metadata["providerEmulatorScriptSHA256"] = scriptHash
+	}
 	if err := d.importLocalImageIfPresent(ctx, environment, scenario.Cluster.Image); err != nil {
 		_ = d.Delete(context.Background(), environment)
 		return Environment{}, err
+	}
+	if emulatorImage := environment.Metadata["providerEmulatorImage"]; emulatorImage != "" {
+		if err := d.importLocalImageIfPresent(ctx, environment, emulatorImage); err != nil {
+			_ = d.Delete(context.Background(), environment)
+			return Environment{}, err
+		}
 	}
 	manifests, err := deploy.RenderKubernetesManifests(scenario)
 	if err != nil {
@@ -422,8 +473,15 @@ func (d K3DDriver) WaitReady(ctx context.Context, environment Environment) error
 	if _, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "rollout", "status", "statefulset/myceld", timeoutArg); err != nil {
 		return err
 	}
-	_, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "pods", "-l", "app=myceld", "--for=condition=Ready", timeoutArg)
-	return err
+	if _, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "pods", "-l", "app=myceld", "--for=condition=Ready", timeoutArg); err != nil {
+		return err
+	}
+	if environment.Metadata["providerEmulator"] == "true" {
+		if _, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "rollout", "status", "deployment/mycel-provider-emulator", timeoutArg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d K3DDriver) Nodes(ctx context.Context, environment Environment) ([]Node, error) {
@@ -775,6 +833,13 @@ spec:
 	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
 }
 
+func (d K3DDriver) ProviderEmulatorObservations(ctx context.Context, environment Environment) (ExecResult, error) {
+	if environment.Metadata["providerEmulator"] != "true" {
+		return ExecResult{}, errors.New("provider emulator is not configured")
+	}
+	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", "deployment/mycel-provider-emulator", "--", "/mycel-provider-emulator", "dump", "--file", "/data/observations.jsonl")
+}
+
 func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, sink *artifacts.Sink) error {
 	if _, err := sink.WriteJSON("environment/state.json", environment); err != nil {
 		return err
@@ -797,6 +862,29 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 			return writeErr
 		}
 	}
+	if environment.Metadata["providerEmulator"] == "true" {
+		imageID, imageErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pods", "-l", "app=mycel-provider-emulator", "-o", "jsonpath={range .items[*].status.containerStatuses[*]}{.imageID}{\"\\n\"}{end}")
+		if imageErr != nil {
+			return fmt.Errorf("capture provider emulator image ID: %w", imageErr)
+		}
+		if strings.TrimSpace(imageID.Stdout) == "" {
+			return errors.New("capture provider emulator image ID: empty image ID")
+		}
+		if _, err := sink.WriteJSON("provider/emulator-image.json", map[string]any{"image": environment.Metadata["providerEmulatorImage"], "imageID": strings.TrimSpace(imageID.Stdout), "scriptSHA256": environment.Metadata["providerEmulatorScriptSHA256"]}); err != nil {
+			return err
+		}
+		observations, err := d.ProviderEmulatorObservations(ctx, environment)
+		if err != nil {
+			return fmt.Errorf("capture provider emulator observations: %w", err)
+		}
+		if err := PersistProviderEmulatorObservations(sink, observations.Stdout, false); err != nil {
+			return err
+		}
+		logs, logErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "logs", "deployment/mycel-provider-emulator", "--tail=1000")
+		if _, err := sink.WriteText("provider/emulator.log", formatCommandResult(logs, logErr)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -816,11 +904,11 @@ type ComposeDriver struct {
 func (d ComposeDriver) Name() string { return "compose" }
 
 func (d ComposeDriver) Capabilities() CapabilitySet {
-	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityObjectStoreFixture)
+	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityObjectStoreFixture, CapabilityProviderEmulator)
 }
 
 func (d ComposeDriver) Validate(environment spec.EnvironmentSpec) error {
-	return rejectUnknownOptions(environment.Options, "composeFile", "composeFiles", "projectName", "projectNamePrefix", "serviceNames", "grpcPorts", "objectStoreFixture", "imageOverride")
+	return rejectUnknownOptions(environment.Options, "composeFile", "composeFiles", "projectName", "projectNamePrefix", "serviceNames", "grpcPorts", "objectStoreFixture", "imageOverride", "providerEmulatorImage")
 }
 
 func (d ComposeDriver) Preflight(ctx context.Context, environment spec.EnvironmentSpec) error {
@@ -849,6 +937,11 @@ func (d ComposeDriver) Preflight(ctx context.Context, environment spec.Environme
 	if ports := intSliceOption(environment.Options, "grpcPorts"); len(ports) > 0 {
 		if err := ensureHostPortsAvailable(ports); err != nil {
 			return err
+		}
+	}
+	if image := strings.TrimSpace(stringOption(environment.Options, "providerEmulatorImage", "")); image != "" {
+		if _, err := d.runner().Run(ctx, "docker", "image", "inspect", image); err != nil {
+			return fmt.Errorf("provider emulator image %s is unavailable: %w", image, err)
 		}
 	}
 	return nil
@@ -885,11 +978,37 @@ func (d ComposeDriver) Create(ctx context.Context, scenario spec.ResolvedScenari
 			composeFiles[i] = abs
 		}
 	}
+	generatedEmulatorFile := ""
+	if scenario.ProviderProfile != nil && string(scenario.ProviderProfile.Profile.Mode) == "emulator" {
+		var err error
+		generatedEmulatorFile, err = writeComposeProviderEmulatorOverride(scenario, stringOption(environmentSpec.Options, "providerEmulatorImage", "local/mycel-provider-emulator:dev"))
+		if err != nil {
+			return Environment{}, err
+		}
+		composeFiles = append(composeFiles, generatedEmulatorFile)
+	}
+	removeGeneratedEmulatorFile := generatedEmulatorFile != ""
+	defer func() {
+		if removeGeneratedEmulatorFile {
+			_ = os.RemoveAll(filepath.Dir(generatedEmulatorFile))
+		}
+	}()
 	projectName := stringOption(environmentSpec.Options, "projectName", "")
 	if projectName == "" {
 		projectName = composeProjectName(scenario.Metadata.Name, stringOption(environmentSpec.Options, "projectNamePrefix", "mycel-lab"))
 	}
 	metadata := map[string]string{"composeFile": composeFiles[0], "composeFiles": strings.Join(composeFiles, string(os.PathListSeparator)), "projectName": projectName, "nodeCount": strconv.Itoa(scenario.Cluster.Nodes)}
+	if generatedEmulatorFile != "" {
+		scriptHash, err := providerEmulatorScriptSHA256(scenario)
+		if err != nil {
+			_ = os.RemoveAll(filepath.Dir(generatedEmulatorFile))
+			return Environment{}, err
+		}
+		metadata["providerEmulator"] = "true"
+		metadata["providerEmulatorImage"] = stringOption(environmentSpec.Options, "providerEmulatorImage", "local/mycel-provider-emulator:dev")
+		metadata["providerEmulatorScriptSHA256"] = scriptHash
+		metadata["generatedProviderEmulatorFile"] = generatedEmulatorFile
+	}
 	if image := strings.TrimSpace(stringOption(environmentSpec.Options, "imageOverride", "")); image != "" {
 		metadata["imageOverride"] = image
 	}
@@ -918,6 +1037,7 @@ func (d ComposeDriver) Create(ctx context.Context, scenario spec.ResolvedScenari
 		_ = d.Delete(context.Background(), environment)
 		return Environment{}, err
 	}
+	removeGeneratedEmulatorFile = false
 	return environment, nil
 }
 
@@ -1017,6 +1137,7 @@ func (d ComposeDriver) CopyToNode(ctx context.Context, environment Environment, 
 type composeImageEvidence struct {
 	Service       string `json:"service,omitempty"`
 	ImageOverride string `json:"imageOverride,omitempty"`
+	ScriptSHA256  string `json:"scriptSHA256,omitempty"`
 	ID            string `json:"id"`
 	ContainerName string `json:"containerName"`
 	Repository    string `json:"repository,omitempty"`
@@ -1051,6 +1172,13 @@ func parseComposeImageEvidence(raw string) ([]composeImageEvidence, error) {
 		return nil, errors.New("compose image output contains no records")
 	}
 	return images, nil
+}
+
+func (d ComposeDriver) ProviderEmulatorObservations(ctx context.Context, environment Environment) (ExecResult, error) {
+	if environment.Metadata["providerEmulator"] != "true" {
+		return ExecResult{}, errors.New("provider emulator is not configured")
+	}
+	return d.compose(ctx, environment, "exec", "-T", "mycel-provider-emulator", "/mycel-provider-emulator", "dump", "--file", "/var/lib/mycel-emulator/observations.jsonl")
 }
 
 func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment, sink *artifacts.Sink) error {
@@ -1107,6 +1235,33 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 	if _, err := sink.WriteText("environment/compose-images.jsonl", encodedEvidence.String()); err != nil {
 		return err
 	}
+	if environment.Metadata["providerEmulator"] == "true" {
+		result, err := d.compose(ctx, environment, "images", "--format", "json", "mycel-provider-emulator")
+		if err != nil {
+			return fmt.Errorf("capture provider emulator image: %w", err)
+		}
+		images, err := parseComposeImageEvidence(result.Stdout)
+		if err != nil || len(images) != 1 || strings.TrimSpace(images[0].ID) == "" {
+			return fmt.Errorf("provider emulator image evidence must contain exactly one nonempty image ID")
+		}
+		images[0].Service = "mycel-provider-emulator"
+		images[0].ImageOverride = environment.Metadata["providerEmulatorImage"]
+		images[0].ScriptSHA256 = environment.Metadata["providerEmulatorScriptSHA256"]
+		if _, err := sink.WriteJSON("provider/emulator-image.json", images[0]); err != nil {
+			return err
+		}
+		observations, err := d.ProviderEmulatorObservations(ctx, environment)
+		if err != nil {
+			return fmt.Errorf("capture provider emulator observations: %w", err)
+		}
+		if err := PersistProviderEmulatorObservations(sink, observations.Stdout, false); err != nil {
+			return err
+		}
+		logs, logErr := d.compose(ctx, environment, "logs", "--no-color", "--tail=1000", "mycel-provider-emulator")
+		if _, err := sink.WriteText("provider/emulator.log", formatCommandResult(logs, logErr)); err != nil {
+			return err
+		}
+	}
 	for _, service := range services {
 		result, err := d.compose(ctx, environment, "logs", "--no-color", "--tail=200", service)
 		if _, writeErr := sink.WriteText(filepath.Join("environment", "logs", service+".log"), formatCommandResult(result, err)); writeErr != nil {
@@ -1118,7 +1273,58 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 
 func (d ComposeDriver) Delete(ctx context.Context, environment Environment) error {
 	_, err := d.compose(ctx, environment, "down", "--volumes", "--remove-orphans")
+	if generated := strings.TrimSpace(environment.Metadata["generatedProviderEmulatorFile"]); generated != "" {
+		_ = os.RemoveAll(filepath.Dir(generated))
+	}
 	return err
+}
+
+func providerEmulatorScriptSHA256(scenario spec.ResolvedScenario) (string, error) {
+	if scenario.ProviderProfile == nil {
+		return "", errors.New("provider emulator requires a provider profile")
+	}
+	capability, _, err := scenario.ProviderProfile.Profile.ProtocolEmulatorCapability()
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(capability.EmulatorScript)
+	if err != nil {
+		return "", fmt.Errorf("encode provider emulator script identity: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func writeComposeProviderEmulatorOverride(scenario spec.ResolvedScenario, image string) (string, error) {
+	if scenario.ProviderProfile == nil {
+		return "", errors.New("compose provider emulator requires a provider profile")
+	}
+	capability, _, err := scenario.ProviderProfile.Profile.ProtocolEmulatorCapability()
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(capability.EmulatorScript)
+	if err != nil {
+		return "", fmt.Errorf("encode compose provider emulator script: %w", err)
+	}
+	directory, err := os.MkdirTemp("", "mycel-lab-provider-emulator-")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(directory, "compose.yml")
+	content := fmt.Sprintf("services:\n  mycel-provider-emulator:\n    image: %s\n    command: [\"serve\"]\n    environment:\n      MYCEL_EMULATOR_DIMENSIONS: %q\n      MYCEL_EMULATOR_SCRIPT_B64: %q\n      MYCEL_EMULATOR_OBSERVATIONS: /var/lib/mycel-emulator/observations.jsonl\n    volumes:\n      - mycel-provider-emulator-data:/var/lib/mycel-emulator\n    healthcheck:\n      test: [\"CMD\", \"/mycel-provider-emulator\", \"health\"]\n      interval: 1s\n      timeout: 2s\n      retries: 30\nvolumes:\n  mycel-provider-emulator-data:\n", strings.TrimSpace(image), strconv.Itoa(providerEmulatorDimensions(capability.Dimensions)), base64.StdEncoding.EncodeToString(raw))
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		_ = os.RemoveAll(directory)
+		return "", err
+	}
+	return path, nil
+}
+
+func providerEmulatorDimensions(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return 8
 }
 
 func (d ComposeDriver) compose(ctx context.Context, environment Environment, args ...string) (executil.Result, error) {
