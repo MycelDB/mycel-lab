@@ -283,15 +283,14 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 	for index, resource := range []string{"access-policy", "credential-grant", "credential", "intelligence-profile", "capability", "model", "endpoint", "inference-package"} {
 		resources.Cleanup = append(resources.Cleanup, SemanticOperation{Sequence: index + 1, Resource: resource, Status: "planned"})
 	}
-	retainedThisPass := make(map[string]struct{})
+	proof := &procedureInferenceCleanupProof{}
 	retain := func(resource, message string) {
 		t.Helper()
-		details, ok := procedureInferenceCleanupRetainedByAudit(resources, resource, retainedThisPass, status.Error(codes.FailedPrecondition, message))
+		details, ok := procedureInferenceCleanupRetainedByAudit(resources, resource, proof, status.Error(codes.FailedPrecondition, message))
 		if !ok {
 			t.Fatalf("resource %s was not recognized as an immutable audit closure: %s", resource, message)
 		}
 		setProcedureInferenceCleanupStatus(resources, resource, "retained-by-audit", "immutable audit closure", details)
-		retainedThisPass[resource] = struct{}{}
 		encoded, err := json.Marshal(details)
 		if err != nil {
 			t.Fatal(err)
@@ -336,7 +335,7 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 		{"credential-grant", "invalid-reference-edge", true, status.Error(codes.FailedPrecondition, "resource is referenced by credential:"+credentialID)},
 	}
 	for _, test := range negative {
-		details, ok := procedureInferenceCleanupRetainedByAudit(&fresh, test.target, map[string]struct{}{}, test.err)
+		details, ok := procedureInferenceCleanupRetainedByAudit(&fresh, test.target, &procedureInferenceCleanupProof{}, test.err)
 		if ok || details["rejectionCategory"] != test.category {
 			t.Fatalf("rejected reference category=%v accepted=%t, want %s", details, ok, test.category)
 		}
@@ -351,6 +350,52 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 			if strings.Contains(string(encoded), rawID) {
 				t.Fatalf("rejection evidence leaked raw reference ID %s: %s", rawID, encoded)
 			}
+		}
+	}
+
+	crossPassError := status.Error(codes.FailedPrecondition, "resource is referenced by intelligence_profile:"+profileID)
+	if _, ok := procedureInferenceCleanupRetainedByAudit(resources, "capability", proof, crossPassError); !ok {
+		t.Fatal("independently rooted proof was not carried across cleanup passes")
+	}
+	foreignChangedSet := status.Error(codes.FailedPrecondition, "resource is referenced by intelligence_profile:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	if details, ok := procedureInferenceCleanupRetainedByAudit(resources, "capability", proof, foreignChangedSet); ok || details["rejectionCategory"] != "foreign-run-owned-reference" {
+		t.Fatalf("changed foreign reference set accepted: accepted=%t details=%v", ok, details)
+	}
+	proof.clear()
+	if details, ok := procedureInferenceCleanupRetainedByAudit(resources, "capability", proof, crossPassError); ok || details["rejectionCategory"] != "unrooted-run-owned-reference" {
+		t.Fatalf("invalidated proof accepted later reference: accepted=%t details=%v", ok, details)
+	}
+	if details, ok := procedureInferenceCleanupRetainedByAudit(resources, "capability", &procedureInferenceCleanupProof{}, crossPassError); ok || details["rejectionCategory"] != "unrooted-run-owned-reference" {
+		t.Fatalf("empty proof accepted cross-pass reference: accepted=%t details=%v", ok, details)
+	}
+	cyclicProof := &procedureInferenceCleanupProof{nodes: map[string]procedureInferenceCleanupProofNode{
+		"capability":           {ID: capabilityID, Dependencies: []procedureInferenceCleanupProofDependency{{Resource: "intelligence-profile", ID: profileID}}},
+		"intelligence-profile": {ID: profileID, Dependencies: []procedureInferenceCleanupProofDependency{{Resource: "capability", ID: capabilityID}}},
+	}}
+	cycleError := status.Error(codes.FailedPrecondition, "resource is referenced by capability:"+capabilityID)
+	if details, ok := procedureInferenceCleanupRetainedByAudit(resources, "model", cyclicProof, cycleError); ok || details["rejectionCategory"] != "unrooted-run-owned-reference" {
+		t.Fatalf("rootless cyclic proof accepted: accepted=%t details=%v", ok, details)
+	}
+}
+
+func TestProcedureInferenceCleanupAttemptsPreserveSanitizedPassOutcomes(t *testing.T) {
+	resources := &ProcedureInferenceResources{Cleanup: []SemanticOperation{{Resource: "capability", Status: "planned"}}}
+	details := map[string]any{"retentionCategory": "immutable-audit-closure", "referenceCount": 1, "references": []map[string]string{{"type": "usage_event", "idHash": strings.Repeat("a", 64)}}}
+	recordProcedureInferenceCleanupAttempt(resources, "capability", procedureInferenceCleanupPass{Round: 1, Name: "pre-space-barrier"}, "failed-precondition", "retained-by-audit", "immutable audit closure", details)
+	recordProcedureInferenceCleanupAttempt(resources, "capability", procedureInferenceCleanupPass{Round: 1, Name: "post-space-barrier"}, "not-found", "retained-by-audit", "", nil)
+	encoded, err := json.Marshal(resources.Cleanup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, required := range []string{`"round":1`, `"pass":"pre-space-barrier"`, `"rpcOutcome":"failed-precondition"`, `"pass":"post-space-barrier"`, `"rpcOutcome":"not-found"`, `"idHash":"`} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("cleanup attempt evidence lacks %s: %s", required, text)
+		}
+	}
+	for _, prohibited := range []string{"usage_event:11111111-1111-4111-8111-111111111111", "rpc error: code"} {
+		if strings.Contains(text, prohibited) {
+			t.Fatalf("cleanup attempt evidence leaked %q: %s", prohibited, text)
 		}
 	}
 }

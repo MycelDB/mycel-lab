@@ -158,7 +158,114 @@ func procedureInferenceTargetPrincipalID(resources *ScenarioResources) string {
 	return ""
 }
 
-func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminClient, resources *ProcedureInferenceResources) []string {
+type procedureInferenceCleanupPass struct {
+	Round int
+	Name  string
+}
+
+type procedureInferenceCleanupProof struct {
+	nodes map[string]procedureInferenceCleanupProofNode
+}
+
+type procedureInferenceCleanupProofNode struct {
+	ID            string
+	Details       map[string]any
+	ImmutableRoot bool
+	Dependencies  []procedureInferenceCleanupProofDependency
+}
+
+type procedureInferenceCleanupProofDependency struct {
+	Resource string
+	ID       string
+}
+
+func nextProcedureInferenceCleanupRound(resources *ProcedureInferenceResources) int {
+	if resources == nil {
+		return 0
+	}
+	resources.cleanupRound++
+	return resources.cleanupRound
+}
+
+func procedureInferenceProof(resources *ProcedureInferenceResources) *procedureInferenceCleanupProof {
+	if resources.cleanupProof == nil {
+		resources.cleanupProof = &procedureInferenceCleanupProof{nodes: make(map[string]procedureInferenceCleanupProofNode)}
+	}
+	return resources.cleanupProof
+}
+
+func (proof *procedureInferenceCleanupProof) recordValidated(resources *ProcedureInferenceResources, resource string, references []semanticCleanupReference, details map[string]any) {
+	if proof == nil || resources == nil {
+		return
+	}
+	id := procedureInferenceCleanupResourceID(resources, resource)
+	if id == "" {
+		return
+	}
+	node := procedureInferenceCleanupProofNode{ID: strings.ToLower(id), Details: details}
+	seen := make(map[string]struct{})
+	for _, reference := range references {
+		if reference.Type == "usage_event" || reference.Type == "policy_decision" {
+			node.ImmutableRoot = true
+			continue
+		}
+		dependencyResource, dependencyID := procedureInferenceRunOwnedReference(resources, reference)
+		key := dependencyResource + ":" + strings.ToLower(dependencyID)
+		if dependencyResource == "" || dependencyID == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		node.Dependencies = append(node.Dependencies, procedureInferenceCleanupProofDependency{Resource: dependencyResource, ID: strings.ToLower(dependencyID)})
+	}
+	if proof.nodes == nil {
+		proof.nodes = make(map[string]procedureInferenceCleanupProofNode)
+	}
+	proof.nodes[resource] = node
+}
+
+func (proof *procedureInferenceCleanupProof) node(resource, id string) (procedureInferenceCleanupProofNode, bool) {
+	if proof == nil {
+		return procedureInferenceCleanupProofNode{}, false
+	}
+	node, ok := proof.nodes[resource]
+	if !ok || node.ID != strings.ToLower(strings.TrimSpace(id)) || !proof.rooted(resource, node.ID, make(map[string]bool)) {
+		return procedureInferenceCleanupProofNode{}, false
+	}
+	return node, true
+}
+
+func (proof *procedureInferenceCleanupProof) rooted(resource, id string, visiting map[string]bool) bool {
+	node, ok := proof.nodes[resource]
+	if !ok || node.ID != strings.ToLower(strings.TrimSpace(id)) || visiting[resource] {
+		return false
+	}
+	visiting[resource] = true
+	defer delete(visiting, resource)
+	rooted := node.ImmutableRoot
+	for _, dependency := range node.Dependencies {
+		if !proof.rooted(dependency.Resource, dependency.ID, visiting) {
+			return false
+		}
+		rooted = true
+	}
+	return rooted
+}
+
+func (proof *procedureInferenceCleanupProof) contains(resource, id string) bool {
+	_, ok := proof.node(resource, id)
+	return ok
+}
+
+func (proof *procedureInferenceCleanupProof) clear() {
+	if proof != nil {
+		clear(proof.nodes)
+	}
+}
+
+func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminClient, resources *ProcedureInferenceResources, pass procedureInferenceCleanupPass) []string {
 	if resources == nil {
 		return nil
 	}
@@ -168,7 +275,7 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 		setProcedureInferenceCleanupStatus(resources, "inference-package", "retained-by-design", "", map[string]any{"retentionCategory": "catalog-package-no-delete-api"})
 	}
 	var failures []string
-	retainedThisPass := make(map[string]struct{})
+	proof := procedureInferenceProof(resources)
 	steps := []struct {
 		resource string
 		id       string
@@ -206,29 +313,47 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 	for _, step := range steps {
 		if strings.TrimSpace(step.id) == "" {
 			setProcedureInferenceCleanupStatus(resources, step.resource, "not-created", "", nil)
+			recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, "not-created", "not-created", "", nil)
 			continue
 		}
 		callCtx, cancel := admin.AuthCallContext(ctx)
 		err := step.call(callCtx)
 		cancel()
-		if err != nil && status.Code(err) != codes.NotFound {
-			details, retained := procedureInferenceCleanupRetainedByAudit(resources, step.resource, retainedThisPass, err)
+		code := status.Code(err)
+		if err != nil && code != codes.NotFound {
+			details, retained := procedureInferenceCleanupRetainedByAudit(resources, step.resource, proof, err)
 			if retained {
 				setProcedureInferenceCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit closure", details)
-				retainedThisPass[step.resource] = struct{}{}
+				recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, "failed-precondition", "retained-by-audit", "immutable audit closure", details)
 				continue
 			}
+			proof.clear()
 			message := fmt.Sprintf("delete %s: %s", step.resource, sanitizedProcedureInferenceProvisionError(err))
 			failures = append(failures, message)
 			setProcedureInferenceCleanupStatus(resources, step.resource, "failed", message, details)
+			rpcOutcome := "rpc-error"
+			if code == codes.FailedPrecondition {
+				rpcOutcome = "failed-precondition"
+			}
+			recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, rpcOutcome, "failed", message, details)
+			continue
+		}
+		rpcOutcome := "success"
+		if code == codes.NotFound {
+			rpcOutcome = "not-found"
+		}
+		if node, retained := proof.node(step.resource, step.id); retained {
+			setProcedureInferenceCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit closure", node.Details)
+			recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, rpcOutcome, "retained-by-audit", "", nil)
 			continue
 		}
 		setProcedureInferenceCleanupStatus(resources, step.resource, "completed", "", nil)
+		recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, rpcOutcome, "completed", "", nil)
 	}
 	return failures
 }
 
-func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResources, targetResource string, retainedThisPass map[string]struct{}, err error) (map[string]any, bool) {
+func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResources, targetResource string, proof *procedureInferenceCleanupProof, err error) (map[string]any, bool) {
 	references, rejectionCategory, observedReferenceCount := semanticCleanupReferences(err)
 	if rejectionCategory != "" {
 		return procedureInferenceCleanupRejectionEvidence(rejectionCategory, observedReferenceCount, procedureInferenceSafeEvidenceReferences(references)), false
@@ -245,7 +370,7 @@ func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResou
 		if reference.Type == "usage_event" || reference.Type == "policy_decision" {
 			continue
 		}
-		owned, retained := procedureInferenceRunOwnedRetainedReference(resources, retainedThisPass, reference)
+		owned, retained := procedureInferenceRunOwnedRetainedReference(resources, proof, reference)
 		if !owned {
 			return procedureInferenceCleanupRejectionEvidence("foreign-run-owned-reference", len(references), references), false
 		}
@@ -253,7 +378,15 @@ func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResou
 			return procedureInferenceCleanupRejectionEvidence("unrooted-run-owned-reference", len(references), references), false
 		}
 	}
-	return procedureInferenceCleanupReferenceEvidence("retentionCategory", "immutable-audit-closure", references), true
+	details := procedureInferenceCleanupReferenceEvidence("retentionCategory", "immutable-audit-closure", references)
+	proof.recordValidated(resources, targetResource, references, details)
+	if !proof.contains(targetResource, procedureInferenceCleanupResourceID(resources, targetResource)) {
+		if proof != nil {
+			delete(proof.nodes, targetResource)
+		}
+		return procedureInferenceCleanupRejectionEvidence("unrooted-run-owned-reference", len(references), references), false
+	}
+	return details, true
 }
 
 func procedureInferenceKnownCleanupReferenceType(referenceType string) bool {
@@ -321,30 +454,56 @@ func procedureInferenceCleanupReferenceEvidence(categoryKey, category string, re
 	}
 }
 
-func procedureInferenceRunOwnedRetainedReference(resources *ProcedureInferenceResources, retainedThisPass map[string]struct{}, reference semanticCleanupReference) (bool, bool) {
-	if resources == nil {
+func procedureInferenceRunOwnedRetainedReference(resources *ProcedureInferenceResources, proof *procedureInferenceCleanupProof, reference semanticCleanupReference) (bool, bool) {
+	resource, id := procedureInferenceRunOwnedReference(resources, reference)
+	if resource == "" || !strings.EqualFold(strings.TrimSpace(id), reference.ID) {
 		return false, false
 	}
-	var resource, id string
+	return true, proof.contains(resource, id)
+}
+
+func procedureInferenceRunOwnedReference(resources *ProcedureInferenceResources, reference semanticCleanupReference) (string, string) {
+	if resources == nil {
+		return "", ""
+	}
 	switch reference.Type {
 	case "credential_grant":
-		resource, id = "credential-grant", resources.CredentialGrantID
+		return "credential-grant", resources.CredentialGrantID
 	case "credential":
-		resource, id = "credential", resources.CredentialID
+		return "credential", resources.CredentialID
 	case "intelligence_profile":
-		resource, id = "intelligence-profile", resources.IntelligenceProfileID
+		return "intelligence-profile", resources.IntelligenceProfileID
 	case "inference_policy":
-		resource, id = "access-policy", resources.AccessPolicyID
+		return "access-policy", resources.AccessPolicyID
 	case "capability":
-		resource, id = "capability", resources.CapabilityID
+		return "capability", resources.CapabilityID
 	default:
-		return false, false
+		return "", ""
 	}
-	if !strings.EqualFold(strings.TrimSpace(id), reference.ID) {
-		return false, false
+}
+
+func procedureInferenceCleanupResourceID(resources *ProcedureInferenceResources, resource string) string {
+	if resources == nil {
+		return ""
 	}
-	_, retained := retainedThisPass[resource]
-	return true, retained
+	switch resource {
+	case "access-policy":
+		return strings.ToLower(strings.TrimSpace(resources.AccessPolicyID))
+	case "credential-grant":
+		return strings.ToLower(strings.TrimSpace(resources.CredentialGrantID))
+	case "credential":
+		return strings.ToLower(strings.TrimSpace(resources.CredentialID))
+	case "intelligence-profile":
+		return strings.ToLower(strings.TrimSpace(resources.IntelligenceProfileID))
+	case "capability":
+		return strings.ToLower(strings.TrimSpace(resources.CapabilityID))
+	case "model":
+		return strings.ToLower(strings.TrimSpace(resources.ModelID))
+	case "endpoint":
+		return strings.ToLower(strings.TrimSpace(resources.EndpointID))
+	default:
+		return ""
+	}
 }
 
 func procedureInferenceOperationCompleted(resources *ProcedureInferenceResources, resource string) {
@@ -371,6 +530,20 @@ func setProcedureInferenceOperationStatus(resources *ProcedureInferenceResources
 		if resources.Operations[index].Resource == resource {
 			resources.Operations[index].Status = state
 			resources.Operations[index].Error = message
+			return
+		}
+	}
+}
+
+func recordProcedureInferenceCleanupAttempt(resources *ProcedureInferenceResources, resource string, pass procedureInferenceCleanupPass, rpcOutcome, state, message string, details map[string]any) {
+	if resources == nil {
+		return
+	}
+	for index := range resources.Cleanup {
+		if resources.Cleanup[index].Resource == resource {
+			resources.Cleanup[index].Attempts = append(resources.Cleanup[index].Attempts, CleanupOperationAttempt{
+				Round: pass.Round, Pass: pass.Name, RPCOutcome: rpcOutcome, Status: state, Error: message, Details: details,
+			})
 			return
 		}
 	}

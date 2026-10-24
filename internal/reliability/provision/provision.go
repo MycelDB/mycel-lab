@@ -113,6 +113,8 @@ type ProcedureInferenceResources struct {
 	TargetLabels           []string            `json:"targetLabels"`
 	Operations             []SemanticOperation `json:"operations"`
 	Cleanup                []SemanticOperation `json:"cleanup"`
+	cleanupProof           *procedureInferenceCleanupProof
+	cleanupRound           int
 }
 
 type SemanticResources struct {
@@ -148,12 +150,22 @@ type SemanticResources struct {
 }
 
 type SemanticOperation struct {
-	Sequence int            `json:"sequence"`
-	Action   string         `json:"action"`
-	Resource string         `json:"resource"`
-	Status   string         `json:"status"`
-	Details  map[string]any `json:"details,omitempty"`
-	Error    string         `json:"error,omitempty"`
+	Sequence int                       `json:"sequence"`
+	Action   string                    `json:"action"`
+	Resource string                    `json:"resource"`
+	Status   string                    `json:"status"`
+	Details  map[string]any            `json:"details,omitempty"`
+	Error    string                    `json:"error,omitempty"`
+	Attempts []CleanupOperationAttempt `json:"attempts,omitempty"`
+}
+
+type CleanupOperationAttempt struct {
+	Round      int            `json:"round"`
+	Pass       string         `json:"pass"`
+	RPCOutcome string         `json:"rpcOutcome"`
+	Status     string         `json:"status"`
+	Details    map[string]any `json:"details,omitempty"`
+	Error      string         `json:"error,omitempty"`
 }
 
 type procedureInferenceProvisionPlan struct {
@@ -467,7 +479,8 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 		}
 		if err := provisionProcedureInferenceResources(ctx, admin, resources); err != nil {
 			rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			rollbackFailures := cleanupProcedureInferenceResources(rollbackCtx, admin, resources.ProcedureInference)
+			rollbackRound := nextProcedureInferenceCleanupRound(resources.ProcedureInference)
+			rollbackFailures := cleanupProcedureInferenceResources(rollbackCtx, admin, resources.ProcedureInference, procedureInferenceCleanupPass{Round: rollbackRound, Name: "provision-rollback"})
 			rollbackCancel()
 			if len(rollbackFailures) > 0 {
 				return errors.Join(fmt.Errorf("provision procedure inference resources: %w", err), fmt.Errorf("procedure inference rollback: %s", strings.Join(rollbackFailures, "; ")))
@@ -541,9 +554,16 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 		return err
 	}
 	defer admin.Close()
+	procedureRound := nextProcedureInferenceCleanupRound(resources.ProcedureInference)
+	procedurePass := 0
 	errs := cleanupAcrossSpaceBarrier(
 		func() []string {
-			failures := cleanupProcedureInferenceResources(ctx, admin, resources.ProcedureInference)
+			procedurePass++
+			passName := "pre-space-barrier"
+			if procedurePass > 1 {
+				passName = "post-space-barrier"
+			}
+			failures := cleanupProcedureInferenceResources(ctx, admin, resources.ProcedureInference, procedureInferenceCleanupPass{Round: procedureRound, Name: passName})
 			return append(failures, cleanupSemanticResources(ctx, admin, resources.Semantic)...)
 		},
 		func() []string {
