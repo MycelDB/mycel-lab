@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +61,7 @@ type PhaseState struct {
 
 type harnessBuildIdentity struct {
 	BuildInfoAvailable bool              `json:"buildInfoAvailable"`
+	ExecutableSHA256   string            `json:"executableSHA256,omitempty"`
 	GoVersion          string            `json:"goVersion,omitempty"`
 	ModulePath         string            `json:"modulePath,omitempty"`
 	ModuleVersion      string            `json:"moduleVersion,omitempty"`
@@ -255,18 +258,83 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return finish(RunFailed, err)
 	}
 	cleanupEnvironment := true
-	runFailedAfterEnvironmentCreate := false
+	var resources provision.ScenarioResources
+	resourcesPlanned := false
+	scenarioCleanupCompleted := false
+	var endpointAddrs []string
 	defer func() {
-		if cleanupEnvironment && !(runFailedAfterEnvironmentCreate && opts.KeepEnvironmentOnFailure) {
+		if cleanupEnvironment && !opts.KeepEnvironmentOnFailure {
 			_ = driver.Delete(context.Background(), environment)
 		}
 	}()
+	cleanupAfterEnvironment := func(retentionRequested bool) error {
+		evidence := map[string]any{
+			"schemaVersion":            "reliability.mycel.io/post-run-cleanup/v1alpha1",
+			"retentionRequested":       retentionRequested,
+			"scenarioCleanupAttempted": scenarioCleanupCompleted,
+			"scenarioCleanupCompleted": scenarioCleanupCompleted,
+			"driverDeleteAttempted":    false,
+			"driverDeleteCompleted":    false,
+			"completed":                false,
+		}
+		if retentionRequested {
+			cleanupEnvironment = false
+			evidence["retained"] = true
+			_, writeErr := sink.WriteJSON("environment/post-run-cleanup.json", evidence)
+			return writeErr
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cleanupCancel()
+		errorCategories := []string{}
+		if resourcesPlanned && !scenarioCleanupCompleted {
+			evidence["scenarioCleanupAttempted"] = true
+			cleanupDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
+			if err := provision.CleanupScenario(cleanupCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun}); err != nil {
+				errorCategories = append(errorCategories, "scenario_cleanup_failed")
+			} else {
+				scenarioCleanupCompleted = true
+				evidence["scenarioCleanupCompleted"] = true
+			}
+			_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
+		}
+		evidence["driverDeleteAttempted"] = true
+		if err := driver.Delete(cleanupCtx, environment); err != nil {
+			errorCategories = append(errorCategories, "environment_delete_failed")
+		} else {
+			evidence["driverDeleteCompleted"] = true
+		}
+		cleanupEnvironment = false
+		verification := env.DeletionVerification{}
+		if verifier, ok := driver.(env.EnvironmentDeletionVerifier); ok {
+			observed, err := verifier.VerifyDeleted(cleanupCtx, environment)
+			verification = observed
+			if err != nil {
+				errorCategories = append(errorCategories, "environment_absence_check_failed")
+			}
+		}
+		evidence["absenceCheck"] = verification
+		completed := len(errorCategories) == 0 && (!verification.Supported || verification.Completed)
+		evidence["completed"] = completed
+		if len(errorCategories) > 0 {
+			evidence["errorCategories"] = errorCategories
+		}
+		if _, err := sink.WriteJSON("environment/post-run-cleanup.json", evidence); err != nil {
+			return err
+		}
+		if !completed {
+			return errors.New("post-run cleanup did not complete")
+		}
+		return nil
+	}
 	failAfterEnvironmentCreate := func(status RunStatus, err error) (Result, error) {
-		runFailedAfterEnvironmentCreate = true
 		captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		_ = driver.CaptureState(captureCtx, environment, sink)
 		cancel()
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "error": err.Error()}))
+		if cleanupErr := cleanupAfterEnvironment(opts.KeepEnvironmentOnFailure); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+			status = RunFailed
+		}
 		return finish(status, err)
 	}
 	nodes, err := driver.Nodes(ctx, environment)
@@ -284,11 +352,12 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	endpoints := consoleEndpointsFromDriver(driverEndpoints)
-	endpointAddrs := endpointAddresses(endpoints)
-	resources, err := provision.PlanScenario(scenario, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: opts.DryRun})
+	endpointAddrs = endpointAddresses(endpoints)
+	resources, err = provision.PlanScenario(scenario, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: opts.DryRun})
 	if err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
+	resourcesPlanned = true
 	if _, err := sink.WriteJSON("environment/scenario-resources.json", resources); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
@@ -454,7 +523,11 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
+	scenarioCleanupCompleted = true
 	_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
+	if err := cleanupAfterEnvironment(false); err != nil {
+		return finish(RunFailed, err)
+	}
 	return finish(RunPassed, nil)
 }
 
@@ -634,7 +707,7 @@ func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario)
 }
 
 func currentHarnessBuildIdentity() harnessBuildIdentity {
-	identity := harnessBuildIdentity{}
+	identity := harnessBuildIdentity{ExecutableSHA256: currentExecutableSHA256()}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return identity
@@ -654,6 +727,23 @@ func currentHarnessBuildIdentity() harnessBuildIdentity {
 		}
 	}
 	return identity
+}
+
+func currentExecutableSHA256() string {
+	path, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder *runRecorder, resources provision.ScenarioResources, assertions map[string]any, live bool) error {

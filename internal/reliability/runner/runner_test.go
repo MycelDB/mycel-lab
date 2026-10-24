@@ -103,10 +103,21 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	if result.Status != RunPassed {
 		t.Fatalf("status=%s, want passed", result.Status)
 	}
-	for _, name := range []string{"harness-build.json", "resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json")} {
+	for _, name := range []string{"harness-build.json", "resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json"), filepath.Join("environment", "post-run-cleanup.json")} {
 		if _, err := os.Stat(filepath.Join(result.ArtifactRoot, name)); err != nil {
 			t.Fatalf("artifact %s missing: %v", name, err)
 		}
+	}
+	buildRaw, err := os.ReadFile(filepath.Join(result.ArtifactRoot, "harness-build.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var build harnessBuildIdentity
+	if err := json.Unmarshal(buildRaw, &build); err != nil {
+		t.Fatal(err)
+	}
+	if len(build.ExecutableSHA256) != 64 {
+		t.Fatalf("harness build identity=%+v", build)
 	}
 }
 
@@ -366,17 +377,26 @@ func TestRunSuiteFileExecutesSequentialScenarios(t *testing.T) {
 func TestCleanupInvokedOnFailure(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	driver := &recordingDriver{}
-	_, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver, ActorFactory: func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) actors.Actor {
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver, ActorFactory: func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) actors.Actor {
 		return failingActor{}
 	}})
 	if err == nil {
 		t.Fatal("RunScenario() error=nil, want actor failure")
 	}
-	if !driver.deleted {
-		t.Fatal("environment cleanup was not invoked")
+	if !driver.deleted || !driver.verifiedDeleted {
+		t.Fatal("environment cleanup and absence verification were not invoked")
 	}
 	if driver.captured < 2 {
 		t.Fatalf("capture count=%d, want initial and failure captures", driver.captured)
+	}
+	cleanupRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "post-run-cleanup.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, required := range []string{`"driverDeleteCompleted": true`, `"completed": true`, `"supported": true`} {
+		if !strings.Contains(string(cleanupRaw), required) {
+			t.Fatalf("cleanup evidence missing %s: %s", required, cleanupRaw)
+		}
 	}
 }
 
@@ -632,6 +652,7 @@ func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
 
 type recordingDriver struct {
 	deleted                  bool
+	verifiedDeleted          bool
 	captured                 int
 	omitEndpoints            bool
 	createdScenario          spec.ResolvedScenario
@@ -673,6 +694,10 @@ func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error
 func (d *recordingDriver) Delete(context.Context, env.Environment) error {
 	d.deleted = true
 	return nil
+}
+func (d *recordingDriver) VerifyDeleted(context.Context, env.Environment) (env.DeletionVerification, error) {
+	d.verifiedDeleted = true
+	return env.DeletionVerification{Supported: true, Completed: true}, nil
 }
 func (d *recordingDriver) CaptureState(_ context.Context, environment env.Environment, sink *artifacts.Sink) error {
 	d.captured++

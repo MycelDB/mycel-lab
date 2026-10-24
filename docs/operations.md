@@ -190,7 +190,36 @@ Destructive/operator variants use the same suite names with
 `--confirm-destructive`. Procedure-inference suites are credential-free but still
 modify disposable Compose/k3d state; issue #50 requires fresh approval before
 each real run. Before a destructive SGT7 or procedure-inference emulator run,
-build or supply the exact emulator image declared by the scenarios:
+build or supply the exact emulator image declared by the scenarios. Acceptance
+runs use revision-labelled images and a built Lab binary so artifacts bind the
+executables to clean full source revisions:
+
+```sh
+LAB_REVISION=$(git rev-parse HEAD)
+LAB_CONTEXT_DIGEST=$(git ls-files -s | shasum -a 256 | awk '{print $1}')
+docker build --platform linux/arm64 -f Dockerfile.emulator \
+  --build-arg SOURCE_REVISION="$LAB_REVISION" \
+  --build-arg SOURCE_DIRTY=false \
+  --build-arg BUILD_CONTEXT_DIGEST="$LAB_CONTEXT_DIGEST" \
+  -t local/mycel-provider-emulator:"${LAB_REVISION%%????????????????????????????????}" .
+go build -trimpath -o ./bin/mycel-lab ./cmd/mycel-lab
+```
+
+Daemon acceptance images are built from the common repository root, with the
+Mycel and API trees included in the context digest:
+
+```sh
+DAEMON_REVISION=$(git -C mycel rev-parse HEAD)
+DAEMON_CONTEXT_DIGEST=$({ git -C mycel ls-files -s; git -C mycel-api ls-files -s; } | shasum -a 256 | awk '{print $1}')
+docker build --platform linux/arm64 -f mycel/Dockerfile \
+  --build-arg SOURCE_REVISION="$DAEMON_REVISION" \
+  --build-arg SOURCE_DIRTY=false \
+  --build-arg BUILD_CONTEXT_DIGEST="$DAEMON_CONTEXT_DIGEST" \
+  -t local/mycel:"${DAEMON_REVISION%%????????????????????????????????}" .
+```
+
+Do not set `SOURCE_DIRTY=false` unless each included source tree is clean.
+Legacy development-only emulator builds may still use:
 
 ```sh
 make build-provider-emulator PROVIDER_EMULATOR_IMAGE=local/mycel-provider-emulator:dev

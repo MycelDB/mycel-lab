@@ -1,7 +1,9 @@
 package env
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -200,15 +202,35 @@ func TestK3DDriverUpdateStatefulSetImageWaitsForRollout(t *testing.T) {
 
 type fakeRunner struct{ commands []string }
 
+type deletionRunner struct {
+	commands []string
+	remain   map[string]string
+}
+
+func (r *deletionRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	for kind, output := range r.remain {
+		if strings.Contains(cmd, kind) {
+			return executil.Result{Command: cmd, Stdout: output}, nil
+		}
+	}
+	return executil.Result{Command: cmd}, nil
+}
+
 type composeCaptureRunner struct {
-	commands    []string
-	imageOutput string
-	imageError  error
+	commands      []string
+	imageOutput   string
+	imageError    error
+	inspectOutput string
 }
 
 func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, " image inspect ") {
+		return executil.Result{Command: cmd, Stdout: r.inspectOutput}, nil
+	}
 	if strings.Contains(cmd, " images --format json ") {
 		if r.imageError != nil {
 			return executil.Result{Command: cmd, Stderr: r.imageError.Error()}, r.imageError
@@ -226,6 +248,28 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (execut
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
+func TestComposeVerifyDeletedChecksProjectResources(t *testing.T) {
+	environment := Environment{Metadata: map[string]string{"projectName": "bounded-project"}}
+	t.Run("absent", func(t *testing.T) {
+		runner := &deletionRunner{}
+		verification, err := (ComposeDriver{Runner: runner}).VerifyDeleted(context.Background(), environment)
+		if err != nil || !verification.Supported || !verification.Completed || verification.Containers != 0 || verification.Networks != 0 || verification.Volumes != 0 {
+			t.Fatalf("verification=%+v err=%v", verification, err)
+		}
+		joined := strings.Join(runner.commands, "\n")
+		if strings.Count(joined, "label=com.docker.compose.project=bounded-project") != 3 {
+			t.Fatalf("verification commands=%s", joined)
+		}
+	})
+	t.Run("remaining", func(t *testing.T) {
+		runner := &deletionRunner{remain: map[string]string{" ps ": "container-id\n"}}
+		verification, err := (ComposeDriver{Runner: runner}).VerifyDeleted(context.Background(), environment)
+		if err == nil || verification.Completed || verification.Containers != 1 {
+			t.Fatalf("verification=%+v err=%v", verification, err)
+		}
+	})
 }
 
 func TestSelectDriverValidatesRequiredCapabilities(t *testing.T) {
@@ -301,6 +345,23 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 	}
 }
 
+func TestComposeImageProvenanceIsAllowlisted(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	runner := &composeCaptureRunner{inspectOutput: `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64","unsafe":"secret"}`}
+	provenance := (ComposeDriver{Runner: runner}).imageProvenance(context.Background(), "sha256:test")
+	if provenance.CaptureStatus != "completed" || provenance.Revision != revision || provenance.ContextDigest != contextDigest || provenance.Dirty != "false" || provenance.Source != "https://github.com/MycelDB/mycel" || provenance.BuildCommand != "docker-buildx-local-linux-arm64" {
+		t.Fatalf("provenance=%+v", provenance)
+	}
+	encoded, err := json.Marshal(provenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("unsafe")) || bytes.Contains(encoded, []byte("secret")) {
+		t.Fatalf("provenance leaked arbitrary labels: %s", encoded)
+	}
+}
+
 func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
 	environment := Environment{Name: "mlab-test", Driver: "compose", Metadata: map[string]string{"composeFile": "compose.yml", "projectName": "mlab-test", "serviceNames": "myceld-a,myceld-b", "imageOverride": "local/mycel:head"}}
 	for _, tc := range []struct {
@@ -338,8 +399,10 @@ func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
 			}
 			joinedCommands := strings.Join(runner.commands, "\n")
 			for _, service := range []string{"myceld-a", "myceld-b"} {
-				if want := "logs --no-color --tail=5000 " + service; !strings.Contains(joinedCommands, want) {
-					t.Fatalf("CaptureState commands missing %q\n%s", want, joinedCommands)
+				for _, want := range []string{"logs --no-color --tail=5000 " + service, "exec -T " + service + " sh -c"} {
+					if !strings.Contains(joinedCommands, want) {
+						t.Fatalf("CaptureState commands missing %q\n%s", want, joinedCommands)
+					}
 				}
 			}
 			data, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "compose-images.jsonl"))
@@ -352,6 +415,36 @@ func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParseProcedureInferenceDaemonDiagnosticsIsClosedAndSecretFree(t *testing.T) {
+	outputKeyHash := strings.Repeat("a", 64)
+	raw := strings.Join([]string{
+		`{"time":"2026-10-24T13:40:22.1Z","level":"INFO","msg":"procedure_inference_publication_stage","stage":"graph_commit","result":"failed","category":"failed_precondition","run_id":"run-secret","attempt_id":"attempt-secret","claim_owner_node_id":2,"claim_version":3,"authorization_revision":4,"global_authorization_revision":5,"space_authorization_revision":6,"output_key_hash":"` + outputKeyHash + `","graph_revision":7,"claim_token":"never-persist","prompt":"never-persist","error":"never-persist"}`,
+		`{"level":"WARN","msg":"automation_worker_process_pending_failed","category":"operation_failed","error":"never-persist"}`,
+		`{"level":"INFO","msg":"procedure_inference_publication_stage","stage":"raw-stage","result":"raw-result","category":"raw-category","run_id":"raw-run","attempt_id":"raw-attempt"}`,
+		`{"level":"INFO","msg":"unrelated","secret":"never-persist"}`,
+	}, "\n")
+	evidence := parseProcedureInferenceDaemonDiagnostics("myceld-a", raw)
+	if evidence.CaptureStatus != "completed" || len(evidence.Records) != 3 {
+		t.Fatalf("evidence=%+v", evidence)
+	}
+	first := evidence.Records[0]
+	if first.Stage != "graph_commit" || first.Result != "failed" || first.Category != "failed_precondition" || first.ClaimOwnerNodeID != 2 || first.ClaimVersion != 3 || first.AuthorizationRevision != 4 || first.GlobalAuthorizationRevision != 5 || first.SpaceAuthorizationRevision != 6 || first.OutputKeyHash != outputKeyHash || first.GraphRevision != 7 || len(first.RunIDHash) != 64 || len(first.AttemptIDHash) != 64 {
+		t.Fatalf("first diagnostic=%+v", first)
+	}
+	if evidence.Records[2].Stage != "invalid" || evidence.Records[2].Result != "invalid" || evidence.Records[2].Category != "invalid" {
+		t.Fatalf("unknown values were not closed: %+v", evidence.Records[2])
+	}
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prohibited := range []string{"never-persist", "run-secret", "attempt-secret", "raw-stage", "raw-result", "raw-category", "raw-run", "raw-attempt", "claim_token", "prompt", "error"} {
+		if bytes.Contains(encoded, []byte(prohibited)) {
+			t.Fatalf("diagnostic evidence leaked %q: %s", prohibited, encoded)
+		}
 	}
 }
 

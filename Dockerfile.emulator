@@ -1,3 +1,7 @@
+ARG SOURCE_REVISION
+ARG SOURCE_DIRTY
+ARG BUILD_CONTEXT_DIGEST
+
 FROM golang:1.25.5-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -8,6 +12,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/mycel-p
     && chmod 0700 /out/emulator-data
 
 FROM scratch
+
+ARG SOURCE_REVISION
+ARG SOURCE_DIRTY
+ARG BUILD_CONTEXT_DIGEST
+
+LABEL org.opencontainers.image.source="https://github.com/MycelDB/mycel-lab" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      io.myceldb.source.dirty="${SOURCE_DIRTY}" \
+      io.myceldb.build.context-digest="${BUILD_CONTEXT_DIGEST}" \
+      io.myceldb.build.command="docker-buildx-local-linux-arm64-emulator"
+
 COPY --from=build /out/mycel-provider-emulator /mycel-provider-emulator
 COPY --from=build --chown=65532:65532 /out/emulator-data /var/lib/mycel-emulator
 USER 65532:65532

@@ -192,6 +192,18 @@ type ClusterRestoreDriver interface {
 	RestoreBackupSetOrdinalToPVC(context.Context, Environment, RestoreBackupSetRequest) (ExecResult, error)
 }
 
+type DeletionVerification struct {
+	Supported  bool `json:"supported"`
+	Completed  bool `json:"completed"`
+	Containers int  `json:"containers"`
+	Networks   int  `json:"networks"`
+	Volumes    int  `json:"volumes"`
+}
+
+type EnvironmentDeletionVerifier interface {
+	VerifyDeleted(context.Context, Environment) (DeletionVerification, error)
+}
+
 type EnvironmentDriver interface {
 	Name() string
 	Capabilities() CapabilitySet
@@ -1135,14 +1147,24 @@ func (d ComposeDriver) CopyToNode(ctx context.Context, environment Environment, 
 }
 
 type composeImageEvidence struct {
-	Service       string `json:"service,omitempty"`
-	ImageOverride string `json:"imageOverride,omitempty"`
-	ScriptSHA256  string `json:"scriptSHA256,omitempty"`
-	ID            string `json:"id"`
-	ContainerName string `json:"containerName"`
-	Repository    string `json:"repository,omitempty"`
-	Tag           string `json:"tag,omitempty"`
-	Platform      string `json:"platform,omitempty"`
+	Service       string                `json:"service,omitempty"`
+	ImageOverride string                `json:"imageOverride,omitempty"`
+	ScriptSHA256  string                `json:"scriptSHA256,omitempty"`
+	ID            string                `json:"id"`
+	ContainerName string                `json:"containerName"`
+	Repository    string                `json:"repository,omitempty"`
+	Tag           string                `json:"tag,omitempty"`
+	Platform      string                `json:"platform,omitempty"`
+	Provenance    imageSourceProvenance `json:"provenance"`
+}
+
+type imageSourceProvenance struct {
+	CaptureStatus string `json:"captureStatus"`
+	Revision      string `json:"revision,omitempty"`
+	Source        string `json:"source,omitempty"`
+	Dirty         string `json:"dirty,omitempty"`
+	ContextDigest string `json:"contextDigest,omitempty"`
+	BuildCommand  string `json:"buildCommand,omitempty"`
 }
 
 func parseComposeImageEvidence(raw string) ([]composeImageEvidence, error) {
@@ -1179,6 +1201,42 @@ func (d ComposeDriver) ProviderEmulatorObservations(ctx context.Context, environ
 		return ExecResult{}, errors.New("provider emulator is not configured")
 	}
 	return d.compose(ctx, environment, "exec", "-T", "mycel-provider-emulator", "/mycel-provider-emulator", "dump", "--file", "/var/lib/mycel-emulator/observations.jsonl")
+}
+
+func (d ComposeDriver) imageProvenance(ctx context.Context, imageID string) imageSourceProvenance {
+	provenance := imageSourceProvenance{CaptureStatus: "unavailable"}
+	if strings.TrimSpace(imageID) == "" {
+		return provenance
+	}
+	result, err := d.runner().Run(ctx, "docker", "image", "inspect", imageID, "--format", "{{json .Config.Labels}}")
+	if err != nil {
+		return provenance
+	}
+	var labels map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &labels); err != nil {
+		provenance.CaptureStatus = "invalid"
+		return provenance
+	}
+	provenance.CaptureStatus = "completed"
+	provenance.Revision = safeFullRevision(labels["org.opencontainers.image.revision"])
+	provenance.Source = allowlistedDiagnosticValue(labels["org.opencontainers.image.source"], "https://github.com/MycelDB/mycel", "https://github.com/MycelDB/mycel-lab")
+	provenance.Dirty = allowlistedDiagnosticValue(labels["io.myceldb.source.dirty"], "true", "false")
+	provenance.ContextDigest = safeSHA256(labels["io.myceldb.build.context-digest"])
+	provenance.BuildCommand = allowlistedDiagnosticValue(labels["io.myceldb.build.command"], "docker-buildx-local-linux-arm64", "docker-buildx-local-linux-arm64-emulator")
+	if provenance.Revision == "" || provenance.Source == "" || provenance.Dirty == "" || provenance.ContextDigest == "" || provenance.BuildCommand == "" {
+		provenance.CaptureStatus = "incomplete"
+	}
+	return provenance
+}
+
+func safeFullRevision(value string) string {
+	if len(value) != 40 {
+		return ""
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return ""
+	}
+	return strings.ToLower(value)
 }
 
 func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment, sink *artifacts.Sink) error {
@@ -1218,6 +1276,7 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		image := images[0]
 		image.Service = service
 		image.ImageOverride = environment.Metadata["imageOverride"]
+		image.Provenance = d.imageProvenance(ctx, image.ID)
 		imageEvidence = append(imageEvidence, image)
 	}
 	if len(imageEvidence) != len(services) {
@@ -1247,6 +1306,7 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		images[0].Service = "mycel-provider-emulator"
 		images[0].ImageOverride = environment.Metadata["providerEmulatorImage"]
 		images[0].ScriptSHA256 = environment.Metadata["providerEmulatorScriptSHA256"]
+		images[0].Provenance = d.imageProvenance(ctx, images[0].ID)
 		if _, err := sink.WriteJSON("provider/emulator-image.json", images[0]); err != nil {
 			return err
 		}
@@ -1267,8 +1327,182 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		if _, writeErr := sink.WriteText(filepath.Join("environment", "logs", service+".log"), formatCommandResult(result, err)); writeErr != nil {
 			return writeErr
 		}
+		diagnosticResult, diagnosticErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", "if [ -f /data/mycel/log/myceld.log ]; then tail -n 5000 /data/mycel/log/myceld.log; fi")
+		diagnostics := parseProcedureInferenceDaemonDiagnostics(service, diagnosticResult.Stdout)
+		if diagnosticErr != nil {
+			diagnostics.CaptureStatus = "unavailable"
+		}
+		if _, writeErr := sink.WriteJSON(filepath.Join("environment", "logs", service+"-procedure-inference.json"), diagnostics); writeErr != nil {
+			return writeErr
+		}
 	}
 	return nil
+}
+
+type procedureInferenceDaemonDiagnostics struct {
+	SchemaVersion string                               `json:"schemaVersion"`
+	Service       string                               `json:"service"`
+	CaptureStatus string                               `json:"captureStatus"`
+	Records       []procedureInferenceDaemonDiagnostic `json:"records"`
+}
+
+type procedureInferenceDaemonDiagnostic struct {
+	Time                        string `json:"time,omitempty"`
+	Level                       string `json:"level,omitempty"`
+	Message                     string `json:"message"`
+	Stage                       string `json:"stage,omitempty"`
+	Result                      string `json:"result,omitempty"`
+	Category                    string `json:"category,omitempty"`
+	RunIDHash                   string `json:"runIdHash,omitempty"`
+	AttemptIDHash               string `json:"attemptIdHash,omitempty"`
+	ClaimOwnerNodeID            uint64 `json:"claimOwnerNodeId,omitempty"`
+	ClaimVersion                uint64 `json:"claimVersion,omitempty"`
+	AuthorizationRevision       uint64 `json:"authorizationRevision,omitempty"`
+	GlobalAuthorizationRevision uint64 `json:"globalAuthorizationRevision,omitempty"`
+	SpaceAuthorizationRevision  uint64 `json:"spaceAuthorizationRevision,omitempty"`
+	OutputKeyHash               string `json:"outputKeyHash,omitempty"`
+	GraphRevision               int64  `json:"graphRevision,omitempty"`
+}
+
+var procedureInferenceDiagnosticStages = map[string]struct{}{
+	"runtime_control": {}, "output_parse": {}, "transaction_reopen": {}, "pending_persistence": {},
+	"procedure_control_recheck": {}, "authorization_recheck": {}, "conflict_transaction_reopen": {},
+	"claim_check": {}, "claim_renewal": {}, "receipt_probe": {}, "action_apply": {},
+	"precommit_claim_renewal": {}, "global_authorization_fence": {}, "procedure_control_fence": {},
+	"graph_commit": {}, "publication": {}, "session_finalize": {}, "graph_finalize_ack": {},
+	"final_disposition": {}, "receipt_acknowledgement": {}, "recovery_output_probe": {},
+	"recovery_receipt_acknowledgement": {},
+}
+
+var procedureInferenceDiagnosticCategories = map[string]struct{}{
+	"none": {}, "committed": {}, "acknowledged": {}, "published": {}, "publication_failed": {},
+	"deadline_exceeded": {}, "canceled": {}, "procedure_disabled": {}, "authorization_revoked": {},
+	"graph_conflict": {}, "failed_precondition": {}, "unavailable": {}, "conflict": {}, "not_found": {},
+	"permission_denied": {}, "resource_exhausted": {}, "operation_failed": {},
+}
+
+func parseProcedureInferenceDaemonDiagnostics(service, raw string) procedureInferenceDaemonDiagnostics {
+	evidence := procedureInferenceDaemonDiagnostics{
+		SchemaVersion: "reliability.mycel.io/procedure-inference-daemon-diagnostics/v1alpha1",
+		Service:       service,
+		CaptureStatus: "completed",
+		Records:       []procedureInferenceDaemonDiagnostic{},
+	}
+	lines := strings.Split(raw, "\n")
+	if len(lines) > 5000 {
+		lines = lines[len(lines)-5000:]
+	}
+	for _, line := range lines {
+		if len(line) == 0 || len(line) > 64*1024 {
+			continue
+		}
+		var decoded map[string]any
+		decoder := json.NewDecoder(strings.NewReader(line))
+		decoder.UseNumber()
+		if err := decoder.Decode(&decoded); err != nil {
+			continue
+		}
+		message, _ := decoded["msg"].(string)
+		if message != "procedure_inference_publication_stage" && message != "automation_worker_process_pending_failed" {
+			continue
+		}
+		record := procedureInferenceDaemonDiagnostic{Message: message}
+		record.Time = safeDiagnosticTime(decoded["time"])
+		record.Level = allowlistedDiagnosticValue(decoded["level"], "INFO", "WARN", "ERROR")
+		record.Category = allowlistedDiagnosticMapValue(decoded["category"], procedureInferenceDiagnosticCategories)
+		if message == "procedure_inference_publication_stage" {
+			record.Stage = allowlistedDiagnosticMapValue(decoded["stage"], procedureInferenceDiagnosticStages)
+			record.Result = allowlistedDiagnosticValue(decoded["result"], "started", "completed", "failed")
+			record.RunIDHash = diagnosticCorrelationHash(decoded["run_id"])
+			record.AttemptIDHash = diagnosticCorrelationHash(decoded["attempt_id"])
+			record.ClaimOwnerNodeID = diagnosticUint64(decoded["claim_owner_node_id"])
+			record.ClaimVersion = diagnosticUint64(decoded["claim_version"])
+			record.AuthorizationRevision = diagnosticUint64(decoded["authorization_revision"])
+			record.GlobalAuthorizationRevision = diagnosticUint64(decoded["global_authorization_revision"])
+			record.SpaceAuthorizationRevision = diagnosticUint64(decoded["space_authorization_revision"])
+			record.OutputKeyHash = safeSHA256(decoded["output_key_hash"])
+			record.GraphRevision = diagnosticInt64(decoded["graph_revision"])
+		}
+		evidence.Records = append(evidence.Records, record)
+	}
+	return evidence
+}
+
+func safeDiagnosticTime(value any) string {
+	raw, _ := value.(string)
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return ""
+	}
+	return parsed.UTC().Format(time.RFC3339Nano)
+}
+
+func allowlistedDiagnosticValue(value any, allowed ...string) string {
+	raw, _ := value.(string)
+	for _, candidate := range allowed {
+		if raw == candidate {
+			return raw
+		}
+	}
+	if raw != "" {
+		return "invalid"
+	}
+	return ""
+}
+
+func allowlistedDiagnosticMapValue(value any, allowed map[string]struct{}) string {
+	raw, _ := value.(string)
+	if _, ok := allowed[raw]; ok {
+		return raw
+	}
+	if raw != "" {
+		return "invalid"
+	}
+	return ""
+}
+
+func diagnosticCorrelationHash(value any) string {
+	raw, _ := value.(string)
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func safeSHA256(value any) string {
+	raw, _ := value.(string)
+	if len(raw) != sha256.Size*2 {
+		return ""
+	}
+	if _, err := hex.DecodeString(raw); err != nil {
+		return ""
+	}
+	return strings.ToLower(raw)
+}
+
+func diagnosticUint64(value any) uint64 {
+	raw, ok := value.(json.Number)
+	if !ok {
+		return 0
+	}
+	parsed, err := strconv.ParseUint(raw.String(), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func diagnosticInt64(value any) int64 {
+	raw, ok := value.(json.Number)
+	if !ok {
+		return 0
+	}
+	parsed, err := strconv.ParseInt(raw.String(), 10, 64)
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	return parsed
 }
 
 func (d ComposeDriver) Delete(ctx context.Context, environment Environment) error {
@@ -1277,6 +1511,53 @@ func (d ComposeDriver) Delete(ctx context.Context, environment Environment) erro
 		_ = os.RemoveAll(filepath.Dir(generated))
 	}
 	return err
+}
+
+func (d ComposeDriver) VerifyDeleted(ctx context.Context, environment Environment) (DeletionVerification, error) {
+	verification := DeletionVerification{Supported: true}
+	project := strings.TrimSpace(environment.Metadata["projectName"])
+	if project == "" {
+		return verification, errors.New("compose deletion verification requires a project name")
+	}
+	filter := "label=com.docker.compose.project=" + project
+	checks := []struct {
+		kind string
+		args []string
+	}{
+		{kind: "containers", args: []string{"ps", "-a", "--filter", filter, "--format", "{{.ID}}"}},
+		{kind: "networks", args: []string{"network", "ls", "--filter", filter, "--format", "{{.ID}}"}},
+		{kind: "volumes", args: []string{"volume", "ls", "--filter", filter, "--format", "{{.Name}}"}},
+	}
+	for _, check := range checks {
+		result, err := d.runner().Run(ctx, "docker", check.args...)
+		if err != nil {
+			return verification, fmt.Errorf("compose %s absence check failed", check.kind)
+		}
+		count := countNonemptyLines(result.Stdout)
+		switch check.kind {
+		case "containers":
+			verification.Containers = count
+		case "networks":
+			verification.Networks = count
+		case "volumes":
+			verification.Volumes = count
+		}
+	}
+	verification.Completed = verification.Containers == 0 && verification.Networks == 0 && verification.Volumes == 0
+	if !verification.Completed {
+		return verification, errors.New("compose resources remain after deletion")
+	}
+	return verification, nil
+}
+
+func countNonemptyLines(value string) int {
+	count := 0
+	for _, line := range strings.Split(value, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func providerEmulatorScriptSHA256(scenario spec.ResolvedScenario) (string, error) {
