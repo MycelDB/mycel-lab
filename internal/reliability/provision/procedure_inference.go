@@ -168,6 +168,7 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 		setProcedureInferenceCleanupStatus(resources, "inference-package", "retained-by-design", "", map[string]any{"retentionCategory": "catalog-package-no-delete-api"})
 	}
 	var failures []string
+	retainedThisPass := make(map[string]struct{})
 	steps := []struct {
 		resource string
 		id       string
@@ -211,9 +212,10 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 		err := step.call(callCtx)
 		cancel()
 		if err != nil && status.Code(err) != codes.NotFound {
-			details, retained := procedureInferenceCleanupRetainedByAudit(resources, err)
+			details, retained := procedureInferenceCleanupRetainedByAudit(resources, step.resource, retainedThisPass, err)
 			if retained {
 				setProcedureInferenceCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit closure", details)
+				retainedThisPass[step.resource] = struct{}{}
 				continue
 			}
 			message := fmt.Sprintf("delete %s: %s", step.resource, sanitizedProcedureInferenceProvisionError(err))
@@ -226,21 +228,24 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 	return failures
 }
 
-func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResources, err error) (map[string]any, bool) {
-	references, rejectionCategory, referenceCount := semanticCleanupReferences(err)
+func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResources, targetResource string, retainedThisPass map[string]struct{}, err error) (map[string]any, bool) {
+	references, rejectionCategory, observedReferenceCount := semanticCleanupReferences(err)
 	if rejectionCategory != "" {
-		return procedureInferenceCleanupRejectionEvidence(rejectionCategory, referenceCount, nil), false
+		return procedureInferenceCleanupRejectionEvidence(rejectionCategory, observedReferenceCount, procedureInferenceSafeEvidenceReferences(references)), false
 	}
 	for _, reference := range references {
 		if !procedureInferenceKnownCleanupReferenceType(reference.Type) {
-			return procedureInferenceCleanupRejectionEvidence("unsupported-reference-type", len(references), nil), false
+			return procedureInferenceCleanupRejectionEvidence("unsupported-reference-type", len(references), procedureInferenceSafeEvidenceReferences(references)), false
+		}
+		if !procedureInferenceAllowedCleanupReference(targetResource, reference.Type) {
+			return procedureInferenceCleanupRejectionEvidence("invalid-reference-edge", len(references), references), false
 		}
 	}
 	for _, reference := range references {
 		if reference.Type == "usage_event" || reference.Type == "policy_decision" {
 			continue
 		}
-		owned, retained := procedureInferenceRunOwnedRetainedReference(resources, reference)
+		owned, retained := procedureInferenceRunOwnedRetainedReference(resources, retainedThisPass, reference)
 		if !owned {
 			return procedureInferenceCleanupRejectionEvidence("foreign-run-owned-reference", len(references), references), false
 		}
@@ -253,18 +258,47 @@ func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResou
 
 func procedureInferenceKnownCleanupReferenceType(referenceType string) bool {
 	switch referenceType {
-	case "usage_event", "policy_decision", "credential_grant", "credential", "intelligence_profile", "capability":
+	case "usage_event", "policy_decision", "credential_grant", "credential", "intelligence_profile", "inference_policy", "capability":
 		return true
 	default:
 		return false
 	}
 }
 
-func procedureInferenceCleanupRejectionEvidence(category string, referenceCount int, references []semanticCleanupReference) map[string]any {
-	if references == nil {
-		return map[string]any{"rejectionCategory": category, "referenceCount": referenceCount}
+func procedureInferenceAllowedCleanupReference(targetResource, referenceType string) bool {
+	if referenceType == "usage_event" || referenceType == "policy_decision" {
+		return true
 	}
-	return procedureInferenceCleanupReferenceEvidence("rejectionCategory", category, references)
+	allowed := map[string]map[string]struct{}{
+		"credential":           {"credential_grant": {}},
+		"intelligence-profile": {"credential_grant": {}, "inference_policy": {}},
+		"capability":           {"credential_grant": {}, "intelligence_profile": {}},
+		"model":                {"credential_grant": {}, "intelligence_profile": {}, "capability": {}},
+		"endpoint":             {"credential_grant": {}, "credential": {}, "intelligence_profile": {}, "capability": {}},
+	}
+	_, ok := allowed[targetResource][referenceType]
+	return ok
+}
+
+func procedureInferenceSafeEvidenceReferences(references []semanticCleanupReference) []semanticCleanupReference {
+	safe := make([]semanticCleanupReference, 0, len(references))
+	for _, reference := range references {
+		switch reference.Type {
+		case "usage_event", "policy_decision", "credential_grant", "credential", "intelligence_profile", "inference_policy", "capability", "semantic_index":
+			safe = append(safe, reference)
+		}
+	}
+	return safe
+}
+
+func procedureInferenceCleanupRejectionEvidence(category string, observedReferenceCount int, references []semanticCleanupReference) map[string]any {
+	details := map[string]any{"rejectionCategory": category, "observedReferenceCount": observedReferenceCount}
+	if len(references) == 0 {
+		return details
+	}
+	evidence := procedureInferenceCleanupReferenceEvidence("rejectionCategory", category, references)
+	evidence["observedReferenceCount"] = observedReferenceCount
+	return evidence
 }
 
 func procedureInferenceCleanupReferenceEvidence(categoryKey, category string, references []semanticCleanupReference) map[string]any {
@@ -287,7 +321,7 @@ func procedureInferenceCleanupReferenceEvidence(categoryKey, category string, re
 	}
 }
 
-func procedureInferenceRunOwnedRetainedReference(resources *ProcedureInferenceResources, reference semanticCleanupReference) (bool, bool) {
+func procedureInferenceRunOwnedRetainedReference(resources *ProcedureInferenceResources, retainedThisPass map[string]struct{}, reference semanticCleanupReference) (bool, bool) {
 	if resources == nil {
 		return false, false
 	}
@@ -299,6 +333,8 @@ func procedureInferenceRunOwnedRetainedReference(resources *ProcedureInferenceRe
 		resource, id = "credential", resources.CredentialID
 	case "intelligence_profile":
 		resource, id = "intelligence-profile", resources.IntelligenceProfileID
+	case "inference_policy":
+		resource, id = "access-policy", resources.AccessPolicyID
 	case "capability":
 		resource, id = "capability", resources.CapabilityID
 	default:
@@ -307,19 +343,8 @@ func procedureInferenceRunOwnedRetainedReference(resources *ProcedureInferenceRe
 	if !strings.EqualFold(strings.TrimSpace(id), reference.ID) {
 		return false, false
 	}
-	return true, procedureInferenceCleanupState(resources, resource) == "retained-by-audit"
-}
-
-func procedureInferenceCleanupState(resources *ProcedureInferenceResources, resource string) string {
-	if resources == nil {
-		return ""
-	}
-	for _, operation := range resources.Cleanup {
-		if operation.Resource == resource {
-			return operation.Status
-		}
-	}
-	return ""
+	_, retained := retainedThisPass[resource]
+	return true, retained
 }
 
 func procedureInferenceOperationCompleted(resources *ProcedureInferenceResources, resource string) {

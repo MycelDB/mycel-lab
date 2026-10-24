@@ -320,10 +320,11 @@ func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, i
 	if index < 0 {
 		return nil, "unrecognized-precondition", 0
 	}
-	tokens := strings.Split(message[index+len(marker):], ",")
-	if len(tokens) == 0 {
+	referenceText := strings.TrimSpace(message[index+len(marker):])
+	if referenceText == "" {
 		return nil, "empty-reference-list", 0
 	}
+	tokens := strings.Split(referenceText, ",")
 	references := make([]semanticCleanupReference, 0, len(tokens))
 	for _, token := range tokens {
 		token = strings.TrimSpace(token)
@@ -333,9 +334,9 @@ func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, i
 			// Reject those lists because the hidden references are not proven to
 			// belong to immutable audit history.
 			if semanticCleanupTruncationPattern.MatchString(token) {
-				return nil, "truncated-reference-list", len(tokens)
+				return references, "truncated-reference-list", len(tokens)
 			}
-			return nil, "malformed-reference-list", len(tokens)
+			return references, "malformed-reference-list", len(tokens)
 		}
 		references = append(references, semanticCleanupReference{Type: matches[1], ID: strings.ToLower(matches[2])})
 	}

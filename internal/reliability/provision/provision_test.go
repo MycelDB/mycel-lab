@@ -266,6 +266,7 @@ func TestSemanticCleanupFailureEvidenceExcludesRawDaemonReferences(t *testing.T)
 
 func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *testing.T) {
 	const (
+		policyID     = "33333333-3333-4333-8333-333333333333"
 		grantID      = "44444444-4444-4444-8444-444444444444"
 		credentialID = "55555555-5555-4555-8555-555555555555"
 		profileID    = "66666666-6666-4666-8666-666666666666"
@@ -276,24 +277,26 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 		decisionID   = "22222222-2222-4222-8222-222222222222"
 	)
 	resources := &ProcedureInferenceResources{
-		CredentialGrantID: grantID, CredentialID: credentialID, IntelligenceProfileID: profileID,
+		AccessPolicyID: policyID, CredentialGrantID: grantID, CredentialID: credentialID, IntelligenceProfileID: profileID,
 		CapabilityID: capabilityID, ModelID: modelID, EndpointID: endpointID,
 	}
-	for index, resource := range []string{"credential-grant", "credential", "intelligence-profile", "capability", "model", "endpoint", "inference-package"} {
+	for index, resource := range []string{"access-policy", "credential-grant", "credential", "intelligence-profile", "capability", "model", "endpoint", "inference-package"} {
 		resources.Cleanup = append(resources.Cleanup, SemanticOperation{Sequence: index + 1, Resource: resource, Status: "planned"})
 	}
+	retainedThisPass := make(map[string]struct{})
 	retain := func(resource, message string) {
 		t.Helper()
-		details, ok := procedureInferenceCleanupRetainedByAudit(resources, status.Error(codes.FailedPrecondition, message))
+		details, ok := procedureInferenceCleanupRetainedByAudit(resources, resource, retainedThisPass, status.Error(codes.FailedPrecondition, message))
 		if !ok {
 			t.Fatalf("resource %s was not recognized as an immutable audit closure: %s", resource, message)
 		}
 		setProcedureInferenceCleanupStatus(resources, resource, "retained-by-audit", "immutable audit closure", details)
+		retainedThisPass[resource] = struct{}{}
 		encoded, err := json.Marshal(details)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, rawID := range []string{grantID, credentialID, profileID, capabilityID, modelID, endpointID, usageID, decisionID} {
+		for _, rawID := range []string{policyID, grantID, credentialID, profileID, capabilityID, modelID, endpointID, usageID, decisionID} {
 			if strings.Contains(string(encoded), rawID) {
 				t.Fatalf("cleanup details leaked raw reference ID %s: %s", rawID, encoded)
 			}
@@ -303,9 +306,10 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 		}
 	}
 
+	retain("access-policy", "access policy is referenced by policy_decision:"+decisionID)
 	retain("credential-grant", "credential grant is referenced by policy_decision:"+decisionID)
 	retain("credential", "credential is referenced by credential_grant:"+grantID+", usage_event:"+usageID)
-	retain("intelligence-profile", "intelligence profile is referenced by policy_decision:"+decisionID)
+	retain("intelligence-profile", "intelligence profile is referenced by inference_policy:"+policyID)
 	retain("capability", "model endpoint capability is referenced by credential_grant:"+grantID+", intelligence_profile:"+profileID)
 	retain("model", "model is referenced by capability:"+capabilityID+", credential_grant:"+grantID)
 	retain("endpoint", "model endpoint is referenced by capability:"+capabilityID+", credential:"+credentialID)
@@ -313,21 +317,26 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 	fresh := *resources
 	fresh.Cleanup = append([]SemanticOperation(nil), resources.Cleanup...)
 	for index := range fresh.Cleanup {
-		fresh.Cleanup[index].Status = "planned"
+		// Persisted first-pass statuses must not authenticate a second-pass closure.
+		fresh.Cleanup[index].Status = "retained-by-audit"
 	}
 	negative := []struct {
+		target         string
 		category       string
 		hashedEvidence bool
 		err            error
 	}{
-		{"unrooted-run-owned-reference", true, status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:"+grantID)},
-		{"foreign-run-owned-reference", true, status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")},
-		{"unsupported-reference-type", false, status.Error(codes.FailedPrecondition, "resource is referenced by semantic_index:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")},
-		{"truncated-reference-list", false, status.Error(codes.FailedPrecondition, "resource is referenced by usage_event:"+usageID+", ...2 more")},
-		{"malformed-reference-list", false, status.Error(codes.FailedPrecondition, "resource is referenced by malformed")},
+		{"credential", "unrooted-run-owned-reference", true, status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:"+grantID)},
+		{"credential", "foreign-run-owned-reference", true, status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")},
+		{"endpoint", "unsupported-reference-type", true, status.Error(codes.FailedPrecondition, "resource is referenced by semantic_index:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")},
+		{"credential-grant", "truncated-reference-list", true, status.Error(codes.FailedPrecondition, "resource is referenced by usage_event:"+usageID+", ...2 more")},
+		{"credential-grant", "malformed-reference-list", true, status.Error(codes.FailedPrecondition, "resource is referenced by usage_event:"+usageID+", malformed")},
+		{"credential-grant", "unsupported-reference-type", false, status.Error(codes.FailedPrecondition, "resource is referenced by future_reference:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")},
+		{"capability", "invalid-reference-edge", true, status.Error(codes.FailedPrecondition, "resource is referenced by capability:"+capabilityID)},
+		{"credential-grant", "invalid-reference-edge", true, status.Error(codes.FailedPrecondition, "resource is referenced by credential:"+credentialID)},
 	}
 	for _, test := range negative {
-		details, ok := procedureInferenceCleanupRetainedByAudit(&fresh, test.err)
+		details, ok := procedureInferenceCleanupRetainedByAudit(&fresh, test.target, map[string]struct{}{}, test.err)
 		if ok || details["rejectionCategory"] != test.category {
 			t.Fatalf("rejected reference category=%v accepted=%t, want %s", details, ok, test.category)
 		}
