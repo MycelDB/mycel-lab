@@ -195,6 +195,7 @@ type ClusterRestoreDriver interface {
 type DeletionVerification struct {
 	Supported  bool `json:"supported"`
 	Completed  bool `json:"completed"`
+	Clusters   int  `json:"clusters"`
 	Containers int  `json:"containers"`
 	Networks   int  `json:"networks"`
 	Volumes    int  `json:"volumes"`
@@ -355,6 +356,10 @@ func (DryRunDriver) CaptureState(_ context.Context, environment Environment, sin
 
 func (DryRunDriver) Delete(context.Context, Environment) error { return nil }
 
+func (DryRunDriver) VerifyDeleted(context.Context, Environment) (DeletionVerification, error) {
+	return DeletionVerification{Supported: true, Completed: true}, nil
+}
+
 type K3DDriver struct {
 	Confirmed       bool
 	Runner          executil.Runner
@@ -409,7 +414,7 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario, e
 	if _, err := runner.Run(ctx, "k3d", args...); err != nil {
 		return Environment{}, err
 	}
-	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName, Metadata: map[string]string{"nodeCount": strconv.Itoa(scenario.Cluster.Nodes), "consolePortBase": strconv.Itoa(intOption(environmentSpec.Options, "consolePortBase", DefaultConsolePortBase))}}
+	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName, Metadata: map[string]string{"nodeCount": strconv.Itoa(scenario.Cluster.Nodes), "consolePortBase": strconv.Itoa(intOption(environmentSpec.Options, "consolePortBase", DefaultConsolePortBase)), "imageOverride": strings.TrimSpace(scenario.Cluster.Image)}}
 	if scenario.ProviderProfile != nil && string(scenario.ProviderProfile.Profile.Mode) == "emulator" {
 		scriptHash, err := providerEmulatorScriptSHA256(scenario)
 		if err != nil {
@@ -473,6 +478,34 @@ func (d K3DDriver) Delete(ctx context.Context, environment Environment) error {
 	}
 	_, err := d.runner().Run(ctx, "k3d", "cluster", "delete", environment.Name)
 	return err
+}
+
+func (d K3DDriver) VerifyDeleted(ctx context.Context, environment Environment) (DeletionVerification, error) {
+	verification := DeletionVerification{Supported: true}
+	if strings.TrimSpace(environment.Name) == "" {
+		verification.Completed = true
+		return verification, nil
+	}
+	result, err := d.runner().Run(ctx, "k3d", "cluster", "list", "-o", "json")
+	if err != nil {
+		return verification, errors.New("k3d cluster absence check failed")
+	}
+	var clusters []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(result.Stdout), &clusters); err != nil {
+		return verification, errors.New("k3d cluster absence output is invalid")
+	}
+	for _, cluster := range clusters {
+		if strings.TrimSpace(cluster.Name) == strings.TrimSpace(environment.Name) {
+			verification.Clusters++
+		}
+	}
+	verification.Completed = verification.Clusters == 0
+	if !verification.Completed {
+		return verification, errors.New("k3d cluster remains after deletion")
+	}
+	return verification, nil
 }
 
 func (d K3DDriver) WaitReady(ctx context.Context, environment Environment) error {
@@ -857,6 +890,13 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 		return err
 	}
 	runner := d.runner()
+	daemonImage := localImageSourceEvidence(ctx, runner, environment.Metadata["imageOverride"])
+	if environment.Metadata["requireImageProvenance"] == "true" && (daemonImage.ID == "" || !validImageProvenance(daemonImage.Provenance, "https://github.com/MycelDB/mycel")) {
+		return errors.New("daemon image provenance is incomplete")
+	}
+	if _, err := sink.WriteJSON("environment/daemon-image.json", daemonImage); err != nil {
+		return err
+	}
 	captures := []struct {
 		name string
 		args []string
@@ -882,7 +922,14 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 		if strings.TrimSpace(imageID.Stdout) == "" {
 			return errors.New("capture provider emulator image ID: empty image ID")
 		}
-		if _, err := sink.WriteJSON("provider/emulator-image.json", map[string]any{"image": environment.Metadata["providerEmulatorImage"], "imageID": strings.TrimSpace(imageID.Stdout), "scriptSHA256": environment.Metadata["providerEmulatorScriptSHA256"]}); err != nil {
+		emulatorImage := localImageSourceEvidence(ctx, runner, environment.Metadata["providerEmulatorImage"])
+		emulatorImage.Service = "mycel-provider-emulator"
+		emulatorImage.ScriptSHA256 = environment.Metadata["providerEmulatorScriptSHA256"]
+		emulatorImage.ContainerName = strings.TrimSpace(imageID.Stdout)
+		if environment.Metadata["requireImageProvenance"] == "true" && (emulatorImage.ID == "" || !validImageProvenance(emulatorImage.Provenance, "https://github.com/MycelDB/mycel-lab")) {
+			return errors.New("provider emulator image provenance is incomplete")
+		}
+		if _, err := sink.WriteJSON("provider/emulator-image.json", emulatorImage); err != nil {
 			return err
 		}
 		observations, err := d.ProviderEmulatorObservations(ctx, environment)
@@ -1204,11 +1251,15 @@ func (d ComposeDriver) ProviderEmulatorObservations(ctx context.Context, environ
 }
 
 func (d ComposeDriver) imageProvenance(ctx context.Context, imageID string) imageSourceProvenance {
+	return captureImageProvenance(ctx, d.runner(), imageID)
+}
+
+func captureImageProvenance(ctx context.Context, runner executil.Runner, imageID string) imageSourceProvenance {
 	provenance := imageSourceProvenance{CaptureStatus: "unavailable"}
 	if strings.TrimSpace(imageID) == "" {
 		return provenance
 	}
-	result, err := d.runner().Run(ctx, "docker", "image", "inspect", imageID, "--format", "{{json .Config.Labels}}")
+	result, err := runner.Run(ctx, "docker", "image", "inspect", imageID, "--format", "{{json .Config.Labels}}")
 	if err != nil {
 		return provenance
 	}
@@ -1222,11 +1273,29 @@ func (d ComposeDriver) imageProvenance(ctx context.Context, imageID string) imag
 	provenance.Source = allowlistedDiagnosticValue(labels["org.opencontainers.image.source"], "https://github.com/MycelDB/mycel", "https://github.com/MycelDB/mycel-lab")
 	provenance.Dirty = allowlistedDiagnosticValue(labels["io.myceldb.source.dirty"], "true", "false")
 	provenance.ContextDigest = safeSHA256(labels["io.myceldb.build.context-digest"])
-	provenance.BuildCommand = allowlistedDiagnosticValue(labels["io.myceldb.build.command"], "docker-buildx-local-linux-arm64", "docker-buildx-local-linux-arm64-emulator")
+	provenance.BuildCommand = allowlistedDiagnosticValue(labels["io.myceldb.build.command"], "docker-buildx-local-linux-arm64", "docker-buildx-local-linux-arm64-emulator", "github-actions-buildx-multiarch")
 	if provenance.Revision == "" || provenance.Source == "" || provenance.Dirty == "" || provenance.ContextDigest == "" || provenance.BuildCommand == "" {
 		provenance.CaptureStatus = "incomplete"
 	}
 	return provenance
+}
+
+func localImageSourceEvidence(ctx context.Context, runner executil.Runner, image string) composeImageEvidence {
+	evidence := composeImageEvidence{ImageOverride: strings.TrimSpace(image), Provenance: imageSourceProvenance{CaptureStatus: "unavailable"}}
+	if evidence.ImageOverride == "" {
+		return evidence
+	}
+	result, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", "{{.Id}}")
+	if err != nil {
+		return evidence
+	}
+	evidence.ID = strings.TrimSpace(result.Stdout)
+	evidence.Provenance = captureImageProvenance(ctx, runner, evidence.ID)
+	return evidence
+}
+
+func validImageProvenance(provenance imageSourceProvenance, expectedSource string) bool {
+	return provenance.CaptureStatus == "completed" && provenance.Source == expectedSource && provenance.Dirty == "false" && provenance.Revision != "" && provenance.ContextDigest != "" && provenance.BuildCommand != ""
 }
 
 func safeFullRevision(value string) string {
@@ -1277,6 +1346,9 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		image.Service = service
 		image.ImageOverride = environment.Metadata["imageOverride"]
 		image.Provenance = d.imageProvenance(ctx, image.ID)
+		if environment.Metadata["requireImageProvenance"] == "true" && !validImageProvenance(image.Provenance, "https://github.com/MycelDB/mycel") {
+			return errors.New("daemon image provenance is incomplete")
+		}
 		imageEvidence = append(imageEvidence, image)
 	}
 	if len(imageEvidence) != len(services) {
@@ -1307,6 +1379,9 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		images[0].ImageOverride = environment.Metadata["providerEmulatorImage"]
 		images[0].ScriptSHA256 = environment.Metadata["providerEmulatorScriptSHA256"]
 		images[0].Provenance = d.imageProvenance(ctx, images[0].ID)
+		if environment.Metadata["requireImageProvenance"] == "true" && !validImageProvenance(images[0].Provenance, "https://github.com/MycelDB/mycel-lab") {
+			return errors.New("provider emulator image provenance is incomplete")
+		}
 		if _, err := sink.WriteJSON("provider/emulator-image.json", images[0]); err != nil {
 			return err
 		}
@@ -1327,7 +1402,7 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		if _, writeErr := sink.WriteText(filepath.Join("environment", "logs", service+".log"), formatCommandResult(result, err)); writeErr != nil {
 			return writeErr
 		}
-		diagnosticResult, diagnosticErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", "if [ -f /data/mycel/log/myceld.log ]; then tail -n 5000 /data/mycel/log/myceld.log; fi")
+		diagnosticResult, diagnosticErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", "if [ -f /data/mycel/log/myceld.log ]; then tail -c 1048576 /data/mycel/log/myceld.log | tail -n 5000; fi")
 		diagnostics := parseProcedureInferenceDaemonDiagnostics(service, diagnosticResult.Stdout)
 		if diagnosticErr != nil {
 			diagnostics.CaptureStatus = "unavailable"
@@ -1382,6 +1457,10 @@ var procedureInferenceDiagnosticCategories = map[string]struct{}{
 }
 
 func parseProcedureInferenceDaemonDiagnostics(service, raw string) procedureInferenceDaemonDiagnostics {
+	const maxDiagnosticBytes = 1024 * 1024
+	if len(raw) > maxDiagnosticBytes {
+		raw = raw[len(raw)-maxDiagnosticBytes:]
+	}
 	evidence := procedureInferenceDaemonDiagnostics{
 		SchemaVersion: "reliability.mycel.io/procedure-inference-daemon-diagnostics/v1alpha1",
 		Service:       service,

@@ -201,6 +201,7 @@ docker build --platform linux/arm64 -f Dockerfile.emulator \
   --build-arg SOURCE_REVISION="$LAB_REVISION" \
   --build-arg SOURCE_DIRTY=false \
   --build-arg BUILD_CONTEXT_DIGEST="$LAB_CONTEXT_DIGEST" \
+  --build-arg BUILD_IDENTITY=docker-buildx-local-linux-arm64-emulator \
   -t local/mycel-provider-emulator:"${LAB_REVISION%%????????????????????????????????}" .
 go build -trimpath -o ./bin/mycel-lab ./cmd/mycel-lab
 ```
@@ -215,10 +216,15 @@ docker build --platform linux/arm64 -f mycel/Dockerfile \
   --build-arg SOURCE_REVISION="$DAEMON_REVISION" \
   --build-arg SOURCE_DIRTY=false \
   --build-arg BUILD_CONTEXT_DIGEST="$DAEMON_CONTEXT_DIGEST" \
+  --build-arg BUILD_IDENTITY=docker-buildx-local-linux-arm64 \
   -t local/mycel:"${DAEMON_REVISION%%????????????????????????????????}" .
 ```
 
 Do not set `SOURCE_DIRTY=false` unless each included source tree is clean.
+Non-dry-run procedure-inference scenarios fail closed before provisioning unless
+the Lab executable reports a clean full Git revision. They fail before actor or
+provider work unless the daemon and emulator images expose complete clean
+revision, context-digest, source, and build-identity labels.
 Legacy development-only emulator builds may still use:
 
 ```sh

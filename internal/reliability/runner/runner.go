@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -221,8 +222,12 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	applyComposeImageOverride(&effectiveEnvironment, imageOverride)
 	scenario.Environment = effectiveEnvironment
-	if err := writeInitialArtifacts(sink, scenario); err != nil {
+	buildIdentity := currentHarnessBuildIdentity()
+	if err := writeInitialArtifacts(sink, scenario, buildIdentity); err != nil {
 		return finish(RunFailed, err)
+	}
+	if !opts.DryRun && requiresImmutableBuildProvenance(scenario) && !validHarnessBuildIdentity(buildIdentity) {
+		return finish(RunFailed, errors.New("immutable harness build provenance is required"))
 	}
 	if opts.Store != nil {
 		evidenceScenario := evidenceSafeResolvedScenario(scenario)
@@ -250,9 +255,16 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if err := driver.Preflight(ctx, effectiveEnvironment); err != nil {
 		return finish(RunFailed, err)
 	}
+	retainEnvironmentOnFailure := opts.KeepEnvironmentOnFailure || effectiveEnvironment.KeepOnFailure
 	environment, err := driver.Create(ctx, scenario, effectiveEnvironment)
 	if err != nil {
 		return finish(RunFailed, err)
+	}
+	if requiresImmutableBuildProvenance(scenario) {
+		if environment.Metadata == nil {
+			environment.Metadata = map[string]string{}
+		}
+		environment.Metadata["requireImageProvenance"] = strconv.FormatBool(!opts.DryRun)
 	}
 	if err := driver.WaitReady(ctx, environment); err != nil {
 		return finish(RunFailed, err)
@@ -263,8 +275,10 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	scenarioCleanupCompleted := false
 	var endpointAddrs []string
 	defer func() {
-		if cleanupEnvironment && !opts.KeepEnvironmentOnFailure {
-			_ = driver.Delete(context.Background(), environment)
+		if cleanupEnvironment && !retainEnvironmentOnFailure {
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			_ = driver.Delete(deleteCtx, environment)
+			cancel()
 		}
 	}()
 	cleanupAfterEnvironment := func(retentionRequested bool) error {
@@ -273,7 +287,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			"retentionRequested":       retentionRequested,
 			"scenarioCleanupAttempted": scenarioCleanupCompleted,
 			"scenarioCleanupCompleted": scenarioCleanupCompleted,
-			"driverDeleteAttempted":    false,
+			"driverDeleteAttempts":     0,
 			"driverDeleteCompleted":    false,
 			"completed":                false,
 		}
@@ -283,13 +297,14 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			_, writeErr := sink.WriteJSON("environment/post-run-cleanup.json", evidence)
 			return writeErr
 		}
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer cleanupCancel()
 		errorCategories := []string{}
 		if resourcesPlanned && !scenarioCleanupCompleted {
 			evidence["scenarioCleanupAttempted"] = true
 			cleanupDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
-			if err := provision.CleanupScenario(cleanupCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun}); err != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			cleanupErr := provision.CleanupScenario(cleanupCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun})
+			cleanupCancel()
+			if cleanupErr != nil {
 				errorCategories = append(errorCategories, "scenario_cleanup_failed")
 			} else {
 				scenarioCleanupCompleted = true
@@ -297,23 +312,41 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			}
 			_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
 		}
-		evidence["driverDeleteAttempted"] = true
-		if err := driver.Delete(cleanupCtx, environment); err != nil {
-			errorCategories = append(errorCategories, "environment_delete_failed")
-		} else {
-			evidence["driverDeleteCompleted"] = true
+		deleteCompleted := false
+		for attempt := 1; attempt <= 2; attempt++ {
+			evidence["driverDeleteAttempts"] = attempt
+			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			deleteErr := driver.Delete(deleteCtx, environment)
+			deleteCancel()
+			if deleteErr == nil {
+				deleteCompleted = true
+				break
+			}
 		}
-		cleanupEnvironment = false
+		if deleteCompleted {
+			evidence["driverDeleteCompleted"] = true
+			cleanupEnvironment = false
+		} else {
+			errorCategories = append(errorCategories, "environment_delete_failed")
+		}
 		verification := env.DeletionVerification{}
 		if verifier, ok := driver.(env.EnvironmentDeletionVerifier); ok {
-			observed, err := verifier.VerifyDeleted(cleanupCtx, environment)
+			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			observed, err := verifier.VerifyDeleted(verifyCtx, environment)
+			verifyCancel()
 			verification = observed
 			if err != nil {
 				errorCategories = append(errorCategories, "environment_absence_check_failed")
 			}
+		} else if !opts.DryRun {
+			errorCategories = append(errorCategories, "environment_absence_check_unsupported")
 		}
 		evidence["absenceCheck"] = verification
-		completed := len(errorCategories) == 0 && (!verification.Supported || verification.Completed)
+		verificationComplete := verification.Supported && verification.Completed
+		if opts.DryRun && !verification.Supported {
+			verificationComplete = true
+		}
+		completed := len(errorCategories) == 0 && deleteCompleted && verificationComplete
 		evidence["completed"] = completed
 		if len(errorCategories) > 0 {
 			evidence["errorCategories"] = errorCategories
@@ -331,7 +364,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		_ = driver.CaptureState(captureCtx, environment, sink)
 		cancel()
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "error": err.Error()}))
-		if cleanupErr := cleanupAfterEnvironment(opts.KeepEnvironmentOnFailure); cleanupErr != nil {
+		if cleanupErr := cleanupAfterEnvironment(retainEnvironmentOnFailure); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 			status = RunFailed
 		}
@@ -683,8 +716,8 @@ func evidenceSafeResolvedScenario(scenario spec.ResolvedScenario) spec.ResolvedS
 	return copy
 }
 
-func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario) error {
-	if _, err := sink.WriteJSON("harness-build.json", currentHarnessBuildIdentity()); err != nil {
+func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario, buildIdentity harnessBuildIdentity) error {
+	if _, err := sink.WriteJSON("harness-build.json", buildIdentity); err != nil {
 		return err
 	}
 	if _, err := sink.WriteJSON("resolved-scenario.json", evidenceSafeResolvedScenario(scenario)); err != nil {
@@ -727,6 +760,27 @@ func currentHarnessBuildIdentity() harnessBuildIdentity {
 		}
 	}
 	return identity
+}
+
+func requiresImmutableBuildProvenance(scenario spec.ResolvedScenario) bool {
+	return scenario.ProcedureInference != nil
+}
+
+func validHarnessBuildIdentity(identity harnessBuildIdentity) bool {
+	if len(identity.ExecutableSHA256) != sha256.Size*2 {
+		return false
+	}
+	if _, err := hex.DecodeString(identity.ExecutableSHA256); err != nil {
+		return false
+	}
+	revision := strings.TrimSpace(identity.VCS["vcs.revision"])
+	if len(revision) != 40 {
+		return false
+	}
+	if _, err := hex.DecodeString(revision); err != nil {
+		return false
+	}
+	return identity.VCS["vcs"] == "git" && identity.VCS["vcs.modified"] == "false"
 }
 
 func currentExecutableSHA256() string {

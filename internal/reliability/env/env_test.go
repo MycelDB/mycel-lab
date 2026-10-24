@@ -202,6 +202,12 @@ func TestK3DDriverUpdateStatefulSetImageWaitsForRollout(t *testing.T) {
 
 type fakeRunner struct{ commands []string }
 
+type k3dListRunner struct{ output string }
+
+func (r k3dListRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	return executil.Result{Command: executil.ShellCommand(name, args...), Stdout: r.output}, nil
+}
+
 type deletionRunner struct {
 	commands []string
 	remain   map[string]string
@@ -248,6 +254,18 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (execut
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
+func TestK3DVerifyDeletedChecksClusterAbsence(t *testing.T) {
+	environment := Environment{Name: "target-cluster"}
+	verification, err := (K3DDriver{Runner: k3dListRunner{output: `[{"name":"other-cluster"}]`}}).VerifyDeleted(context.Background(), environment)
+	if err != nil || !verification.Supported || !verification.Completed || verification.Clusters != 0 {
+		t.Fatalf("verification=%+v err=%v", verification, err)
+	}
+	verification, err = (K3DDriver{Runner: k3dListRunner{output: `[{"name":"target-cluster"}]`}}).VerifyDeleted(context.Background(), environment)
+	if err == nil || verification.Completed || verification.Clusters != 1 {
+		t.Fatalf("verification=%+v err=%v", verification, err)
+	}
 }
 
 func TestComposeVerifyDeletedChecksProjectResources(t *testing.T) {
@@ -350,8 +368,13 @@ func TestComposeImageProvenanceIsAllowlisted(t *testing.T) {
 	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
 	runner := &composeCaptureRunner{inspectOutput: `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64","unsafe":"secret"}`}
 	provenance := (ComposeDriver{Runner: runner}).imageProvenance(context.Background(), "sha256:test")
-	if provenance.CaptureStatus != "completed" || provenance.Revision != revision || provenance.ContextDigest != contextDigest || provenance.Dirty != "false" || provenance.Source != "https://github.com/MycelDB/mycel" || provenance.BuildCommand != "docker-buildx-local-linux-arm64" {
+	if provenance.CaptureStatus != "completed" || provenance.Revision != revision || provenance.ContextDigest != contextDigest || provenance.Dirty != "false" || provenance.Source != "https://github.com/MycelDB/mycel" || provenance.BuildCommand != "docker-buildx-local-linux-arm64" || !validImageProvenance(provenance, "https://github.com/MycelDB/mycel") {
 		t.Fatalf("provenance=%+v", provenance)
+	}
+	incomplete := provenance
+	incomplete.Dirty = "true"
+	if validImageProvenance(incomplete, "https://github.com/MycelDB/mycel") {
+		t.Fatalf("dirty provenance accepted: %+v", incomplete)
 	}
 	encoded, err := json.Marshal(provenance)
 	if err != nil {
@@ -399,7 +422,7 @@ func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
 			}
 			joinedCommands := strings.Join(runner.commands, "\n")
 			for _, service := range []string{"myceld-a", "myceld-b"} {
-				for _, want := range []string{"logs --no-color --tail=5000 " + service, "exec -T " + service + " sh -c"} {
+				for _, want := range []string{"logs --no-color --tail=5000 " + service, "exec -T " + service + " sh -c", "tail -c 1048576"} {
 					if !strings.Contains(joinedCommands, want) {
 						t.Fatalf("CaptureState commands missing %q\n%s", want, joinedCommands)
 					}
@@ -420,7 +443,7 @@ func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
 
 func TestParseProcedureInferenceDaemonDiagnosticsIsClosedAndSecretFree(t *testing.T) {
 	outputKeyHash := strings.Repeat("a", 64)
-	raw := strings.Join([]string{
+	raw := strings.Repeat("x", 2*1024*1024) + "\n" + strings.Join([]string{
 		`{"time":"2026-10-24T13:40:22.1Z","level":"INFO","msg":"procedure_inference_publication_stage","stage":"graph_commit","result":"failed","category":"failed_precondition","run_id":"run-secret","attempt_id":"attempt-secret","claim_owner_node_id":2,"claim_version":3,"authorization_revision":4,"global_authorization_revision":5,"space_authorization_revision":6,"output_key_hash":"` + outputKeyHash + `","graph_revision":7,"claim_token":"never-persist","prompt":"never-persist","error":"never-persist"}`,
 		`{"level":"WARN","msg":"automation_worker_process_pending_failed","category":"operation_failed","error":"never-persist"}`,
 		`{"level":"INFO","msg":"procedure_inference_publication_stage","stage":"raw-stage","result":"raw-result","category":"raw-category","run_id":"raw-run","attempt_id":"raw-attempt"}`,

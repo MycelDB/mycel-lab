@@ -121,6 +121,33 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestHarnessBuildIdentityValidationIsFailClosed(t *testing.T) {
+	identity := harnessBuildIdentity{
+		ExecutableSHA256: strings.Repeat("a", 64),
+		VCS:              map[string]string{"vcs": "git", "vcs.revision": strings.Repeat("b", 40), "vcs.modified": "false"},
+	}
+	if !validHarnessBuildIdentity(identity) {
+		t.Fatalf("valid identity rejected: %+v", identity)
+	}
+	for name, mutate := range map[string]func(*harnessBuildIdentity){
+		"missing executable": func(value *harnessBuildIdentity) { value.ExecutableSHA256 = "" },
+		"short revision":     func(value *harnessBuildIdentity) { value.VCS["vcs.revision"] = "short" },
+		"dirty":              func(value *harnessBuildIdentity) { value.VCS["vcs.modified"] = "true" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := identity
+			candidate.VCS = map[string]string{}
+			for key, value := range identity.VCS {
+				candidate.VCS[key] = value
+			}
+			mutate(&candidate)
+			if validHarnessBuildIdentity(candidate) {
+				t.Fatalf("invalid identity accepted: %+v", candidate)
+			}
+		})
+	}
+}
+
 func TestRunScenarioProviderBudgetExhaustionStopsScheduling(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "deterministic-token-basis-v1.yaml")
@@ -400,6 +427,79 @@ func TestCleanupInvokedOnFailure(t *testing.T) {
 	}
 }
 
+func TestFailureCleanupHonorsScenarioRetentionPolicy(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	scenario.Environment.KeepOnFailure = true
+	driver := &recordingDriver{}
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver, ActorFactory: func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) actors.Actor {
+		return failingActor{}
+	}})
+	if err == nil {
+		t.Fatal("RunScenario() error=nil, want actor failure")
+	}
+	if driver.deleteCalls != 0 || driver.verifiedDeleted {
+		t.Fatalf("retained environment was deleted: %+v", driver)
+	}
+	cleanupRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "post-run-cleanup.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, required := range []string{`"retentionRequested": true`, `"retained": true`} {
+		if !strings.Contains(string(cleanupRaw), required) {
+			t.Fatalf("retention evidence missing %s: %s", required, cleanupRaw)
+		}
+	}
+}
+
+func TestFailureCleanupRetriesDeleteAndRetainsDeferredFallback(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	driver := &recordingDriver{deleteFailures: 2}
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver, ActorFactory: func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) actors.Actor {
+		return failingActor{}
+	}})
+	if err == nil || driver.deleteCalls != 3 || !driver.deleted {
+		t.Fatalf("result=%+v err=%v driver=%+v", result, err, driver)
+	}
+	cleanupRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "post-run-cleanup.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(cleanupRaw), `"driverDeleteAttempts": 2`) || strings.Contains(string(cleanupRaw), "unsafe delete detail") {
+		t.Fatalf("unexpected retry evidence: %s", cleanupRaw)
+	}
+}
+
+func TestFailureCleanupRejectsUnsupportedLiveAbsenceVerification(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	driver := &recordingDriver{unsupportedVerification: true, omitEndpoints: true}
+	_, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver, ActorFactory: func(group spec.ResolvedActorGroup, index int, seed int64, rate spec.RateSpec) actors.Actor {
+		return failingActor{}
+	}})
+	if err == nil || !strings.Contains(err.Error(), "post-run cleanup did not complete") {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+}
+
+func TestAllReliabilitySuiteFilesDryRun(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "..", "..", "tests", "reliability", "suites", "*.yaml"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("suite paths=%v err=%v", paths, err)
+	}
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+			if err != nil {
+				t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+			}
+			for _, scenarioResult := range result.Results {
+				if scenarioResult.Status != RunPassed {
+					t.Fatalf("scenario result=%+v", scenarioResult)
+				}
+			}
+		})
+	}
+}
+
 func TestFinalClusterAssertionsPassForHealthySharedIdentity(t *testing.T) {
 	sink, err := artifacts.NewSink(t.TempDir())
 	if err != nil {
@@ -652,7 +752,10 @@ func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
 
 type recordingDriver struct {
 	deleted                  bool
+	deleteCalls              int
+	deleteFailures           int
 	verifiedDeleted          bool
+	unsupportedVerification  bool
 	captured                 int
 	omitEndpoints            bool
 	createdScenario          spec.ResolvedScenario
@@ -692,11 +795,18 @@ func (d *recordingDriver) RestartNode(context.Context, env.Environment, env.Node
 }
 func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error { return nil }
 func (d *recordingDriver) Delete(context.Context, env.Environment) error {
+	d.deleteCalls++
+	if d.deleteCalls <= d.deleteFailures {
+		return errors.New("unsafe delete detail")
+	}
 	d.deleted = true
 	return nil
 }
 func (d *recordingDriver) VerifyDeleted(context.Context, env.Environment) (env.DeletionVerification, error) {
 	d.verifiedDeleted = true
+	if d.unsupportedVerification {
+		return env.DeletionVerification{}, nil
+	}
 	return env.DeletionVerification{Supported: true, Completed: true}, nil
 }
 func (d *recordingDriver) CaptureState(_ context.Context, environment env.Environment, sink *artifacts.Sink) error {
