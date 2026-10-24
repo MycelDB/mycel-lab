@@ -244,6 +244,26 @@ func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSemanticCleanupFailureEvidenceExcludesRawDaemonReferences(t *testing.T) {
+	const rawID = "11111111-1111-4111-8111-111111111111"
+	err := status.Error(codes.FailedPrecondition, "capability is referenced by usage_event:"+rawID+", ...9 more raw-secret")
+	resources := &SemanticResources{Cleanup: []SemanticOperation{{Resource: "capability", Status: "planned"}}}
+	message := sanitizedSemanticCleanupFailure("capability", err)
+	setSemanticCleanupStatus(resources, "capability", "failed", message)
+	encoded, marshalErr := json.Marshal(resources.Cleanup)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if !strings.Contains(string(encoded), `"error":"delete capability: rpc_failedprecondition"`) {
+		t.Fatalf("semantic cleanup evidence lacks closed failure category: %s", encoded)
+	}
+	for _, prohibited := range []string{rawID, "raw-secret", "usage_event", "...9 more"} {
+		if strings.Contains(string(encoded), prohibited) {
+			t.Fatalf("semantic cleanup evidence leaked %q: %s", prohibited, encoded)
+		}
+	}
+}
+
 func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *testing.T) {
 	const (
 		grantID      = "44444444-4444-4444-8444-444444444444"
@@ -295,16 +315,33 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 	for index := range fresh.Cleanup {
 		fresh.Cleanup[index].Status = "planned"
 	}
-	negative := []error{
-		status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:"+grantID),
-		status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-		status.Error(codes.FailedPrecondition, "resource is referenced by semantic_index:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-		status.Error(codes.FailedPrecondition, "resource is referenced by usage_event:"+usageID+", ...2 more"),
-		status.Error(codes.FailedPrecondition, "resource is referenced by malformed"),
+	negative := []struct {
+		category       string
+		hashedEvidence bool
+		err            error
+	}{
+		{"unrooted-run-owned-reference", true, status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:"+grantID)},
+		{"foreign-run-owned-reference", true, status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")},
+		{"unsupported-reference-type", false, status.Error(codes.FailedPrecondition, "resource is referenced by semantic_index:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")},
+		{"truncated-reference-list", false, status.Error(codes.FailedPrecondition, "resource is referenced by usage_event:"+usageID+", ...2 more")},
+		{"malformed-reference-list", false, status.Error(codes.FailedPrecondition, "resource is referenced by malformed")},
 	}
-	for _, err := range negative {
-		if details, ok := procedureInferenceCleanupRetainedByAudit(&fresh, err); ok || details != nil {
-			t.Fatalf("unrooted, foreign, unknown, truncated, or malformed reference accepted: %v details=%v", err, details)
+	for _, test := range negative {
+		details, ok := procedureInferenceCleanupRetainedByAudit(&fresh, test.err)
+		if ok || details["rejectionCategory"] != test.category {
+			t.Fatalf("rejected reference category=%v accepted=%t, want %s", details, ok, test.category)
+		}
+		encoded, err := json.Marshal(details)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), `"idHash":"`) != test.hashedEvidence {
+			t.Fatalf("rejection evidence hash presence=%t, want %t: %s", strings.Contains(string(encoded), `"idHash":"`), test.hashedEvidence, encoded)
+		}
+		for _, rawID := range []string{grantID, usageID, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"} {
+			if strings.Contains(string(encoded), rawID) {
+				t.Fatalf("rejection evidence leaked raw reference ID %s: %s", rawID, encoded)
+			}
 		}
 	}
 }

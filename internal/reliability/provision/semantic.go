@@ -295,9 +295,9 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 				setSemanticCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit references")
 				continue
 			}
-			message := fmt.Sprintf("delete %s %s: %v", step.resource, step.id, err)
+			message := sanitizedSemanticCleanupFailure(step.resource, err)
 			failures = append(failures, message)
-			setSemanticCleanupStatus(resources, step.resource, "failed", err.Error())
+			setSemanticCleanupStatus(resources, step.resource, "failed", message)
 			continue
 		}
 		setSemanticCleanupStatus(resources, step.resource, "completed", "")
@@ -310,37 +310,44 @@ type semanticCleanupReference struct {
 	ID   string
 }
 
-func semanticCleanupReferences(err error) ([]semanticCleanupReference, bool) {
+func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, int) {
 	if status.Code(err) != codes.FailedPrecondition {
-		return nil, false
+		return nil, "not-failed-precondition", 0
 	}
 	message := status.Convert(err).Message()
 	const marker = " is referenced by "
 	index := strings.Index(message, marker)
 	if index < 0 {
-		return nil, false
+		return nil, "unrecognized-precondition", 0
 	}
 	tokens := strings.Split(message[index+len(marker):], ",")
 	if len(tokens) == 0 {
-		return nil, false
+		return nil, "empty-reference-list", 0
 	}
 	references := make([]semanticCleanupReference, 0, len(tokens))
 	for _, token := range tokens {
-		matches := semanticCleanupReferencePattern.FindStringSubmatch(strings.TrimSpace(token))
+		token = strings.TrimSpace(token)
+		matches := semanticCleanupReferencePattern.FindStringSubmatch(token)
 		if len(matches) != 3 {
 			// The daemon truncates untyped reference lists with "...N more".
 			// Reject those lists because the hidden references are not proven to
 			// belong to immutable audit history.
-			return nil, false
+			if semanticCleanupTruncationPattern.MatchString(token) {
+				return nil, "truncated-reference-list", len(tokens)
+			}
+			return nil, "malformed-reference-list", len(tokens)
 		}
 		references = append(references, semanticCleanupReference{Type: matches[1], ID: strings.ToLower(matches[2])})
 	}
-	return references, len(references) > 0
+	if len(references) == 0 {
+		return nil, "empty-reference-list", 0
+	}
+	return references, "", len(references)
 }
 
 func semanticCleanupRetainedByAudit(err error) bool {
-	references, ok := semanticCleanupReferences(err)
-	if !ok {
+	references, rejectionCategory, _ := semanticCleanupReferences(err)
+	if rejectionCategory != "" {
 		return false
 	}
 	for _, reference := range references {
@@ -351,7 +358,14 @@ func semanticCleanupRetainedByAudit(err error) bool {
 	return true
 }
 
-var semanticCleanupReferencePattern = regexp.MustCompile(`^([a-z][a-z_]*):([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
+var (
+	semanticCleanupReferencePattern  = regexp.MustCompile(`^([a-z][a-z_]*):([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
+	semanticCleanupTruncationPattern = regexp.MustCompile(`^\.\.\.[1-9][0-9]* more$`)
+)
+
+func sanitizedSemanticCleanupFailure(resource string, err error) string {
+	return fmt.Sprintf("delete %s: %s", resource, sanitizedProcedureInferenceProvisionError(err))
+}
 
 func setSemanticCleanupStatus(resources *SemanticResources, resource, state, message string) {
 	for index := range resources.Cleanup {
