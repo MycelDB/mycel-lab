@@ -321,23 +321,10 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 		cancel()
 		code := status.Code(err)
 		if err != nil && code != codes.NotFound {
-			details, retained := procedureInferenceCleanupRetainedByAudit(resources, step.resource, proof, err)
-			if retained {
-				setProcedureInferenceCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit closure", details)
-				recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, "failed-precondition", "retained-by-audit", "immutable audit closure", details)
-				continue
+			message, retained := applyProcedureInferenceCleanupFailure(resources, step.resource, pass, proof, err)
+			if !retained {
+				failures = append(failures, message)
 			}
-			if shouldInvalidateProcedureInferenceCleanupProof(code) {
-				proof.clear()
-			}
-			message := fmt.Sprintf("delete %s: %s", step.resource, sanitizedProcedureInferenceProvisionError(err))
-			failures = append(failures, message)
-			setProcedureInferenceCleanupStatus(resources, step.resource, "failed", message, details)
-			rpcOutcome := "rpc-error"
-			if code == codes.FailedPrecondition {
-				rpcOutcome = "failed-precondition"
-			}
-			recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, rpcOutcome, "failed", message, details)
 			continue
 		}
 		rpcOutcome := "success"
@@ -353,6 +340,27 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 		recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, rpcOutcome, "completed", "", nil)
 	}
 	return failures
+}
+
+func applyProcedureInferenceCleanupFailure(resources *ProcedureInferenceResources, resource string, pass procedureInferenceCleanupPass, proof *procedureInferenceCleanupProof, err error) (string, bool) {
+	code := status.Code(err)
+	details, retained := procedureInferenceCleanupRetainedByAudit(resources, resource, proof, err)
+	if retained {
+		setProcedureInferenceCleanupStatus(resources, resource, "retained-by-audit", "immutable audit closure", details)
+		recordProcedureInferenceCleanupAttempt(resources, resource, pass, "failed-precondition", "retained-by-audit", "immutable audit closure", details)
+		return "", true
+	}
+	if shouldInvalidateProcedureInferenceCleanupProof(code) {
+		proof.clear()
+	}
+	message := fmt.Sprintf("delete %s: %s", resource, sanitizedProcedureInferenceProvisionError(err))
+	setProcedureInferenceCleanupStatus(resources, resource, "failed", message, details)
+	rpcOutcome := "rpc-error"
+	if code == codes.FailedPrecondition {
+		rpcOutcome = "failed-precondition"
+	}
+	recordProcedureInferenceCleanupAttempt(resources, resource, pass, rpcOutcome, "failed", message, details)
+	return message, false
 }
 
 func shouldInvalidateProcedureInferenceCleanupProof(code codes.Code) bool {

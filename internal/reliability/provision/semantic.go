@@ -306,8 +306,9 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 }
 
 const (
-	maxCleanupReferenceEvidence = 20
-	maxCleanupReferenceTokens   = maxCleanupReferenceEvidence + 1
+	maxCleanupReferenceEvidence     = 20
+	maxCleanupReferenceTokens       = maxCleanupReferenceEvidence + 1
+	maxCleanupReferenceMessageBytes = 4096
 )
 
 type semanticCleanupReference struct {
@@ -320,6 +321,9 @@ func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, i
 		return nil, "not-failed-precondition", 0
 	}
 	message := status.Convert(err).Message()
+	if len(message) > maxCleanupReferenceMessageBytes {
+		return nil, "reference-evidence-too-large", 0
+	}
 	const marker = " is referenced by "
 	index := strings.Index(message, marker)
 	if index < 0 {

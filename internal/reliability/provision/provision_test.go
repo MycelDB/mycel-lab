@@ -389,7 +389,7 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 }
 
 func TestProcedureInferenceCleanupRejectsAndBoundsOversizedReferenceEvidence(t *testing.T) {
-	const referenceCount = 100
+	const referenceCount = 30
 	references := make([]string, 0, referenceCount)
 	for index := 0; index < referenceCount; index++ {
 		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))
@@ -413,6 +413,103 @@ func TestProcedureInferenceCleanupRejectsAndBoundsOversizedReferenceEvidence(t *
 	for _, reference := range references {
 		if strings.Contains(string(encoded), reference) {
 			t.Fatalf("oversized cleanup evidence leaked raw reference %q", reference)
+		}
+	}
+}
+
+func TestSemanticCleanupReferenceParserRejectsOversizedMessagesBeforeParsing(t *testing.T) {
+	const rawID = "11111111-1111-4111-8111-111111111111"
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{name: "no-comma-token", message: "resource is referenced by usage_event:" + strings.Repeat("a", maxCleanupReferenceMessageBytes)},
+		{name: "type-token", message: "resource is referenced by " + strings.Repeat("future_reference", maxCleanupReferenceMessageBytes)},
+		{name: "truncation-token", message: "resource is referenced by usage_event:" + rawID + ", ..." + strings.Repeat("9", maxCleanupReferenceMessageBytes) + " more"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			details, retained := procedureInferenceCleanupRetainedByAudit(
+				&ProcedureInferenceResources{CredentialGrantID: "44444444-4444-4444-8444-444444444444"},
+				"credential-grant",
+				&procedureInferenceCleanupProof{},
+				status.Error(codes.FailedPrecondition, test.message),
+			)
+			if retained || details["rejectionCategory"] != "reference-evidence-too-large" || details["observedReferenceCount"] != 0 {
+				t.Fatalf("oversized cleanup message accepted or parsed: retained=%t details=%v", retained, details)
+			}
+			if count, ok := details["referenceCount"]; ok && count != 0 {
+				t.Fatalf("oversized cleanup message produced reference evidence: %v", details)
+			}
+			encoded, err := json.Marshal(details)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(encoded) > 512 || strings.Contains(string(encoded), rawID) || strings.Contains(string(encoded), strings.Repeat("a", 64)) {
+				t.Fatalf("oversized cleanup message leaked into evidence: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestProcedureInferenceCleanupFailureTransitionPreservesAndInvalidatesProof(t *testing.T) {
+	const (
+		grantID      = "44444444-4444-4444-8444-444444444444"
+		credentialID = "55555555-5555-4555-8555-555555555555"
+		decisionID   = "22222222-2222-4222-8222-222222222222"
+		foreignID    = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	)
+	resources := &ProcedureInferenceResources{
+		CredentialGrantID: grantID,
+		CredentialID:      credentialID,
+		Cleanup: []SemanticOperation{
+			{Resource: "credential-grant", Status: "planned"},
+			{Resource: "credential", Status: "planned"},
+		},
+	}
+	proof := &procedureInferenceCleanupProof{}
+	pass := procedureInferenceCleanupPass{Round: 3, Name: "post-space-barrier"}
+
+	if message, retained := applyProcedureInferenceCleanupFailure(resources, "credential-grant", pass, proof, status.Error(codes.FailedPrecondition, "credential grant is referenced by policy_decision:"+decisionID)); !retained || message != "" {
+		t.Fatalf("direct immutable root was not retained: retained=%t message=%q", retained, message)
+	}
+	if _, ok := proof.node("credential-grant", grantID); !ok {
+		t.Fatal("direct immutable root was not added to proof")
+	}
+	if message, retained := applyProcedureInferenceCleanupFailure(resources, "credential", pass, proof, status.Error(codes.Unavailable, "transient raw provider-like detail")); retained || message != "delete credential: rpc_unavailable" {
+		t.Fatalf("transient transition = retained=%t message=%q", retained, message)
+	}
+	if _, ok := proof.node("credential-grant", grantID); !ok {
+		t.Fatal("transient RPC failure invalidated rooted proof")
+	}
+	if message, retained := applyProcedureInferenceCleanupFailure(resources, "credential", pass, proof, status.Error(codes.FailedPrecondition, "credential is referenced by credential_grant:"+grantID)); !retained || message != "" {
+		t.Fatalf("dependent proof was not retained after transient failure: retained=%t message=%q", retained, message)
+	}
+	if message, retained := applyProcedureInferenceCleanupFailure(resources, "credential", pass, proof, status.Error(codes.FailedPrecondition, "credential is referenced by credential_grant:"+foreignID)); retained || message != "delete credential: rpc_failedprecondition" {
+		t.Fatalf("contradictory transition = retained=%t message=%q", retained, message)
+	}
+	if _, ok := proof.node("credential-grant", grantID); ok {
+		t.Fatal("contradictory FailedPrecondition preserved rooted proof")
+	}
+	if details, retained := procedureInferenceCleanupRetainedByAudit(resources, "credential", proof, status.Error(codes.FailedPrecondition, "credential is referenced by credential_grant:"+grantID)); retained || details["rejectionCategory"] != "unrooted-run-owned-reference" {
+		t.Fatalf("dependent proof survived invalidation: retained=%t details=%v", retained, details)
+	}
+	var credential SemanticOperation
+	for _, operation := range resources.Cleanup {
+		if operation.Resource == "credential" {
+			credential = operation
+		}
+	}
+	if len(credential.Attempts) != 3 || credential.Attempts[0].RPCOutcome != "rpc-error" || credential.Attempts[1].Status != "retained-by-audit" || credential.Attempts[2].RPCOutcome != "failed-precondition" || credential.Attempts[2].Round != pass.Round || credential.Attempts[2].Pass != pass.Name {
+		t.Fatalf("production transition attempts were not recorded: %+v", credential.Attempts)
+	}
+	encoded, err := json.Marshal(credential.Attempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prohibited := range []string{"provider-like", decisionID, grantID, foreignID} {
+		if strings.Contains(string(encoded), prohibited) {
+			t.Fatalf("transition evidence leaked %q: %s", prohibited, encoded)
 		}
 	}
 }
