@@ -2,8 +2,11 @@ package provision
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	mycel "github.com/myceldb/mycel-go-sdk"
@@ -159,6 +162,11 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 	if resources == nil {
 		return nil
 	}
+	if strings.TrimSpace(resources.PackageID) == "" {
+		setProcedureInferenceCleanupStatus(resources, "inference-package", "not-created", "", nil)
+	} else {
+		setProcedureInferenceCleanupStatus(resources, "inference-package", "retained-by-design", "", map[string]any{"retentionCategory": "catalog-package-no-delete-api"})
+	}
 	var failures []string
 	steps := []struct {
 		resource string
@@ -196,25 +204,88 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 	}
 	for _, step := range steps {
 		if strings.TrimSpace(step.id) == "" {
-			setProcedureInferenceCleanupStatus(resources, step.resource, "not-created", "")
+			setProcedureInferenceCleanupStatus(resources, step.resource, "not-created", "", nil)
 			continue
 		}
 		callCtx, cancel := admin.AuthCallContext(ctx)
 		err := step.call(callCtx)
 		cancel()
 		if err != nil && status.Code(err) != codes.NotFound {
-			if semanticCleanupRetainedByAudit(err) {
-				setProcedureInferenceCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit closure")
+			if details, retained := procedureInferenceCleanupRetainedByAudit(resources, err); retained {
+				setProcedureInferenceCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit closure", details)
 				continue
 			}
 			message := fmt.Sprintf("delete %s: %s", step.resource, sanitizedProcedureInferenceProvisionError(err))
 			failures = append(failures, message)
-			setProcedureInferenceCleanupStatus(resources, step.resource, "failed", message)
+			setProcedureInferenceCleanupStatus(resources, step.resource, "failed", message, nil)
 			continue
 		}
-		setProcedureInferenceCleanupStatus(resources, step.resource, "completed", "")
+		setProcedureInferenceCleanupStatus(resources, step.resource, "completed", "", nil)
 	}
 	return failures
+}
+
+func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResources, err error) (map[string]any, bool) {
+	references, ok := semanticCleanupReferences(err)
+	if !ok {
+		return nil, false
+	}
+	for _, reference := range references {
+		if reference.Type == "usage_event" || reference.Type == "policy_decision" {
+			continue
+		}
+		if !procedureInferenceRunOwnedRetainedReference(resources, reference) {
+			return nil, false
+		}
+	}
+	sort.Slice(references, func(i, j int) bool {
+		if references[i].Type == references[j].Type {
+			return references[i].ID < references[j].ID
+		}
+		return references[i].Type < references[j].Type
+	})
+	evidence := make([]map[string]string, 0, len(references))
+	for _, reference := range references {
+		digest := sha256.Sum256([]byte(reference.Type + ":" + reference.ID))
+		evidence = append(evidence, map[string]string{"type": reference.Type, "idHash": hex.EncodeToString(digest[:])})
+	}
+	return map[string]any{
+		"retentionCategory": "immutable-audit-closure",
+		"referenceCount":    len(references),
+		"references":        evidence,
+	}, true
+}
+
+func procedureInferenceRunOwnedRetainedReference(resources *ProcedureInferenceResources, reference semanticCleanupReference) bool {
+	if resources == nil {
+		return false
+	}
+	var resource, id string
+	switch reference.Type {
+	case "credential_grant":
+		resource, id = "credential-grant", resources.CredentialGrantID
+	case "credential":
+		resource, id = "credential", resources.CredentialID
+	case "intelligence_profile":
+		resource, id = "intelligence-profile", resources.IntelligenceProfileID
+	case "capability":
+		resource, id = "capability", resources.CapabilityID
+	default:
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(id), reference.ID) && procedureInferenceCleanupState(resources, resource) == "retained-by-audit"
+}
+
+func procedureInferenceCleanupState(resources *ProcedureInferenceResources, resource string) string {
+	if resources == nil {
+		return ""
+	}
+	for _, operation := range resources.Cleanup {
+		if operation.Resource == resource {
+			return operation.Status
+		}
+	}
+	return ""
 }
 
 func procedureInferenceOperationCompleted(resources *ProcedureInferenceResources, resource string) {
@@ -246,11 +317,12 @@ func setProcedureInferenceOperationStatus(resources *ProcedureInferenceResources
 	}
 }
 
-func setProcedureInferenceCleanupStatus(resources *ProcedureInferenceResources, resource, state, message string) {
+func setProcedureInferenceCleanupStatus(resources *ProcedureInferenceResources, resource, state, message string, details map[string]any) {
 	for index := range resources.Cleanup {
 		if resources.Cleanup[index].Resource == resource {
 			resources.Cleanup[index].Status = state
 			resources.Cleanup[index].Error = message
+			resources.Cleanup[index].Details = details
 			return
 		}
 	}

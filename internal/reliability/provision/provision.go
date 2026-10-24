@@ -293,8 +293,12 @@ func planProcedureInferenceResources(scenario spec.ResolvedScenario, resources S
 	} {
 		out.Operations = append(out.Operations, SemanticOperation{Sequence: index + 1, Action: item.action, Resource: item.resource, Status: "planned"})
 	}
-	for index, resource := range []string{"access-policy", "credential-grant", "credential", "intelligence-profile", "capability", "model", "endpoint"} {
-		out.Cleanup = append(out.Cleanup, SemanticOperation{Sequence: index + 1, Action: "delete", Resource: resource, Status: "planned"})
+	for index, item := range []struct{ action, resource string }{
+		{"delete", "access-policy"}, {"delete", "credential-grant"}, {"delete", "credential"},
+		{"delete", "intelligence-profile"}, {"delete", "capability"}, {"delete", "model"}, {"delete", "endpoint"},
+		{"retain", "inference-package"},
+	} {
+		out.Cleanup = append(out.Cleanup, SemanticOperation{Sequence: index + 1, Action: item.action, Resource: item.resource, Status: "planned"})
 	}
 	secret := ""
 	if values := scenario.ProviderProfile.RuntimeSecretValues(); len(values) > 0 {

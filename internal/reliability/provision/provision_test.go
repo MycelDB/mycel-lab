@@ -223,7 +223,7 @@ func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 		want bool
 	}{
 		{name: "usage events", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", "+usageTwo), want: true},
-		{name: "policy decisions with truncated tail", err: status.Error(codes.FailedPrecondition, "access policy is referenced by "+decisionOne+", ...6 more"), want: true},
+		{name: "policy decisions with truncated tail", err: status.Error(codes.FailedPrecondition, "access policy is referenced by "+decisionOne+", ...6 more")},
 		{name: "mixed audit types", err: status.Error(codes.FailedPrecondition, "resource is referenced by "+usageOne+", "+decisionOne), want: true},
 		{name: "mixed reference types", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", credential_grant:44444444-4444-4444-8444-444444444444")},
 		{name: "audit token with trailing reference", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+" credential_grant:44444444-4444-4444-8444-444444444444")},
@@ -241,6 +241,109 @@ func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 				t.Fatalf("semanticCleanupRetainedByAudit()=%t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *testing.T) {
+	const (
+		grantID      = "44444444-4444-4444-8444-444444444444"
+		credentialID = "55555555-5555-4555-8555-555555555555"
+		profileID    = "66666666-6666-4666-8666-666666666666"
+		capabilityID = "77777777-7777-4777-8777-777777777777"
+		modelID      = "88888888-8888-4888-8888-888888888888"
+		endpointID   = "99999999-9999-4999-8999-999999999999"
+		usageID      = "11111111-1111-4111-8111-111111111111"
+		decisionID   = "22222222-2222-4222-8222-222222222222"
+	)
+	resources := &ProcedureInferenceResources{
+		CredentialGrantID: grantID, CredentialID: credentialID, IntelligenceProfileID: profileID,
+		CapabilityID: capabilityID, ModelID: modelID, EndpointID: endpointID,
+	}
+	for index, resource := range []string{"credential-grant", "credential", "intelligence-profile", "capability", "model", "endpoint", "inference-package"} {
+		resources.Cleanup = append(resources.Cleanup, SemanticOperation{Sequence: index + 1, Resource: resource, Status: "planned"})
+	}
+	retain := func(resource, message string) {
+		t.Helper()
+		details, ok := procedureInferenceCleanupRetainedByAudit(resources, status.Error(codes.FailedPrecondition, message))
+		if !ok {
+			t.Fatalf("resource %s was not recognized as an immutable audit closure: %s", resource, message)
+		}
+		setProcedureInferenceCleanupStatus(resources, resource, "retained-by-audit", "immutable audit closure", details)
+		encoded, err := json.Marshal(details)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rawID := range []string{grantID, credentialID, profileID, capabilityID, modelID, endpointID, usageID, decisionID} {
+			if strings.Contains(string(encoded), rawID) {
+				t.Fatalf("cleanup details leaked raw reference ID %s: %s", rawID, encoded)
+			}
+		}
+		if !strings.Contains(string(encoded), `"retentionCategory":"immutable-audit-closure"`) || !strings.Contains(string(encoded), `"idHash":"`) {
+			t.Fatalf("cleanup details are not typed and hashed: %s", encoded)
+		}
+	}
+
+	retain("credential-grant", "credential grant is referenced by policy_decision:"+decisionID)
+	retain("credential", "credential is referenced by credential_grant:"+grantID+", usage_event:"+usageID)
+	retain("intelligence-profile", "intelligence profile is referenced by policy_decision:"+decisionID)
+	retain("capability", "model endpoint capability is referenced by credential_grant:"+grantID+", intelligence_profile:"+profileID)
+	retain("model", "model is referenced by capability:"+capabilityID+", credential_grant:"+grantID)
+	retain("endpoint", "model endpoint is referenced by capability:"+capabilityID+", credential:"+credentialID)
+
+	fresh := *resources
+	fresh.Cleanup = append([]SemanticOperation(nil), resources.Cleanup...)
+	for index := range fresh.Cleanup {
+		fresh.Cleanup[index].Status = "planned"
+	}
+	negative := []error{
+		status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:"+grantID),
+		status.Error(codes.FailedPrecondition, "resource is referenced by credential_grant:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+		status.Error(codes.FailedPrecondition, "resource is referenced by semantic_index:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+		status.Error(codes.FailedPrecondition, "resource is referenced by usage_event:"+usageID+", ...2 more"),
+		status.Error(codes.FailedPrecondition, "resource is referenced by malformed"),
+	}
+	for _, err := range negative {
+		if details, ok := procedureInferenceCleanupRetainedByAudit(&fresh, err); ok || details != nil {
+			t.Fatalf("unrooted, foreign, unknown, truncated, or malformed reference accepted: %v details=%v", err, details)
+		}
+	}
+}
+
+func TestProcedureInferencePackageCleanupIsExplicitlyRetainedByDesign(t *testing.T) {
+	resources := &ProcedureInferenceResources{PackageID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Cleanup: []SemanticOperation{{Action: "retain", Resource: "inference-package", Status: "planned"}}}
+	setProcedureInferenceCleanupStatus(resources, "inference-package", "retained-by-design", "", map[string]any{"retentionCategory": "catalog-package-no-delete-api"})
+	cleanup := resources.Cleanup[0]
+	if cleanup.Status != "retained-by-design" || cleanup.Action != "retain" || cleanup.Details["retentionCategory"] != "catalog-package-no-delete-api" || cleanup.Error != "" {
+		t.Fatalf("package cleanup=%+v", cleanup)
+	}
+}
+
+func TestPlanProcedureInferenceCleanupIncludesRetainedPackage(t *testing.T) {
+	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-procedure-inference-control-emulator", "compose-procedure-inference-control-emulator.yaml")
+	scenario, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "openai-compatible-procedure-emulator.yaml")
+	profileSpec, source, err := provider.LoadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedProfile, err := provider.Resolve(profileSpec, source, provider.ResolveOptions{DryRun: true, RequiredCapabilities: []string{"generation"}, Manifest: provider.BuiltInHarnessManifest()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.ProviderProfile = &resolvedProfile
+	resources, err := PlanScenario(scenario, Options{RunID: "compose-procedure-inference-control-emulator-20261024-000000", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resources.ProcedureInference == nil || len(resources.ProcedureInference.Cleanup) != 8 {
+		t.Fatalf("procedure inference cleanup=%+v", resources.ProcedureInference)
+	}
+	packageCleanup := resources.ProcedureInference.Cleanup[7]
+	if packageCleanup.Sequence != 8 || packageCleanup.Action != "retain" || packageCleanup.Resource != "inference-package" || packageCleanup.Status != "planned" {
+		t.Fatalf("package cleanup plan=%+v", packageCleanup)
 	}
 }
 
