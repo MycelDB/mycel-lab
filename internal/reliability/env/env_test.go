@@ -254,25 +254,26 @@ func (r *deletionRunner) Run(_ context.Context, name string, args ...string) (ex
 }
 
 type composeCaptureRunner struct {
-	commands          []string
-	imageOutput       string
-	imageError        error
-	inspectOutput     string
-	inspectIDOutput   string
-	inspectRepoOutput string
+	commands              []string
+	imageOutput           string
+	imageError            error
+	inspectOutput         string
+	inspectIdentityOutput string
+	diagnosticOutput      string
+	diagnosticError       error
 }
 
 func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
 	if strings.Contains(cmd, " image inspect ") {
-		if strings.Contains(cmd, "{{.Id}}") {
-			return executil.Result{Command: cmd, Stdout: r.inspectIDOutput}, nil
-		}
-		if strings.Contains(cmd, "{{json .RepoDigests}}") {
-			return executil.Result{Command: cmd, Stdout: r.inspectRepoOutput}, nil
+		if strings.Contains(cmd, `"repoDigests"`) {
+			return executil.Result{Command: cmd, Stdout: r.inspectIdentityOutput}, nil
 		}
 		return executil.Result{Command: cmd, Stdout: r.inspectOutput}, nil
+	}
+	if strings.Contains(cmd, " exec -T ") && strings.Contains(cmd, "myceld.log") {
+		return executil.Result{Command: cmd, Stdout: r.diagnosticOutput}, r.diagnosticError
 	}
 	if strings.Contains(cmd, " images --format json ") {
 		if r.imageError != nil {
@@ -299,9 +300,8 @@ func TestRunningImageSourceEvidenceBindsProvenanceToEquivalentRuntimeDigest(t *t
 	const configDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	runner := &composeCaptureRunner{
-		inspectIDOutput:   configDigest + "\n",
-		inspectRepoOutput: `["registry.example/mycel@` + manifestDigest + `"]`,
-		inspectOutput:     `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+		inspectIdentityOutput: `{"id":"` + configDigest + `","repoDigests":["registry.example/mycel@` + manifestDigest + `"]}`,
+		inspectOutput:         `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
 	}
 	for _, runtimeID := range []string{"docker-pullable://registry.example/mycel@" + manifestDigest, "containerd://" + configDigest} {
 		evidence := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", runtimeID+"\n", nil)
@@ -309,8 +309,8 @@ func TestRunningImageSourceEvidenceBindsProvenanceToEquivalentRuntimeDigest(t *t
 			t.Fatalf("runtimeID=%q evidence=%+v", runtimeID, evidence)
 		}
 	}
-	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "docker image inspect "+configDigest) || !strings.Contains(commands, "image inspect mutable:configured") {
-		t.Fatalf("configured identity and proven config were not both inspected: %s", commands)
+	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "docker image inspect "+configDigest) || strings.Count(commands, "image inspect mutable:configured") != 2 {
+		t.Fatalf("configured identity was not captured atomically before immutable provenance inspection: %s", commands)
 	}
 	mismatchDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	mismatch := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker-pullable://registry.example/mycel@"+mismatchDigest+"\n", nil)
@@ -575,6 +575,105 @@ func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestComposeClosedCaptureSkipsRawLogsAndFailsClosed(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	environment := Environment{Name: "mlab-test", Driver: "compose", Metadata: map[string]string{
+		"composeFile":            "compose.yml",
+		"projectName":            "mlab-test",
+		"serviceNames":           "myceld-a",
+		"imageOverride":          "local/mycel:head",
+		"requireImageProvenance": "true",
+	}}
+	outputKeyHash := strings.Repeat("a", 64)
+	runner := &composeCaptureRunner{
+		inspectOutput:    `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+		diagnosticOutput: `{"level":"INFO","msg":"procedure_inference_publication_stage","stage":"graph_commit","result":"failed","category":"failed_precondition","output_key_hash":"` + outputKeyHash + `","prompt":"secret-prompt","error":"secret-error"}`,
+	}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (ComposeDriver{Confirmed: true, Runner: runner}).CaptureState(context.Background(), environment, sink); err != nil {
+		t.Fatal(err)
+	}
+	commands := strings.Join(runner.commands, "\n")
+	if strings.Contains(commands, " logs --no-color") || !strings.Contains(commands, "tail -c 1048576") {
+		t.Fatalf("closed capture requested raw or unbounded logs:\n%s", commands)
+	}
+	diagnostic, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "logs", "myceld-a-procedure-inference.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prohibited := range []string{"secret-prompt", "secret-error", `"prompt"`, `"error"`} {
+		if bytes.Contains(diagnostic, []byte(prohibited)) {
+			t.Fatalf("closed diagnostic leaked %q: %s", prohibited, diagnostic)
+		}
+	}
+
+	failedRunner := &composeCaptureRunner{inspectOutput: runner.inspectOutput, diagnosticError: errors.New("secret diagnostic failure")}
+	failedSink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = (ComposeDriver{Confirmed: true, Runner: failedRunner}).CaptureState(context.Background(), environment, failedSink)
+	if err == nil || err.Error() != "daemon diagnostic capture is incomplete" {
+		t.Fatalf("closed diagnostic failure error=%v", err)
+	}
+	unavailable, readErr := os.ReadFile(filepath.Join(failedSink.Root(), "environment", "logs", "myceld-a-procedure-inference.json"))
+	if readErr != nil || !bytes.Contains(unavailable, []byte(`"captureStatus": "unavailable"`)) || bytes.Contains(unavailable, []byte("secret diagnostic failure")) {
+		t.Fatalf("unsafe unavailable evidence=%s err=%v", unavailable, readErr)
+	}
+}
+
+func TestComposeDeletePreservesGeneratedOverrideUntilSuccessfulRetry(t *testing.T) {
+	dir := t.TempDir()
+	generated := filepath.Join(dir, "override.yml")
+	if err := os.WriteFile(generated, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &composeDeleteRetryRunner{failures: 1}
+	driver := ComposeDriver{Runner: runner}
+	environment := Environment{Metadata: map[string]string{
+		"composeFile":                   "base.yml",
+		"composeFiles":                  strings.Join([]string{"base.yml", generated}, string(os.PathListSeparator)),
+		"projectName":                   "retry-test",
+		"generatedProviderEmulatorFile": generated,
+	}}
+	if err := driver.Delete(context.Background(), environment); err == nil {
+		t.Fatal("first delete unexpectedly succeeded")
+	}
+	if _, err := os.Stat(generated); err != nil {
+		t.Fatalf("generated override removed before successful retry: %v", err)
+	}
+	if err := driver.Delete(context.Background(), environment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(generated); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("generated override retained after successful delete: %v", err)
+	}
+	if runner.calls != 2 {
+		t.Fatalf("delete calls=%d", runner.calls)
+	}
+}
+
+type composeDeleteRetryRunner struct {
+	failures int
+	calls    int
+}
+
+func (r *composeDeleteRetryRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	if strings.Contains(cmd, " down --volumes --remove-orphans") {
+		r.calls++
+		if r.failures > 0 {
+			r.failures--
+			return executil.Result{Command: cmd}, errors.New("temporary delete failure")
+		}
+	}
+	return executil.Result{Command: cmd}, nil
 }
 
 func TestParseProcedureInferenceDaemonDiagnosticsIsClosedAndSecretFree(t *testing.T) {

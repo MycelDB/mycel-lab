@@ -1342,16 +1342,18 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 	evidence := composeImageEvidence{ImageOverride: strings.TrimSpace(imageOverride), Provenance: imageSourceProvenance{CaptureStatus: "unavailable"}}
 	configuredDigests := map[string]bool{}
 	if evidence.ImageOverride != "" {
-		if configured, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", "{{.Id}}"); err == nil {
-			evidence.ConfiguredImageID = canonicalImageDigest(configured.Stdout)
-			if evidence.ConfiguredImageID != "" {
-				configuredDigests[evidence.ConfiguredImageID] = true
+		const identityFormat = `{"id":{{json .Id}},"repoDigests":{{json .RepoDigests}}}`
+		if configured, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", identityFormat); err == nil {
+			var identity struct {
+				ID          string   `json:"id"`
+				RepoDigests []string `json:"repoDigests"`
 			}
-		}
-		if repoDigests, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", "{{json .RepoDigests}}"); err == nil {
-			var values []string
-			if json.Unmarshal([]byte(strings.TrimSpace(repoDigests.Stdout)), &values) == nil {
-				for _, value := range values {
+			if json.Unmarshal([]byte(strings.TrimSpace(configured.Stdout)), &identity) == nil {
+				evidence.ConfiguredImageID = canonicalImageDigest(identity.ID)
+				if evidence.ConfiguredImageID != "" {
+					configuredDigests[evidence.ConfiguredImageID] = true
+				}
+				for _, value := range identity.RepoDigests {
 					if digest := canonicalImageDigest(value); digest != "" {
 						configuredDigests[digest] = true
 					}
@@ -1555,19 +1557,27 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 			}
 		}
 	}
+	requireClosedEvidence := environment.Metadata["requireImageProvenance"] == "true"
+	diagnosticCaptureFailed := false
 	for _, service := range services {
-		result, err := d.compose(ctx, environment, "logs", "--no-color", "--tail=5000", service)
-		if _, writeErr := sink.WriteText(filepath.Join("environment", "logs", service+".log"), formatCommandResult(result, err)); writeErr != nil {
-			return writeErr
+		if !requireClosedEvidence {
+			result, err := d.compose(ctx, environment, "logs", "--no-color", "--tail=5000", service)
+			if _, writeErr := sink.WriteText(filepath.Join("environment", "logs", service+".log"), formatCommandResult(result, err)); writeErr != nil {
+				return writeErr
+			}
 		}
-		diagnosticResult, diagnosticErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", "if [ -f /data/mycel/log/myceld.log ]; then tail -c 1048576 /data/mycel/log/myceld.log | tail -n 5000; fi")
+		diagnosticResult, diagnosticErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", "test -f /data/mycel/log/myceld.log && tail -c 1048576 /data/mycel/log/myceld.log | tail -n 5000")
 		diagnostics := parseProcedureInferenceDaemonDiagnostics(service, diagnosticResult.Stdout)
 		if diagnosticErr != nil {
 			diagnostics.CaptureStatus = "unavailable"
+			diagnosticCaptureFailed = true
 		}
 		if _, writeErr := sink.WriteJSON(filepath.Join("environment", "logs", service+"-procedure-inference.json"), diagnostics); writeErr != nil {
 			return writeErr
 		}
+	}
+	if requireClosedEvidence && diagnosticCaptureFailed {
+		return errors.New("daemon diagnostic capture is incomplete")
 	}
 	return nil
 }
@@ -1750,10 +1760,15 @@ func diagnosticInt64(value any) int64 {
 
 func (d ComposeDriver) Delete(ctx context.Context, environment Environment) error {
 	_, err := d.compose(ctx, environment, "down", "--volumes", "--remove-orphans")
-	if generated := strings.TrimSpace(environment.Metadata["generatedProviderEmulatorFile"]); generated != "" {
-		_ = os.RemoveAll(filepath.Dir(generated))
+	if err != nil {
+		return err
 	}
-	return err
+	if generated := strings.TrimSpace(environment.Metadata["generatedProviderEmulatorFile"]); generated != "" {
+		if removeErr := os.RemoveAll(filepath.Dir(generated)); removeErr != nil {
+			return errors.New("remove generated compose override failed")
+		}
+	}
+	return nil
 }
 
 func (d ComposeDriver) VerifyDeleted(ctx context.Context, environment Environment) (DeletionVerification, error) {
