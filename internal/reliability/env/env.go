@@ -408,51 +408,41 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario, e
 	if namespace == "" {
 		namespace = "mycel-lab"
 	}
+	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName, Metadata: map[string]string{"nodeCount": strconv.Itoa(scenario.Cluster.Nodes), "consolePortBase": strconv.Itoa(intOption(environmentSpec.Options, "consolePortBase", DefaultConsolePortBase)), "imageOverride": strings.TrimSpace(scenario.Cluster.Image)}}
 	args := []string{"cluster", "create", clusterName, "--wait"}
 	args = append(args, stringSliceOption(environmentSpec.Options, "createArguments")...)
 	args = append(args, d.CreateArguments...)
 	if _, err := runner.Run(ctx, "k3d", args...); err != nil {
-		return Environment{}, err
+		return environment, err
 	}
-	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName, Metadata: map[string]string{"nodeCount": strconv.Itoa(scenario.Cluster.Nodes), "consolePortBase": strconv.Itoa(intOption(environmentSpec.Options, "consolePortBase", DefaultConsolePortBase)), "imageOverride": strings.TrimSpace(scenario.Cluster.Image)}}
 	if scenario.ProviderProfile != nil && string(scenario.ProviderProfile.Profile.Mode) == "emulator" {
 		scriptHash, err := providerEmulatorScriptSHA256(scenario)
 		if err != nil {
-			_ = d.Delete(context.Background(), environment)
-			return Environment{}, err
+			return environment, err
 		}
 		environment.Metadata["providerEmulator"] = "true"
 		environment.Metadata["providerEmulatorImage"] = stringOption(environmentSpec.Options, "providerEmulatorImage", "local/mycel-provider-emulator:dev")
 		environment.Metadata["providerEmulatorScriptSHA256"] = scriptHash
 	}
 	if err := d.importLocalImageIfPresent(ctx, environment, scenario.Cluster.Image); err != nil {
-		_ = d.Delete(context.Background(), environment)
-		return Environment{}, err
+		return environment, err
 	}
 	if emulatorImage := environment.Metadata["providerEmulatorImage"]; emulatorImage != "" {
 		if err := d.importLocalImageIfPresent(ctx, environment, emulatorImage); err != nil {
-			_ = d.Delete(context.Background(), environment)
-			return Environment{}, err
+			return environment, err
 		}
 	}
 	manifests, err := deploy.RenderKubernetesManifests(scenario)
 	if err != nil {
-		_ = d.Delete(context.Background(), environment)
-		return Environment{}, err
+		return environment, err
 	}
 	manifestPath, err := writeTempManifest(clusterName, manifests.YAML)
 	if err != nil {
-		_ = d.Delete(context.Background(), environment)
-		return Environment{}, err
+		return environment, err
 	}
 	defer os.Remove(manifestPath)
 	if _, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "apply", "-f", manifestPath); err != nil {
-		_ = d.Delete(context.Background(), environment)
-		return Environment{}, err
-	}
-	if err := d.WaitReady(ctx, environment); err != nil {
-		_ = d.Delete(context.Background(), environment)
-		return Environment{}, err
+		return environment, err
 	}
 	return environment, nil
 }
@@ -892,7 +882,7 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 	runner := d.runner()
 	requireClosedEvidence := environment.Metadata["requireImageProvenance"] == "true"
 	daemonImageIDs, daemonImageErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pods", "-l", "app=myceld", "-o", "jsonpath={range .items[*]}{.status.containerStatuses[?(@.name==\"myceld\")].imageID}{\"\\n\"}{end}")
-	daemonImage := runningImageSourceEvidence(ctx, runner, environment.Metadata["imageOverride"], daemonImageIDs.Stdout)
+	daemonImage := runningImageSourceEvidence(ctx, runner, environment.Metadata["imageOverride"], daemonImageIDs.Stdout, k3dRuntimeConfigDigests(ctx, runner, environment, daemonImageIDs.Stdout))
 	expectedDaemonImages, _ := strconv.Atoi(environment.Metadata["nodeCount"])
 	observedDaemonImages := nonEmptyLineCount(daemonImageIDs.Stdout)
 	if requireClosedEvidence && (daemonImageErr != nil || expectedDaemonImages < 1 || observedDaemonImages != expectedDaemonImages || len(daemonImage.RunningImageIDs) != 1 || !runningImageMatchesConfigured(daemonImage) || !validImageProvenance(daemonImage.Provenance, "https://github.com/MycelDB/mycel")) {
@@ -944,7 +934,7 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 		if strings.TrimSpace(imageID.Stdout) == "" {
 			return errors.New("capture provider emulator image ID: empty image ID")
 		}
-		emulatorImage := runningImageSourceEvidence(ctx, runner, environment.Metadata["providerEmulatorImage"], imageID.Stdout)
+		emulatorImage := runningImageSourceEvidence(ctx, runner, environment.Metadata["providerEmulatorImage"], imageID.Stdout, k3dRuntimeConfigDigests(ctx, runner, environment, imageID.Stdout))
 		emulatorImage.Service = "mycel-provider-emulator"
 		emulatorImage.ScriptSHA256 = environment.Metadata["providerEmulatorScriptSHA256"]
 		if requireClosedEvidence && (nonEmptyLineCount(imageID.Stdout) != 1 || len(emulatorImage.RunningImageIDs) != 1 || !runningImageMatchesConfigured(emulatorImage) || !validImageProvenance(emulatorImage.Provenance, "https://github.com/MycelDB/mycel-lab")) {
@@ -1152,18 +1142,15 @@ func (d ComposeDriver) Create(ctx context.Context, scenario spec.ResolvedScenari
 		metadata["objectStoreFixture"] = objectStore
 	}
 	environment := Environment{Name: projectName, Driver: "compose", Namespace: environmentSpec.Namespace, Metadata: metadata}
+	// Once project-scoped Compose cleanup begins, the runner owns bounded
+	// deletion, absence verification, evidence, and generated override removal.
+	removeGeneratedEmulatorFile = false
 	if _, err := d.compose(ctx, environment, "down", "--volumes", "--remove-orphans"); err != nil {
-		return Environment{}, err
+		return environment, err
 	}
 	if _, err := d.compose(ctx, environment, "up", "-d", "--wait"); err != nil {
-		_ = d.Delete(context.Background(), environment)
-		return Environment{}, err
+		return environment, err
 	}
-	if err := d.WaitReady(ctx, environment); err != nil {
-		_ = d.Delete(context.Background(), environment)
-		return Environment{}, err
-	}
-	removeGeneratedEmulatorFile = false
 	return environment, nil
 }
 
@@ -1261,17 +1248,19 @@ func (d ComposeDriver) CopyToNode(ctx context.Context, environment Environment, 
 }
 
 type composeImageEvidence struct {
-	Service           string                `json:"service,omitempty"`
-	ImageOverride     string                `json:"imageOverride,omitempty"`
-	ConfiguredImageID string                `json:"configuredImageId,omitempty"`
-	ScriptSHA256      string                `json:"scriptSHA256,omitempty"`
-	ID                string                `json:"id"`
-	RunningImageIDs   []string              `json:"runningImageIds,omitempty"`
-	ContainerName     string                `json:"containerName,omitempty"`
-	Repository        string                `json:"repository,omitempty"`
-	Tag               string                `json:"tag,omitempty"`
-	Platform          string                `json:"platform,omitempty"`
-	Provenance        imageSourceProvenance `json:"provenance"`
+	Service              string                `json:"service,omitempty"`
+	ImageOverride        string                `json:"imageOverride,omitempty"`
+	ConfiguredImageID    string                `json:"configuredImageId,omitempty"`
+	ConfiguredDigests    []string              `json:"configuredDigests,omitempty"`
+	RunningConfigDigests []string              `json:"runningConfigDigests,omitempty"`
+	ScriptSHA256         string                `json:"scriptSHA256,omitempty"`
+	ID                   string                `json:"id"`
+	RunningImageIDs      []string              `json:"runningImageIds,omitempty"`
+	ContainerName        string                `json:"containerName,omitempty"`
+	Repository           string                `json:"repository,omitempty"`
+	Tag                  string                `json:"tag,omitempty"`
+	Platform             string                `json:"platform,omitempty"`
+	Provenance           imageSourceProvenance `json:"provenance"`
 }
 
 type imageSourceProvenance struct {
@@ -1349,37 +1338,102 @@ func captureImageProvenance(ctx context.Context, runner executil.Runner, imageID
 	return provenance
 }
 
-func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, imageOverride, rawImageIDs string) composeImageEvidence {
+func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, imageOverride, rawImageIDs string, runtimeConfigDigests map[string]string) composeImageEvidence {
 	evidence := composeImageEvidence{ImageOverride: strings.TrimSpace(imageOverride), Provenance: imageSourceProvenance{CaptureStatus: "unavailable"}}
+	configuredDigests := map[string]bool{}
 	if evidence.ImageOverride != "" {
 		if configured, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", "{{.Id}}"); err == nil {
-			evidence.ConfiguredImageID = normalizeRuntimeImageID(configured.Stdout)
+			evidence.ConfiguredImageID = canonicalImageDigest(configured.Stdout)
+			if evidence.ConfiguredImageID != "" {
+				configuredDigests[evidence.ConfiguredImageID] = true
+			}
+		}
+		if repoDigests, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", "{{json .RepoDigests}}"); err == nil {
+			var values []string
+			if json.Unmarshal([]byte(strings.TrimSpace(repoDigests.Stdout)), &values) == nil {
+				for _, value := range values {
+					if digest := canonicalImageDigest(value); digest != "" {
+						configuredDigests[digest] = true
+					}
+				}
+			}
 		}
 	}
+	for digest := range configuredDigests {
+		evidence.ConfiguredDigests = append(evidence.ConfiguredDigests, digest)
+	}
+	sort.Strings(evidence.ConfiguredDigests)
 	seen := map[string]bool{}
 	for _, line := range strings.Split(rawImageIDs, "\n") {
-		id := normalizeRuntimeImageID(line)
-		if id == "" || seen[id] {
+		digest := canonicalImageDigest(line)
+		if digest == "" || seen[digest] {
 			continue
 		}
-		seen[id] = true
-		evidence.RunningImageIDs = append(evidence.RunningImageIDs, id)
+		seen[digest] = true
+		evidence.RunningImageIDs = append(evidence.RunningImageIDs, digest)
 	}
 	sort.Strings(evidence.RunningImageIDs)
-	if len(evidence.RunningImageIDs) != 1 {
+	seenConfigs := map[string]bool{}
+	for _, runtimeDigest := range evidence.RunningImageIDs {
+		if configDigest := canonicalImageDigest(runtimeConfigDigests[runtimeDigest]); configDigest != "" && !seenConfigs[configDigest] {
+			seenConfigs[configDigest] = true
+			evidence.RunningConfigDigests = append(evidence.RunningConfigDigests, configDigest)
+		}
+	}
+	sort.Strings(evidence.RunningConfigDigests)
+	if len(evidence.RunningImageIDs) != 1 || !runningImageMatchesConfigured(evidence) {
 		return evidence
 	}
 	evidence.ID = evidence.RunningImageIDs[0]
-	evidence.Provenance = captureImageProvenance(ctx, runner, evidence.ID)
+	// The configured local image is safe to inspect only after its config or
+	// repository digest has been proven equivalent to the runtime identity.
+	evidence.Provenance = captureImageProvenance(ctx, runner, evidence.ConfiguredImageID)
 	return evidence
 }
 
-func normalizeRuntimeImageID(value string) string {
+func canonicalImageDigest(value string) string {
 	value = strings.TrimSpace(value)
 	for _, prefix := range []string{"docker-pullable://", "docker://", "containerd://"} {
 		value = strings.TrimPrefix(value, prefix)
 	}
-	return strings.TrimSpace(value)
+	if at := strings.LastIndex(value, "@"); at >= 0 {
+		value = value[at+1:]
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+		return ""
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:")); err != nil {
+		return ""
+	}
+	return value
+}
+
+func k3dRuntimeConfigDigests(ctx context.Context, runner executil.Runner, environment Environment, rawImageIDs string) map[string]string {
+	resolved := map[string]string{}
+	node := "k3d-" + strings.TrimSpace(environment.Name) + "-server-0"
+	if strings.TrimSpace(environment.Name) == "" {
+		return resolved
+	}
+	for _, line := range strings.Split(rawImageIDs, "\n") {
+		runtimeDigest := canonicalImageDigest(line)
+		if runtimeDigest == "" || resolved[runtimeDigest] != "" {
+			continue
+		}
+		result, err := runner.Run(ctx, "docker", "exec", node, "sh", "-c", "ctr -n k8s.io content get "+runtimeDigest+" | head -c 1048576")
+		if err != nil {
+			continue
+		}
+		var manifest struct {
+			Config struct {
+				Digest string `json:"digest"`
+			} `json:"config"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &manifest) == nil {
+			resolved[runtimeDigest] = canonicalImageDigest(manifest.Config.Digest)
+		}
+	}
+	return resolved
 }
 
 func validImageProvenance(provenance imageSourceProvenance, expectedSource string) bool {
@@ -1387,7 +1441,17 @@ func validImageProvenance(provenance imageSourceProvenance, expectedSource strin
 }
 
 func runningImageMatchesConfigured(evidence composeImageEvidence) bool {
-	return evidence.ID != "" && evidence.ConfiguredImageID != "" && evidence.ID == evidence.ConfiguredImageID
+	if len(evidence.RunningImageIDs) != 1 {
+		return false
+	}
+	configured := map[string]bool{}
+	for _, digest := range evidence.ConfiguredDigests {
+		configured[digest] = true
+	}
+	if configured[evidence.RunningImageIDs[0]] {
+		return true
+	}
+	return len(evidence.RunningConfigDigests) == 1 && configured[evidence.RunningConfigDigests[0]]
 }
 
 func safeFullRevision(value string) string {

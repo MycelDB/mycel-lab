@@ -94,7 +94,7 @@ func TestK3DPreflightRequiresConfirmation(t *testing.T) {
 	}
 }
 
-func TestK3DDriverCreateAppliesManifestsAndWaits(t *testing.T) {
+func TestK3DDriverCreateLeavesReadinessToRunner(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
 	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "Example Scenario"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns"}, Cluster: spec.ClusterSpec{Nodes: 1, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
@@ -106,9 +106,21 @@ func TestK3DDriverCreateAppliesManifestsAndWaits(t *testing.T) {
 		t.Fatalf("environment=%+v", environment)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"k3d cluster create", "docker image inspect myceldb/mycel:latest", "k3d image import myceldb/mycel:latest -c " + environment.Name, "kubectl --context " + environment.Context + " apply -f", "kubectl --context " + environment.Context + " -n test-ns rollout status statefulset/myceld", "kubectl --context " + environment.Context + " -n test-ns wait pods -l app=myceld"} {
+	for _, want := range []string{"k3d cluster create", "docker image inspect myceldb/mycel:latest", "k3d image import myceldb/mycel:latest -c " + environment.Name, "kubectl --context " + environment.Context + " apply -f"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "rollout status") || strings.Contains(joined, "wait pods") {
+		t.Fatalf("Create performed readiness checks outside the runner cleanup boundary:\n%s", joined)
+	}
+	if err := driver.WaitReady(context.Background(), environment); err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(runner.commands, "\n")
+	for _, want := range []string{"rollout status statefulset/myceld", "wait pods -l app=myceld"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("WaitReady commands missing %q\n%s", want, joined)
 		}
 	}
 }
@@ -242,11 +254,12 @@ func (r *deletionRunner) Run(_ context.Context, name string, args ...string) (ex
 }
 
 type composeCaptureRunner struct {
-	commands        []string
-	imageOutput     string
-	imageError      error
-	inspectOutput   string
-	inspectIDOutput string
+	commands          []string
+	imageOutput       string
+	imageError        error
+	inspectOutput     string
+	inspectIDOutput   string
+	inspectRepoOutput string
 }
 
 func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
@@ -255,6 +268,9 @@ func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...strin
 	if strings.Contains(cmd, " image inspect ") {
 		if strings.Contains(cmd, "{{.Id}}") {
 			return executil.Result{Command: cmd, Stdout: r.inspectIDOutput}, nil
+		}
+		if strings.Contains(cmd, "{{json .RepoDigests}}") {
+			return executil.Result{Command: cmd, Stdout: r.inspectRepoOutput}, nil
 		}
 		return executil.Result{Command: cmd, Stdout: r.inspectOutput}, nil
 	}
@@ -277,26 +293,62 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (execut
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
 }
 
-func TestRunningImageSourceEvidenceBindsProvenanceToRuntimeID(t *testing.T) {
+func TestRunningImageSourceEvidenceBindsProvenanceToEquivalentRuntimeDigest(t *testing.T) {
 	const revision = "0123456789abcdef0123456789abcdef01234567"
 	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
-	runner := &composeCaptureRunner{inspectIDOutput: "sha256:runtime\n", inspectOutput: `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`}
-	evidence := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker-pullable://sha256:runtime\n")
-	if evidence.ID != "sha256:runtime" || evidence.ConfiguredImageID != "sha256:runtime" || len(evidence.RunningImageIDs) != 1 || evidence.ImageOverride != "mutable:configured" || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") || !runningImageMatchesConfigured(evidence) {
-		t.Fatalf("evidence=%+v", evidence)
+	const configDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	runner := &composeCaptureRunner{
+		inspectIDOutput:   configDigest + "\n",
+		inspectRepoOutput: `["registry.example/mycel@` + manifestDigest + `"]`,
+		inspectOutput:     `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
 	}
-	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "docker image inspect sha256:runtime") || !strings.Contains(commands, "image inspect mutable:configured") {
-		t.Fatalf("configured and running identities were not both inspected: %s", commands)
+	for _, runtimeID := range []string{"docker-pullable://registry.example/mycel@" + manifestDigest, "containerd://" + configDigest} {
+		evidence := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", runtimeID+"\n", nil)
+		if evidence.ID != canonicalImageDigest(runtimeID) || evidence.ConfiguredImageID != configDigest || len(evidence.RunningImageIDs) != 1 || evidence.ImageOverride != "mutable:configured" || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") || !runningImageMatchesConfigured(evidence) {
+			t.Fatalf("runtimeID=%q evidence=%+v", runtimeID, evidence)
+		}
 	}
-	runner.inspectIDOutput = "sha256:different\n"
-	mismatch := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker://sha256:runtime\n")
-	if runningImageMatchesConfigured(mismatch) {
+	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "docker image inspect "+configDigest) || !strings.Contains(commands, "image inspect mutable:configured") {
+		t.Fatalf("configured identity and proven config were not both inspected: %s", commands)
+	}
+	mismatchDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	mismatch := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker-pullable://registry.example/mycel@"+mismatchDigest+"\n", nil)
+	if runningImageMatchesConfigured(mismatch) || mismatch.Provenance.CaptureStatus != "unavailable" {
 		t.Fatalf("configured/running mismatch accepted: %+v", mismatch)
 	}
-	heterogeneous := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker://sha256:a\ncontainerd://sha256:b\n")
+	localImport := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker-pullable://registry.example/mycel@"+mismatchDigest+"\n", map[string]string{mismatchDigest: configDigest})
+	if !runningImageMatchesConfigured(localImport) || !validImageProvenance(localImport.Provenance, "https://github.com/MycelDB/mycel") {
+		t.Fatalf("local runtime manifest was not bound through its config digest: %+v", localImport)
+	}
+	heterogeneous := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker://"+configDigest+"\ncontainerd://"+manifestDigest+"\n", nil)
 	if heterogeneous.ID != "" || len(heterogeneous.RunningImageIDs) != 2 || heterogeneous.Provenance.CaptureStatus != "unavailable" {
 		t.Fatalf("heterogeneous evidence accepted: %+v", heterogeneous)
 	}
+}
+
+func TestK3DRuntimeConfigDigestsResolveManifestToConfig(t *testing.T) {
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const configDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	runner := &runtimeManifestRunner{manifest: `{"config":{"digest":"` + configDigest + `"}}`}
+	resolved := k3dRuntimeConfigDigests(context.Background(), runner, Environment{Name: "acceptance"}, "docker-pullable://registry.example/mycel@"+manifestDigest+"\n")
+	if resolved[manifestDigest] != configDigest {
+		t.Fatalf("resolved=%+v", resolved)
+	}
+	if !strings.Contains(strings.Join(runner.commands, "\n"), "docker exec k3d-acceptance-server-0 sh -c") || !strings.Contains(strings.Join(runner.commands, "\n"), "content get "+manifestDigest+" | head -c 1048576") {
+		t.Fatalf("commands=%v", runner.commands)
+	}
+}
+
+type runtimeManifestRunner struct {
+	manifest string
+	commands []string
+}
+
+func (r *runtimeManifestRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	return executil.Result{Command: cmd, Stdout: r.manifest}, nil
 }
 
 func TestCaptureK3DDaemonDiagnosticsIsClosedBoundedAndFailClosed(t *testing.T) {

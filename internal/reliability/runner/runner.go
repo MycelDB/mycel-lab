@@ -256,9 +256,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return finish(RunFailed, err)
 	}
 	retainEnvironmentOnFailure := opts.KeepEnvironmentOnFailure || effectiveEnvironment.KeepOnFailure
-	environment, err := driver.Create(ctx, scenario, effectiveEnvironment)
-	if err != nil {
-		return finish(RunFailed, err)
+	environment, createErr := driver.Create(ctx, scenario, effectiveEnvironment)
+	if createErr != nil && strings.TrimSpace(environment.Name) == "" {
+		return finish(RunFailed, createErr)
 	}
 	if requiresImmutableBuildProvenance(scenario) {
 		if environment.Metadata == nil {
@@ -369,6 +369,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			status = RunFailed
 		}
 		return finish(status, err)
+	}
+	if createErr != nil {
+		return failAfterEnvironmentCreate(RunFailed, createErr)
 	}
 	if err := driver.WaitReady(ctx, environment); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)

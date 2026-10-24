@@ -16,6 +16,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/events"
+	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
@@ -456,11 +457,40 @@ func TestWaitReadyFailureProducesVerifiedCleanupEvidence(t *testing.T) {
 	if err == nil || !driver.deleted || !driver.verifiedDeleted {
 		t.Fatalf("result=%+v err=%v driver=%+v", result, err, driver)
 	}
+	assertCompletedReadinessCleanup(t, result, "unsafe readiness detail")
+}
+
+func TestComposeWaitReadyFailureUsesRunnerCleanupBoundary(t *testing.T) {
+	composeFile := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(composeFile, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	scenario.Environment = spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{
+		"composeFile":  composeFile,
+		"projectName":  "readiness-cleanup-test",
+		"serviceNames": []any{"myceld-a"},
+	}}
+	runner := &composeReadinessFailureRunner{}
+	driver := env.ComposeDriver{Confirmed: true, Runner: runner}
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver})
+	if err == nil {
+		t.Fatalf("result=%+v err=nil", result)
+	}
+	commands := strings.Join(runner.commands, "\n")
+	if strings.Count(commands, " down --volumes --remove-orphans") < 2 || !strings.Contains(commands, "docker network ls") || !strings.Contains(commands, "docker volume ls") {
+		t.Fatalf("production Compose readiness failure bypassed verified cleanup:\n%s", commands)
+	}
+	assertCompletedReadinessCleanup(t, result, "unsafe compose readiness detail")
+}
+
+func assertCompletedReadinessCleanup(t *testing.T, result Result, forbidden string) {
+	t.Helper()
 	cleanupRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "post-run-cleanup.json"))
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if !strings.Contains(string(cleanupRaw), `"completed": true`) || strings.Contains(string(cleanupRaw), "unsafe readiness detail") {
+	if !strings.Contains(string(cleanupRaw), `"completed": true`) || strings.Contains(string(cleanupRaw), forbidden) {
 		t.Fatalf("unexpected readiness cleanup evidence: %s", cleanupRaw)
 	}
 }
@@ -791,6 +821,28 @@ func TestFinalizeFailsGateWhenArtifactBypassesRedaction(t *testing.T) {
 	if strings.Contains(string(quarantined), secret) {
 		t.Fatalf("quarantined artifact retained secret: %s", quarantined)
 	}
+}
+
+type composeReadinessFailureRunner struct {
+	commands []string
+}
+
+func (r *composeReadinessFailureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, " compose ") && strings.HasSuffix(cmd, " ps") {
+		return executil.Result{Command: cmd}, errors.New("unsafe compose readiness detail")
+	}
+	if name == "docker" && len(args) > 0 {
+		switch args[0] {
+		case "ps", "network", "volume":
+			return executil.Result{Command: cmd}, nil
+		}
+	}
+	if strings.Contains(cmd, " images --format json ") {
+		return executil.Result{Command: cmd, Stdout: `[{"ID":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`}, nil
+	}
+	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
 }
 
 type recordingDriver struct {
