@@ -327,7 +327,9 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 				recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, "failed-precondition", "retained-by-audit", "immutable audit closure", details)
 				continue
 			}
-			proof.clear()
+			if shouldInvalidateProcedureInferenceCleanupProof(code) {
+				proof.clear()
+			}
 			message := fmt.Sprintf("delete %s: %s", step.resource, sanitizedProcedureInferenceProvisionError(err))
 			failures = append(failures, message)
 			setProcedureInferenceCleanupStatus(resources, step.resource, "failed", message, details)
@@ -351,6 +353,10 @@ func cleanupProcedureInferenceResources(ctx context.Context, admin *mycel.AdminC
 		recordProcedureInferenceCleanupAttempt(resources, step.resource, pass, rpcOutcome, "completed", "", nil)
 	}
 	return failures
+}
+
+func shouldInvalidateProcedureInferenceCleanupProof(code codes.Code) bool {
+	return code == codes.FailedPrecondition
 }
 
 func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResources, targetResource string, proof *procedureInferenceCleanupProof, err error) (map[string]any, bool) {

@@ -305,6 +305,11 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 	return failures
 }
 
+const (
+	maxCleanupReferenceEvidence = 20
+	maxCleanupReferenceTokens   = maxCleanupReferenceEvidence + 1
+)
+
 type semanticCleanupReference struct {
 	Type string
 	ID   string
@@ -324,24 +329,37 @@ func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, i
 	if referenceText == "" {
 		return nil, "empty-reference-list", 0
 	}
-	tokens := strings.Split(referenceText, ",")
-	references := make([]semanticCleanupReference, 0, len(tokens))
-	for _, token := range tokens {
+	observedReferenceCount := strings.Count(referenceText, ",") + 1
+	tokens := strings.SplitN(referenceText, ",", maxCleanupReferenceTokens+1)
+	parseTokens := tokens
+	forcedRejection := ""
+	if observedReferenceCount > maxCleanupReferenceTokens || (observedReferenceCount > maxCleanupReferenceEvidence && !semanticCleanupTruncationPattern.MatchString(strings.TrimSpace(tokens[observedReferenceCount-1]))) {
+		forcedRejection = "reference-list-too-large"
+		parseTokens = tokens[:maxCleanupReferenceEvidence]
+	}
+	references := make([]semanticCleanupReference, 0, min(len(parseTokens), maxCleanupReferenceEvidence))
+	for _, token := range parseTokens {
 		token = strings.TrimSpace(token)
 		matches := semanticCleanupReferencePattern.FindStringSubmatch(token)
 		if len(matches) != 3 {
 			// The daemon truncates untyped reference lists with "...N more".
 			// Reject those lists because the hidden references are not proven to
 			// belong to immutable audit history.
-			if semanticCleanupTruncationPattern.MatchString(token) {
-				return references, "truncated-reference-list", len(tokens)
+			if forcedRejection != "" {
+				return references, forcedRejection, observedReferenceCount
 			}
-			return references, "malformed-reference-list", len(tokens)
+			if semanticCleanupTruncationPattern.MatchString(token) {
+				return references, "truncated-reference-list", observedReferenceCount
+			}
+			return references, "malformed-reference-list", observedReferenceCount
 		}
 		references = append(references, semanticCleanupReference{Type: matches[1], ID: strings.ToLower(matches[2])})
 	}
 	if len(references) == 0 {
 		return nil, "empty-reference-list", 0
+	}
+	if forcedRejection != "" {
+		return references, forcedRejection, observedReferenceCount
 	}
 	return references, "", len(references)
 }

@@ -2,6 +2,7 @@ package provision
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -357,6 +358,15 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 	if _, ok := procedureInferenceCleanupRetainedByAudit(resources, "capability", proof, crossPassError); !ok {
 		t.Fatal("independently rooted proof was not carried across cleanup passes")
 	}
+	if shouldInvalidateProcedureInferenceCleanupProof(codes.Unavailable) || shouldInvalidateProcedureInferenceCleanupProof(codes.DeadlineExceeded) {
+		t.Fatal("transient RPC failure would invalidate rooted cleanup proof")
+	}
+	if !shouldInvalidateProcedureInferenceCleanupProof(codes.FailedPrecondition) {
+		t.Fatal("contradictory FailedPrecondition would preserve rooted cleanup proof")
+	}
+	if _, ok := procedureInferenceCleanupRetainedByAudit(resources, "capability", proof, crossPassError); !ok {
+		t.Fatal("rooted proof did not survive simulated transient RPC failure")
+	}
 	foreignChangedSet := status.Error(codes.FailedPrecondition, "resource is referenced by intelligence_profile:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	if details, ok := procedureInferenceCleanupRetainedByAudit(resources, "capability", proof, foreignChangedSet); ok || details["rejectionCategory"] != "foreign-run-owned-reference" {
 		t.Fatalf("changed foreign reference set accepted: accepted=%t details=%v", ok, details)
@@ -375,6 +385,35 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 	cycleError := status.Error(codes.FailedPrecondition, "resource is referenced by capability:"+capabilityID)
 	if details, ok := procedureInferenceCleanupRetainedByAudit(resources, "model", cyclicProof, cycleError); ok || details["rejectionCategory"] != "unrooted-run-owned-reference" {
 		t.Fatalf("rootless cyclic proof accepted: accepted=%t details=%v", ok, details)
+	}
+}
+
+func TestProcedureInferenceCleanupRejectsAndBoundsOversizedReferenceEvidence(t *testing.T) {
+	const referenceCount = 100
+	references := make([]string, 0, referenceCount)
+	for index := 0; index < referenceCount; index++ {
+		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	details, retained := procedureInferenceCleanupRetainedByAudit(
+		&ProcedureInferenceResources{CredentialGrantID: "44444444-4444-4444-8444-444444444444"},
+		"credential-grant",
+		&procedureInferenceCleanupProof{},
+		status.Error(codes.FailedPrecondition, "credential grant is referenced by "+strings.Join(references, ", ")),
+	)
+	if retained || details["rejectionCategory"] != "reference-list-too-large" || details["observedReferenceCount"] != referenceCount || details["referenceCount"] != maxCleanupReferenceEvidence {
+		t.Fatalf("oversized cleanup evidence accepted or misclassified: retained=%t details=%v", retained, details)
+	}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > 4096 {
+		t.Fatalf("oversized cleanup evidence was not bounded: bytes=%d", len(encoded))
+	}
+	for _, reference := range references {
+		if strings.Contains(string(encoded), reference) {
+			t.Fatalf("oversized cleanup evidence leaked raw reference %q", reference)
+		}
 	}
 }
 
