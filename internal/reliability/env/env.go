@@ -1583,9 +1583,21 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 }
 
 func boundedDaemonDiagnosticCommand(path string) string {
+	return BoundedDaemonLogCommand(path, 5000)
+}
+
+// BoundedDaemonLogCommand returns a command that byte- and line-bounds a daemon
+// log inside its container while propagating failures from both tail stages.
+func BoundedDaemonLogCommand(path string, lineLimit int) string {
+	if lineLimit < 1 {
+		lineLimit = 1
+	}
+	if lineLimit > 20000 {
+		lineLimit = 20000
+	}
 	quotedPath := strconv.Quote(path)
 	return "tmp=/tmp/mycel-lab-diagnostics.$$; trap 'rm -f \"$tmp\"' 0 1 2 3 15; " +
-		"test -f " + quotedPath + " && tail -c 1048576 " + quotedPath + " >\"$tmp\" && tail -n 5000 \"$tmp\""
+		"test -f " + quotedPath + " && tail -c 1048576 " + quotedPath + " >\"$tmp\" && tail -n " + strconv.Itoa(lineLimit) + " \"$tmp\""
 }
 
 type procedureInferenceDaemonDiagnostics struct {

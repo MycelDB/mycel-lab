@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -106,6 +107,53 @@ func TestGraphActorDefaultSelectsSemanticTarget(t *testing.T) {
 	_, err := executeSemanticGraphMutation(context.Background(), resources, "semantic-node-create", map[string]any{"nodeId": "node-1"})
 	if err == nil || !strings.Contains(err.Error(), "graph actor access token is unavailable") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestProcedureInferenceCapacityDiagnosticsReadsBoundedComposeDaemonFiles(t *testing.T) {
+	const bounds = `{"msg":"procedure_inference_capacity_bounds","attempt_capacity_per_space":10000,"change_capacity_per_space":50000,"state_byte_capacity_per_space":67108864,"history_byte_capacity_per_space":67108864,"retention_age_seconds":2592000,"attempt_byte_capacity":65536,"evidence_string_byte_capacity":1024}`
+	environment := env.Environment{Driver: "compose", Metadata: map[string]string{
+		"composeFiles": strings.Join([]string{"base.yml", "override.yml"}, string(filepath.ListSeparator)),
+		"projectName":  "bounded-project",
+		"serviceNames": "myceld-a,myceld-b,myceld-c",
+	}}
+	resources := &provision.ScenarioResources{ProcedureInference: &provision.ProcedureInferenceResources{ProcedureID: "procedure", BindingID: "binding"}}
+	var calls []string
+	runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return []byte(bounds), nil
+	}
+	result, err := assertProcedureInferenceCapacityDiagnosticsWithRunner(context.Background(), environment, resources, map[string]any{"timeout": "1s", "tail": 123}, runner)
+	if err != nil {
+		t.Fatalf("assertProcedureInferenceCapacityDiagnosticsWithRunner() error=%v", err)
+	}
+	if !result.CapacityBoundsProved || result.DiagnosticRecordCount != 3 {
+		t.Fatalf("result=%+v, want one bounds record per daemon", result)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("calls=%v, want three daemon file reads", calls)
+	}
+	for index, service := range []string{"myceld-a", "myceld-b", "myceld-c"} {
+		call := calls[index]
+		for _, required := range []string{"docker compose -f base.yml -f override.yml -p bounded-project exec -T " + service + " sh -c", "/data/mycel/log/myceld.log", "tail -c 1048576", "tail -n 123"} {
+			if !strings.Contains(call, required) {
+				t.Fatalf("call[%d]=%q, want %q", index, call, required)
+			}
+		}
+		if strings.Contains(call, " logs ") {
+			t.Fatalf("call[%d]=%q reads container output instead of daemon file", index, call)
+		}
+	}
+}
+
+func TestProcedureInferenceCapacityDiagnosticsHidesComposeFileReadFailure(t *testing.T) {
+	environment := env.Environment{Driver: "compose", Metadata: map[string]string{"serviceNames": "myceld-a"}}
+	resources := &provision.ScenarioResources{ProcedureInference: &provision.ProcedureInferenceResources{ProcedureID: "procedure", BindingID: "binding"}}
+	_, err := assertProcedureInferenceCapacityDiagnosticsWithRunner(context.Background(), environment, resources, map[string]any{"timeout": "1s"}, func(context.Context, string, ...string) ([]byte, error) {
+		return nil, errors.New("unsafe raw daemon failure")
+	})
+	if err == nil || err.Error() != "collect procedure inference capacity diagnostics" || strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("error=%v, want closed generic diagnostic failure", err)
 	}
 }
 

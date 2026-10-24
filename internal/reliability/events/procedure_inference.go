@@ -600,7 +600,64 @@ func procedureInferenceRunReferencesAttempt(response procedureInferenceRunRespon
 	return false
 }
 
+type procedureInferenceDiagnosticCommandRunner func(context.Context, string, ...string) ([]byte, error)
+
+func runProcedureInferenceDiagnosticCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+func collectProcedureInferenceCapacityDiagnostics(ctx context.Context, environment env.Environment, tail int, run procedureInferenceDiagnosticCommandRunner) ([]byte, error) {
+	switch environment.Driver {
+	case "compose":
+		baseArgs := []string{"compose"}
+		for _, file := range filepath.SplitList(environment.Metadata["composeFiles"]) {
+			if strings.TrimSpace(file) != "" {
+				baseArgs = append(baseArgs, "-f", file)
+			}
+		}
+		if project := strings.TrimSpace(environment.Metadata["projectName"]); project != "" {
+			baseArgs = append(baseArgs, "-p", project)
+		}
+		services := strings.Split(strings.TrimSpace(environment.Metadata["serviceNames"]), ",")
+		if len(services) == 0 || strings.TrimSpace(services[0]) == "" {
+			return nil, errors.New("compose daemon services are unavailable")
+		}
+		var output bytes.Buffer
+		for _, service := range services {
+			service = strings.TrimSpace(service)
+			if service == "" {
+				return nil, errors.New("compose daemon services are unavailable")
+			}
+			args := append([]string(nil), baseArgs...)
+			args = append(args, "exec", "-T", service, "sh", "-c", env.BoundedDaemonLogCommand("/data/mycel/log/myceld.log", tail))
+			serviceOutput, err := run(ctx, "docker", args...)
+			if err != nil {
+				return nil, errors.New("collect compose daemon diagnostic log")
+			}
+			output.Write(serviceOutput)
+			output.WriteByte('\n')
+		}
+		return output.Bytes(), nil
+	case "k3d":
+		args := []string{}
+		if environment.Context != "" {
+			args = append(args, "--context", environment.Context)
+		}
+		if environment.Namespace != "" {
+			args = append(args, "-n", environment.Namespace)
+		}
+		args = append(args, "logs", "statefulset/myceld", "--all-containers=true", "--tail="+strconv.Itoa(tail))
+		return run(ctx, "kubectl", args...)
+	default:
+		return nil, fmt.Errorf("procedure inference diagnostics do not support environment driver %q", environment.Driver)
+	}
+}
+
 func assertProcedureInferenceCapacityDiagnostics(ctx context.Context, environment env.Environment, resources *provision.ScenarioResources, target map[string]any) (ProcedureInferenceResult, error) {
+	return assertProcedureInferenceCapacityDiagnosticsWithRunner(ctx, environment, resources, target, runProcedureInferenceDiagnosticCommand)
+}
+
+func assertProcedureInferenceCapacityDiagnosticsWithRunner(ctx context.Context, environment env.Environment, resources *provision.ScenarioResources, target map[string]any, run procedureInferenceDiagnosticCommandRunner) (ProcedureInferenceResult, error) {
 	configured := resources.ProcedureInference
 	result := ProcedureInferenceResult{Operation: "procedure-inference-capacity-diagnostics-assert", ProcedureID: configured.ProcedureID, BindingID: configured.BindingID}
 	timeout, err := targetDuration(target, "timeout")
@@ -613,37 +670,7 @@ func assertProcedureInferenceCapacityDiagnostics(ctx context.Context, environmen
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	tail := intTarget(target, "tail", 5000)
-	var command *exec.Cmd
-	switch environment.Driver {
-	case "compose":
-		args := []string{"compose"}
-		for _, file := range filepath.SplitList(environment.Metadata["composeFiles"]) {
-			if strings.TrimSpace(file) != "" {
-				args = append(args, "-f", file)
-			}
-		}
-		if project := strings.TrimSpace(environment.Metadata["projectName"]); project != "" {
-			args = append(args, "-p", project)
-		}
-		args = append(args, "logs", "--no-color", "--tail", strconv.Itoa(tail))
-		if services := strings.TrimSpace(environment.Metadata["serviceNames"]); services != "" {
-			args = append(args, strings.Split(services, ",")...)
-		}
-		command = exec.CommandContext(commandCtx, "docker", args...)
-	case "k3d":
-		args := []string{}
-		if environment.Context != "" {
-			args = append(args, "--context", environment.Context)
-		}
-		if environment.Namespace != "" {
-			args = append(args, "-n", environment.Namespace)
-		}
-		args = append(args, "logs", "statefulset/myceld", "--all-containers=true", "--tail="+strconv.Itoa(tail))
-		command = exec.CommandContext(commandCtx, "kubectl", args...)
-	default:
-		return result, fmt.Errorf("procedure inference diagnostics do not support environment driver %q", environment.Driver)
-	}
-	output, err := command.CombinedOutput()
+	output, err := collectProcedureInferenceCapacityDiagnostics(commandCtx, environment, tail, run)
 	if err != nil {
 		return result, errors.New("collect procedure inference capacity diagnostics")
 	}
