@@ -83,9 +83,10 @@ type ActorAssignment struct {
 }
 
 type CleanupStatus struct {
-	Attempted bool     `json:"attempted"`
-	Completed bool     `json:"completed"`
-	Errors    []string `json:"errors,omitempty"`
+	Attempted       bool     `json:"attempted"`
+	Completed       bool     `json:"completed"`
+	Errors          []string `json:"-"`
+	ErrorCategories []string `json:"errorCategories,omitempty"`
 }
 
 type ProcedureInferenceResources struct {
@@ -520,14 +521,19 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 		return nil
 	}
 	resources.Cleanup.Attempted = true
+	resources.Cleanup.Completed = false
+	resources.Cleanup.Errors = nil
+	resources.Cleanup.ErrorCategories = nil
 	addr := firstNonEmpty(resources.AdminAddr, firstAddr(opts.DaemonAddrs))
 	if addr == "" {
 		resources.Cleanup.Errors = append(resources.Cleanup.Errors, "daemon address is required for cleanup")
+		resources.Cleanup.ErrorCategories = []string{"daemon_address_missing"}
 		return fmt.Errorf("daemon address is required for cleanup")
 	}
 	admin, err := dialAdminWithRetry(ctx, addr, opts)
 	if err != nil {
 		resources.Cleanup.Errors = append(resources.Cleanup.Errors, err.Error())
+		resources.Cleanup.ErrorCategories = []string{"daemon_connect_failed"}
 		return err
 	}
 	defer admin.Close()
@@ -570,6 +576,7 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 	resources.Cleanup.Errors = errs
 	resources.Cleanup.Completed = len(errs) == 0
 	if len(errs) > 0 {
+		resources.Cleanup.ErrorCategories = []string{"resource_cleanup_failed"}
 		return fmt.Errorf("cleanup scenario resources: %s", strings.Join(errs, "; "))
 	}
 	return nil

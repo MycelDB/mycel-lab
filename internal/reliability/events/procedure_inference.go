@@ -755,7 +755,7 @@ func validateProcedureInferenceAttempt(attempt procedureInferenceAttempt, config
 		return errors.New("procedure inference attempt outcome category is not allowlisted")
 	}
 	switch attempt.PublicationDisposition {
-	case "", "published", "not_published_provider_failure", "suppressed_procedure_control", "rejected_invalid_output", "publication_precondition_failed", "publication_pending", "publication_failed", "suppressed_authorization_or_control", "not_changed_or_duplicate":
+	case "", "published", "not_published_pre_provider_failure", "not_published_provider_failure", "not_published_provider_ambiguous", "suppressed_procedure_control", "rejected_invalid_output", "publication_precondition_failed", "publication_pending", "publication_failed", "suppressed_authorization_or_control", "not_changed_or_duplicate":
 	default:
 		return errors.New("procedure inference publication disposition is not allowlisted")
 	}
@@ -773,7 +773,7 @@ func procedureInferenceObservedPublicationDisposition(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "":
 		return "unset"
-	case "published", "not_published_provider_failure", "suppressed_procedure_control", "rejected_invalid_output", "publication_precondition_failed", "publication_pending", "publication_failed", "suppressed_authorization_or_control", "not_changed_or_duplicate":
+	case "published", "not_published_pre_provider_failure", "not_published_provider_failure", "not_published_provider_ambiguous", "suppressed_procedure_control", "rejected_invalid_output", "publication_precondition_failed", "publication_pending", "publication_failed", "suppressed_authorization_or_control", "not_changed_or_duplicate":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "invalid"
@@ -926,7 +926,7 @@ func procedureInferencePublicationRank(disposition string) int {
 		return 0
 	case "publication_pending":
 		return 1
-	case "published", "not_published_provider_failure", "suppressed_procedure_control", "rejected_invalid_output", "publication_precondition_failed", "publication_failed", "suppressed_authorization_or_control", "not_changed_or_duplicate":
+	case "published", "not_published_pre_provider_failure", "not_published_provider_failure", "not_published_provider_ambiguous", "suppressed_procedure_control", "rejected_invalid_output", "publication_precondition_failed", "publication_failed", "suppressed_authorization_or_control", "not_changed_or_duplicate":
 		return 2
 	default:
 		return -1

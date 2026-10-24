@@ -204,6 +204,23 @@ type fakeRunner struct{ commands []string }
 
 type k3dListRunner struct{ output string }
 
+type k3dDiagnosticRunner struct {
+	podNames  string
+	logOutput string
+	execError error
+}
+
+func (r k3dDiagnosticRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	command := executil.ShellCommand(name, args...)
+	if strings.Contains(command, "get pods -l app=myceld") {
+		return executil.Result{Command: command, Stdout: r.podNames}, nil
+	}
+	if strings.Contains(command, " exec ") {
+		return executil.Result{Command: command, Stdout: r.logOutput}, r.execError
+	}
+	return executil.Result{Command: command}, nil
+}
+
 func (r k3dListRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	return executil.Result{Command: executil.ShellCommand(name, args...), Stdout: r.output}, nil
 }
@@ -225,16 +242,20 @@ func (r *deletionRunner) Run(_ context.Context, name string, args ...string) (ex
 }
 
 type composeCaptureRunner struct {
-	commands      []string
-	imageOutput   string
-	imageError    error
-	inspectOutput string
+	commands        []string
+	imageOutput     string
+	imageError      error
+	inspectOutput   string
+	inspectIDOutput string
 }
 
 func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
 	if strings.Contains(cmd, " image inspect ") {
+		if strings.Contains(cmd, "{{.Id}}") {
+			return executil.Result{Command: cmd, Stdout: r.inspectIDOutput}, nil
+		}
 		return executil.Result{Command: cmd, Stdout: r.inspectOutput}, nil
 	}
 	if strings.Contains(cmd, " images --format json ") {
@@ -254,6 +275,69 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (execut
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
+func TestRunningImageSourceEvidenceBindsProvenanceToRuntimeID(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	runner := &composeCaptureRunner{inspectIDOutput: "sha256:runtime\n", inspectOutput: `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`}
+	evidence := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker-pullable://sha256:runtime\n")
+	if evidence.ID != "sha256:runtime" || evidence.ConfiguredImageID != "sha256:runtime" || len(evidence.RunningImageIDs) != 1 || evidence.ImageOverride != "mutable:configured" || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") || !runningImageMatchesConfigured(evidence) {
+		t.Fatalf("evidence=%+v", evidence)
+	}
+	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "docker image inspect sha256:runtime") || !strings.Contains(commands, "image inspect mutable:configured") {
+		t.Fatalf("configured and running identities were not both inspected: %s", commands)
+	}
+	runner.inspectIDOutput = "sha256:different\n"
+	mismatch := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker://sha256:runtime\n")
+	if runningImageMatchesConfigured(mismatch) {
+		t.Fatalf("configured/running mismatch accepted: %+v", mismatch)
+	}
+	heterogeneous := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker://sha256:a\ncontainerd://sha256:b\n")
+	if heterogeneous.ID != "" || len(heterogeneous.RunningImageIDs) != 2 || heterogeneous.Provenance.CaptureStatus != "unavailable" {
+		t.Fatalf("heterogeneous evidence accepted: %+v", heterogeneous)
+	}
+}
+
+func TestCaptureK3DDaemonDiagnosticsIsClosedBoundedAndFailClosed(t *testing.T) {
+	outputKeyHash := strings.Repeat("a", 64)
+	raw := strings.Repeat("x", 2*1024*1024) + "\n" + `{"level":"INFO","msg":"procedure_inference_publication_stage","stage":"recovery_run_persistence","result":"failed","category":"unavailable","run_id":"secret-run","attempt_id":"secret-attempt","output_key_hash":"` + outputKeyHash + `","prompt":"secret-prompt","error":"secret-error"}`
+	environment := Environment{Context: "k3d-test", Namespace: "default", Metadata: map[string]string{"nodeCount": "2"}}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := captureK3DDaemonDiagnostics(context.Background(), k3dDiagnosticRunner{podNames: "myceld-0\nmyceld-1\n", logOutput: raw}, environment, sink); err != nil {
+		t.Fatal(err)
+	}
+	for _, pod := range []string{"myceld-0", "myceld-1"} {
+		data, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "diagnostics", pod+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		for _, required := range []string{"recovery_run_persistence", "unavailable", outputKeyHash} {
+			if !strings.Contains(text, required) {
+				t.Fatalf("diagnostic missing %q: %s", required, text)
+			}
+		}
+		for _, forbidden := range []string{"secret-run", "secret-attempt", "secret-prompt", "secret-error"} {
+			if strings.Contains(text, forbidden) {
+				t.Fatalf("diagnostic leaked %q: %s", forbidden, text)
+			}
+		}
+	}
+	failedSink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := captureK3DDaemonDiagnostics(context.Background(), k3dDiagnosticRunner{podNames: "myceld-0\nmyceld-1\n", execError: errors.New("secret command failure")}, environment, failedSink); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("unavailable capture error=%v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(failedSink.Root(), "environment", "diagnostics", "myceld-0.json"))
+	if err != nil || !strings.Contains(string(data), `"captureStatus": "unavailable"`) || strings.Contains(string(data), "secret command failure") {
+		t.Fatalf("unsafe unavailable diagnostic data=%s err=%v", data, err)
+	}
 }
 
 func TestK3DVerifyDeletedChecksClusterAbsence(t *testing.T) {

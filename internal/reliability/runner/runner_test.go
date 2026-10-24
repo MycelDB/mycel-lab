@@ -427,6 +427,44 @@ func TestCleanupInvokedOnFailure(t *testing.T) {
 	}
 }
 
+func TestRunBoundedCleanupAttemptsRetriesWithFreshBoundedContexts(t *testing.T) {
+	calls := 0
+	var contexts []context.Context
+	attempts, err := runBoundedCleanupAttempts(3, time.Second, func(ctx context.Context) error {
+		calls++
+		contexts = append(contexts, ctx)
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("cleanup attempt lacks deadline")
+		}
+		if calls < 3 {
+			return errors.New("transient cleanup failure")
+		}
+		return nil
+	})
+	if err != nil || attempts != 3 || calls != 3 {
+		t.Fatalf("attempts=%d calls=%d err=%v", attempts, calls, err)
+	}
+	if contexts[0] == contexts[1] || contexts[1] == contexts[2] {
+		t.Fatal("cleanup attempts reused a context")
+	}
+}
+
+func TestWaitReadyFailureProducesVerifiedCleanupEvidence(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	driver := &recordingDriver{waitErr: errors.New("unsafe readiness detail")}
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver})
+	if err == nil || !driver.deleted || !driver.verifiedDeleted {
+		t.Fatalf("result=%+v err=%v driver=%+v", result, err, driver)
+	}
+	cleanupRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "post-run-cleanup.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(cleanupRaw), `"completed": true`) || strings.Contains(string(cleanupRaw), "unsafe readiness detail") {
+		t.Fatalf("unexpected readiness cleanup evidence: %s", cleanupRaw)
+	}
+}
+
 func TestFailureCleanupHonorsScenarioRetentionPolicy(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	scenario.Environment.KeepOnFailure = true
@@ -464,8 +502,13 @@ func TestFailureCleanupRetriesDeleteAndRetainsDeferredFallback(t *testing.T) {
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if !strings.Contains(string(cleanupRaw), `"driverDeleteAttempts": 2`) || strings.Contains(string(cleanupRaw), "unsafe delete detail") {
-		t.Fatalf("unexpected retry evidence: %s", cleanupRaw)
+	for _, required := range []string{`"driverDeleteAttempts": 3`, `"driverDeleteCompleted": true`, `"completed": true`} {
+		if !strings.Contains(string(cleanupRaw), required) {
+			t.Fatalf("retry evidence missing %s: %s", required, cleanupRaw)
+		}
+	}
+	if strings.Contains(string(cleanupRaw), "unsafe delete detail") {
+		t.Fatalf("unexpected raw delete error: %s", cleanupRaw)
 	}
 }
 
@@ -756,6 +799,7 @@ type recordingDriver struct {
 	deleteFailures           int
 	verifiedDeleted          bool
 	unsupportedVerification  bool
+	waitErr                  error
 	captured                 int
 	omitEndpoints            bool
 	createdScenario          spec.ResolvedScenario
@@ -777,7 +821,7 @@ func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenar
 	d.createdEnvironmentSpec = environmentSpec
 	return env.Environment{Name: scenario.Metadata.Name, Driver: "test", Namespace: "test", Metadata: map[string]string{"nodeCount": "1"}}, nil
 }
-func (d *recordingDriver) WaitReady(context.Context, env.Environment) error { return nil }
+func (d *recordingDriver) WaitReady(context.Context, env.Environment) error { return d.waitErr }
 func (d *recordingDriver) Nodes(context.Context, env.Environment) ([]env.Node, error) {
 	return []env.Node{{Name: "myceld-0", Ordinal: 0, Resource: "test/myceld-0"}}, nil
 }

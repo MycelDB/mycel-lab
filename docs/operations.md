@@ -197,13 +197,17 @@ executables to clean full source revisions:
 ```sh
 LAB_REVISION=$(git rev-parse HEAD)
 LAB_CONTEXT_DIGEST=$(git ls-files -s | shasum -a 256 | awk '{print $1}')
+EMULATOR_IMAGE="local/mycel-provider-emulator:${LAB_REVISION%%????????????????????????????????}"
 docker build --platform linux/arm64 -f Dockerfile.emulator \
   --build-arg SOURCE_REVISION="$LAB_REVISION" \
   --build-arg SOURCE_DIRTY=false \
   --build-arg BUILD_CONTEXT_DIGEST="$LAB_CONTEXT_DIGEST" \
   --build-arg BUILD_IDENTITY=docker-buildx-local-linux-arm64-emulator \
-  -t local/mycel-provider-emulator:"${LAB_REVISION%%????????????????????????????????}" .
+  -t "$EMULATOR_IMAGE" .
 go build -trimpath -o ./bin/mycel-lab ./cmd/mycel-lab
+./bin/mycel-lab run suite compose-procedure-inference-control-emulator \
+  --confirm-destructive \
+  --environment-option providerEmulatorImage="$EMULATOR_IMAGE"
 ```
 
 Daemon acceptance images are built from the common repository root, with the
@@ -224,7 +228,10 @@ Do not set `SOURCE_DIRTY=false` unless each included source tree is clean.
 Non-dry-run procedure-inference scenarios fail closed before provisioning unless
 the Lab executable reports a clean full Git revision. They fail before actor or
 provider work unless the daemon and emulator images expose complete clean
-revision, context-digest, source, and build-identity labels.
+revision, context-digest, source, and build-identity labels. Pass the same
+`--environment-option providerEmulatorImage="$EMULATOR_IMAGE"` override to each
+approved k3d procedure-inference suite; the scenarios' `:dev` default is for
+non-acceptance development only.
 Legacy development-only emulator builds may still use:
 
 ```sh

@@ -890,9 +890,13 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 		return err
 	}
 	runner := d.runner()
-	daemonImage := localImageSourceEvidence(ctx, runner, environment.Metadata["imageOverride"])
-	if environment.Metadata["requireImageProvenance"] == "true" && (daemonImage.ID == "" || !validImageProvenance(daemonImage.Provenance, "https://github.com/MycelDB/mycel")) {
-		return errors.New("daemon image provenance is incomplete")
+	requireClosedEvidence := environment.Metadata["requireImageProvenance"] == "true"
+	daemonImageIDs, daemonImageErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pods", "-l", "app=myceld", "-o", "jsonpath={range .items[*]}{.status.containerStatuses[?(@.name==\"myceld\")].imageID}{\"\\n\"}{end}")
+	daemonImage := runningImageSourceEvidence(ctx, runner, environment.Metadata["imageOverride"], daemonImageIDs.Stdout)
+	expectedDaemonImages, _ := strconv.Atoi(environment.Metadata["nodeCount"])
+	observedDaemonImages := nonEmptyLineCount(daemonImageIDs.Stdout)
+	if requireClosedEvidence && (daemonImageErr != nil || expectedDaemonImages < 1 || observedDaemonImages != expectedDaemonImages || len(daemonImage.RunningImageIDs) != 1 || !runningImageMatchesConfigured(daemonImage) || !validImageProvenance(daemonImage.Provenance, "https://github.com/MycelDB/mycel")) {
+		return errors.New("daemon running image provenance is incomplete or heterogeneous")
 	}
 	if _, err := sink.WriteJSON("environment/daemon-image.json", daemonImage); err != nil {
 		return err
@@ -903,9 +907,22 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 	}{
 		{name: "environment/kubernetes-resources.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "get", "all,pvc", "-o", "wide"}},
 		{name: "environment/pods-describe.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "describe", "pods"}},
-		{name: "environment/pod-logs.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "statefulset/myceld", "--all-containers=true", "--tail=200"}},
-		{name: "environment/pod-logs-all.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "-l", "app=myceld", "--all-containers=true", "--prefix=true", "--tail=5000"}},
-		{name: "environment/pod-logs-previous.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "-l", "app=myceld", "--all-containers=true", "--prefix=true", "--previous", "--tail=5000"}},
+	}
+	if !requireClosedEvidence {
+		captures = append(captures,
+			struct {
+				name string
+				args []string
+			}{name: "environment/pod-logs.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "statefulset/myceld", "--all-containers=true", "--tail=200"}},
+			struct {
+				name string
+				args []string
+			}{name: "environment/pod-logs-all.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "-l", "app=myceld", "--all-containers=true", "--prefix=true", "--tail=5000"}},
+			struct {
+				name string
+				args []string
+			}{name: "environment/pod-logs-previous.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "logs", "-l", "app=myceld", "--all-containers=true", "--prefix=true", "--previous", "--tail=5000"}},
+		)
 	}
 	for _, capture := range captures {
 		result, err := runner.Run(ctx, "kubectl", capture.args...)
@@ -914,20 +931,24 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 			return writeErr
 		}
 	}
+	if requireClosedEvidence {
+		if err := captureK3DDaemonDiagnostics(ctx, runner, environment, sink); err != nil {
+			return err
+		}
+	}
 	if environment.Metadata["providerEmulator"] == "true" {
-		imageID, imageErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pods", "-l", "app=mycel-provider-emulator", "-o", "jsonpath={range .items[*].status.containerStatuses[*]}{.imageID}{\"\\n\"}{end}")
+		imageID, imageErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pods", "-l", "app=mycel-provider-emulator", "-o", "jsonpath={range .items[*]}{.status.containerStatuses[?(@.name==\"emulator\")].imageID}{\"\\n\"}{end}")
 		if imageErr != nil {
 			return fmt.Errorf("capture provider emulator image ID: %w", imageErr)
 		}
 		if strings.TrimSpace(imageID.Stdout) == "" {
 			return errors.New("capture provider emulator image ID: empty image ID")
 		}
-		emulatorImage := localImageSourceEvidence(ctx, runner, environment.Metadata["providerEmulatorImage"])
+		emulatorImage := runningImageSourceEvidence(ctx, runner, environment.Metadata["providerEmulatorImage"], imageID.Stdout)
 		emulatorImage.Service = "mycel-provider-emulator"
 		emulatorImage.ScriptSHA256 = environment.Metadata["providerEmulatorScriptSHA256"]
-		emulatorImage.ContainerName = strings.TrimSpace(imageID.Stdout)
-		if environment.Metadata["requireImageProvenance"] == "true" && (emulatorImage.ID == "" || !validImageProvenance(emulatorImage.Provenance, "https://github.com/MycelDB/mycel-lab")) {
-			return errors.New("provider emulator image provenance is incomplete")
+		if requireClosedEvidence && (nonEmptyLineCount(imageID.Stdout) != 1 || len(emulatorImage.RunningImageIDs) != 1 || !runningImageMatchesConfigured(emulatorImage) || !validImageProvenance(emulatorImage.Provenance, "https://github.com/MycelDB/mycel-lab")) {
+			return errors.New("provider emulator running image provenance is incomplete or ambiguous")
 		}
 		if _, err := sink.WriteJSON("provider/emulator-image.json", emulatorImage); err != nil {
 			return err
@@ -939,13 +960,59 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 		if err := PersistProviderEmulatorObservations(sink, observations.Stdout, false); err != nil {
 			return err
 		}
-		logs, logErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "logs", "deployment/mycel-provider-emulator", "--tail=1000")
-		if _, err := sink.WriteText("provider/emulator.log", formatCommandResult(logs, logErr)); err != nil {
-			return err
+		if !requireClosedEvidence {
+			logs, logErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "logs", "deployment/mycel-provider-emulator", "--tail=1000")
+			if _, err := sink.WriteText("provider/emulator.log", formatCommandResult(logs, logErr)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
+
+func captureK3DDaemonDiagnostics(ctx context.Context, runner executil.Runner, environment Environment, sink *artifacts.Sink) error {
+	podsResult, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pods", "-l", "app=myceld", "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	if err != nil {
+		return errors.New("daemon diagnostic pod discovery failed")
+	}
+	pods := nonEmptyLines(podsResult.Stdout)
+	expected, _ := strconv.Atoi(environment.Metadata["nodeCount"])
+	if expected < 1 || len(pods) != expected {
+		return errors.New("daemon diagnostic pod set is incomplete")
+	}
+	captureFailed := false
+	for _, pod := range pods {
+		result, captureErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", pod, "--", "sh", "-c", "test -f /data/mycel/log/myceld.log && tail -c 1048576 /data/mycel/log/myceld.log | tail -n 5000")
+		diagnostics := parseProcedureInferenceDaemonDiagnostics(pod, result.Stdout)
+		if captureErr != nil {
+			diagnostics.CaptureStatus = "unavailable"
+			captureFailed = true
+		}
+		name := sanitizeName(pod)
+		if name == "" {
+			name = "unknown"
+		}
+		if _, writeErr := sink.WriteJSON(filepath.Join("environment", "diagnostics", name+".json"), diagnostics); writeErr != nil {
+			return writeErr
+		}
+	}
+	if captureFailed {
+		return errors.New("daemon diagnostic capture is incomplete")
+	}
+	return nil
+}
+
+func nonEmptyLines(raw string) []string {
+	var values []string
+	for _, line := range strings.Split(raw, "\n") {
+		if value := strings.TrimSpace(line); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func nonEmptyLineCount(raw string) int { return len(nonEmptyLines(raw)) }
 
 func (d K3DDriver) runner() executil.Runner {
 	if d.Runner != nil {
@@ -1194,15 +1261,17 @@ func (d ComposeDriver) CopyToNode(ctx context.Context, environment Environment, 
 }
 
 type composeImageEvidence struct {
-	Service       string                `json:"service,omitempty"`
-	ImageOverride string                `json:"imageOverride,omitempty"`
-	ScriptSHA256  string                `json:"scriptSHA256,omitempty"`
-	ID            string                `json:"id"`
-	ContainerName string                `json:"containerName"`
-	Repository    string                `json:"repository,omitempty"`
-	Tag           string                `json:"tag,omitempty"`
-	Platform      string                `json:"platform,omitempty"`
-	Provenance    imageSourceProvenance `json:"provenance"`
+	Service           string                `json:"service,omitempty"`
+	ImageOverride     string                `json:"imageOverride,omitempty"`
+	ConfiguredImageID string                `json:"configuredImageId,omitempty"`
+	ScriptSHA256      string                `json:"scriptSHA256,omitempty"`
+	ID                string                `json:"id"`
+	RunningImageIDs   []string              `json:"runningImageIds,omitempty"`
+	ContainerName     string                `json:"containerName,omitempty"`
+	Repository        string                `json:"repository,omitempty"`
+	Tag               string                `json:"tag,omitempty"`
+	Platform          string                `json:"platform,omitempty"`
+	Provenance        imageSourceProvenance `json:"provenance"`
 }
 
 type imageSourceProvenance struct {
@@ -1280,22 +1349,45 @@ func captureImageProvenance(ctx context.Context, runner executil.Runner, imageID
 	return provenance
 }
 
-func localImageSourceEvidence(ctx context.Context, runner executil.Runner, image string) composeImageEvidence {
-	evidence := composeImageEvidence{ImageOverride: strings.TrimSpace(image), Provenance: imageSourceProvenance{CaptureStatus: "unavailable"}}
-	if evidence.ImageOverride == "" {
+func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, imageOverride, rawImageIDs string) composeImageEvidence {
+	evidence := composeImageEvidence{ImageOverride: strings.TrimSpace(imageOverride), Provenance: imageSourceProvenance{CaptureStatus: "unavailable"}}
+	if evidence.ImageOverride != "" {
+		if configured, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", "{{.Id}}"); err == nil {
+			evidence.ConfiguredImageID = normalizeRuntimeImageID(configured.Stdout)
+		}
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(rawImageIDs, "\n") {
+		id := normalizeRuntimeImageID(line)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		evidence.RunningImageIDs = append(evidence.RunningImageIDs, id)
+	}
+	sort.Strings(evidence.RunningImageIDs)
+	if len(evidence.RunningImageIDs) != 1 {
 		return evidence
 	}
-	result, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", "{{.Id}}")
-	if err != nil {
-		return evidence
-	}
-	evidence.ID = strings.TrimSpace(result.Stdout)
+	evidence.ID = evidence.RunningImageIDs[0]
 	evidence.Provenance = captureImageProvenance(ctx, runner, evidence.ID)
 	return evidence
 }
 
+func normalizeRuntimeImageID(value string) string {
+	value = strings.TrimSpace(value)
+	for _, prefix := range []string{"docker-pullable://", "docker://", "containerd://"} {
+		value = strings.TrimPrefix(value, prefix)
+	}
+	return strings.TrimSpace(value)
+}
+
 func validImageProvenance(provenance imageSourceProvenance, expectedSource string) bool {
 	return provenance.CaptureStatus == "completed" && provenance.Source == expectedSource && provenance.Dirty == "false" && provenance.Revision != "" && provenance.ContextDigest != "" && provenance.BuildCommand != ""
+}
+
+func runningImageMatchesConfigured(evidence composeImageEvidence) bool {
+	return evidence.ID != "" && evidence.ConfiguredImageID != "" && evidence.ID == evidence.ConfiguredImageID
 }
 
 func safeFullRevision(value string) string {
@@ -1392,9 +1484,11 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		if err := PersistProviderEmulatorObservations(sink, observations.Stdout, false); err != nil {
 			return err
 		}
-		logs, logErr := d.compose(ctx, environment, "logs", "--no-color", "--tail=1000", "mycel-provider-emulator")
-		if _, err := sink.WriteText("provider/emulator.log", formatCommandResult(logs, logErr)); err != nil {
-			return err
+		if environment.Metadata["requireImageProvenance"] != "true" {
+			logs, logErr := d.compose(ctx, environment, "logs", "--no-color", "--tail=1000", "mycel-provider-emulator")
+			if _, err := sink.WriteText("provider/emulator.log", formatCommandResult(logs, logErr)); err != nil {
+				return err
+			}
 		}
 	}
 	for _, service := range services {
@@ -1446,7 +1540,13 @@ var procedureInferenceDiagnosticStages = map[string]struct{}{
 	"precommit_claim_renewal": {}, "global_authorization_fence": {}, "procedure_control_fence": {},
 	"graph_commit": {}, "publication": {}, "session_finalize": {}, "graph_finalize_ack": {},
 	"final_disposition": {}, "receipt_acknowledgement": {}, "recovery_output_probe": {},
-	"recovery_receipt_acknowledgement": {},
+	"recovery_disposition_persistence": {}, "recovery_receipt_backfill": {}, "recovery_receipt_backfill_persistence": {},
+	"recovery_run_persistence": {}, "recovery_invocation_persistence": {}, "recovery_receipt_acknowledgement": {},
+	"disposition_not_published_pre_provider_failure": {}, "disposition_not_published_provider_failure": {},
+	"disposition_not_published_provider_ambiguous": {}, "disposition_suppressed_procedure_control": {},
+	"disposition_rejected_invalid_output": {}, "disposition_publication_precondition_failed": {},
+	"disposition_publication_pending": {}, "disposition_suppressed_authorization_or_control": {},
+	"disposition_not_changed_or_duplicate": {}, "disposition_published": {}, "disposition_invalid": {},
 }
 
 var procedureInferenceDiagnosticCategories = map[string]struct{}{

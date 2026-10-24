@@ -161,6 +161,16 @@ func TestComposeSemanticContractTimingAndInitialBackfillProvenance(t *testing.T)
 	}
 }
 
+func TestCleanupStatusJSONExcludesRawErrors(t *testing.T) {
+	encoded, err := json.Marshal(CleanupStatus{Attempted: true, Errors: []string{"secret raw daemon error"}, ErrorCategories: []string{"resource_cleanup_failed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret raw daemon error") || !strings.Contains(string(encoded), "resource_cleanup_failed") {
+		t.Fatalf("unsafe cleanup evidence: %s", encoded)
+	}
+}
+
 func TestCleanupAcrossSpaceBarrierRetriesAuditReferencedResources(t *testing.T) {
 	tests := []struct {
 		name            string

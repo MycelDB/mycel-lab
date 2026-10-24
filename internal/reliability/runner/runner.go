@@ -266,9 +266,6 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		}
 		environment.Metadata["requireImageProvenance"] = strconv.FormatBool(!opts.DryRun)
 	}
-	if err := driver.WaitReady(ctx, environment); err != nil {
-		return finish(RunFailed, err)
-	}
 	cleanupEnvironment := true
 	var resources provision.ScenarioResources
 	resourcesPlanned := false
@@ -286,6 +283,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			"schemaVersion":            "reliability.mycel.io/post-run-cleanup/v1alpha1",
 			"retentionRequested":       retentionRequested,
 			"scenarioCleanupAttempted": scenarioCleanupCompleted,
+			"scenarioCleanupAttempts":  0,
 			"scenarioCleanupCompleted": scenarioCleanupCompleted,
 			"driverDeleteAttempts":     0,
 			"driverDeleteCompleted":    false,
@@ -301,19 +299,21 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		if resourcesPlanned && !scenarioCleanupCompleted {
 			evidence["scenarioCleanupAttempted"] = true
 			cleanupDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 60*time.Second)
-			cleanupErr := provision.CleanupScenario(cleanupCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun})
-			cleanupCancel()
-			if cleanupErr != nil {
-				errorCategories = append(errorCategories, "scenario_cleanup_failed")
-			} else {
+			attempts, cleanupErr := runBoundedCleanupAttempts(3, 60*time.Second, func(cleanupCtx context.Context) error {
+				return provision.CleanupScenario(cleanupCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun})
+			})
+			evidence["scenarioCleanupAttempts"] = attempts
+			if cleanupErr == nil {
 				scenarioCleanupCompleted = true
 				evidence["scenarioCleanupCompleted"] = true
+			}
+			if !scenarioCleanupCompleted {
+				errorCategories = append(errorCategories, "scenario_cleanup_failed")
 			}
 			_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
 		}
 		deleteCompleted := false
-		for attempt := 1; attempt <= 2; attempt++ {
+		for attempt := 1; attempt <= 3; attempt++ {
 			evidence["driverDeleteAttempts"] = attempt
 			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 60*time.Second)
 			deleteErr := driver.Delete(deleteCtx, environment)
@@ -323,9 +323,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 				break
 			}
 		}
+		cleanupEnvironment = false
 		if deleteCompleted {
 			evidence["driverDeleteCompleted"] = true
-			cleanupEnvironment = false
 		} else {
 			errorCategories = append(errorCategories, "environment_delete_failed")
 		}
@@ -363,12 +363,15 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		_ = driver.CaptureState(captureCtx, environment, sink)
 		cancel()
-		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "error": err.Error()}))
+		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "errorCategory": "environment_failure"}))
 		if cleanupErr := cleanupAfterEnvironment(retainEnvironmentOnFailure); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 			status = RunFailed
 		}
 		return finish(status, err)
+	}
+	if err := driver.WaitReady(ctx, environment); err != nil {
+		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	nodes, err := driver.Nodes(ctx, environment)
 	if err != nil {
@@ -1401,6 +1404,22 @@ func appendMetric(ctx context.Context, st store.Store, sink *artifacts.Sink, run
 		return st.AppendMetric(ctx, store.RunMetric{RunID: runID, Name: name, Value: value, Labels: labelJSON})
 	}
 	return nil
+}
+
+func runBoundedCleanupAttempts(maxAttempts int, timeout time.Duration, cleanup func(context.Context) error) (int, error) {
+	if maxAttempts < 1 {
+		return 0, errors.New("cleanup attempts must be positive")
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		lastErr = cleanup(attemptCtx)
+		cancel()
+		if lastErr == nil {
+			return attempt, nil
+		}
+	}
+	return maxAttempts, lastErr
 }
 
 func appendEvent(ctx context.Context, st store.Store, sink *artifacts.Sink, runID string, event artifacts.Event) error {
