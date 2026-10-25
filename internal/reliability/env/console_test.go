@@ -9,6 +9,46 @@ import (
 	"time"
 )
 
+func TestConsolePortForwardRefreshRequiresAcknowledgedReplacement(t *testing.T) {
+	state := &endpointForwardState{endpoint: ConsoleEndpoint{NodeName: "myceld-0", DaemonAddr: "127.0.0.1:20091"}, refresh: make(chan endpointRefreshRequest)}
+	session := &ConsolePortForwardSession{cancel: func() {}, done: make(chan struct{}), states: map[string]*endpointForwardState{"myceld-0": state}, notify: make(chan struct{})}
+	type refreshResult struct {
+		evidence EndpointRecoveryEvidence
+		err      error
+	}
+	result := make(chan refreshResult, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		evidence, err := session.RefreshAndAwaitEndpoint(ctx, "myceld-0", 0)
+		result <- refreshResult{evidence: evidence, err: err}
+	}()
+	request := <-state.refresh
+	// This readiness belongs to the already-starting process and must not
+	// satisfy the refresh request that has not yet been acknowledged.
+	session.markEndpointReady(state)
+	select {
+	case got := <-result:
+		t.Fatalf("pre-refresh readiness completed request: %+v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	session.markEndpointUnavailable(state)
+	request.acknowledged <- session.endpointGeneration(state)
+	select {
+	case got := <-result:
+		t.Fatalf("acknowledged old generation completed request: %+v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	session.markEndpointReady(state)
+	got := <-result
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.evidence.RefreshGeneration != 1 || got.evidence.ReadyGeneration != 2 {
+		t.Fatalf("evidence=%+v", got.evidence)
+	}
+}
+
 func TestConsolePortForwardSessionRefreshesEndpointGeneration(t *testing.T) {
 	binDir := t.TempDir()
 	invocations := filepath.Join(t.TempDir(), "invocations")

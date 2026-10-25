@@ -366,6 +366,7 @@ func (r *recordingEventRecorder) RecordRuntimeEvent(_ context.Context, record Re
 
 type recordingDriver struct {
 	restarted       []int
+	rollingRestarts int
 	imageUpdate     env.StatefulSetImageUpdateRequest
 	execCommands    []string
 	execResult      func(command string) (env.ExecResult, error)
@@ -403,7 +404,10 @@ func (d *recordingDriver) RestartNode(_ context.Context, _ env.Environment, node
 	d.restarted = append(d.restarted, node.Ordinal)
 	return nil
 }
-func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error { return nil }
+func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error {
+	d.rollingRestarts++
+	return nil
+}
 func (d *recordingDriver) UpdateStatefulSetImage(_ context.Context, _ env.Environment, req env.StatefulSetImageUpdateRequest) (env.ExecResult, error) {
 	d.imageUpdate = req
 	return env.ExecResult{Stdout: "updated\n"}, nil

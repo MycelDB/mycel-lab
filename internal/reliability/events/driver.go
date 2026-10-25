@@ -119,10 +119,17 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "pod-stop", "pod-restart", "pod-delete", "node-stop", "node-restart":
 		return r.restartNodeAndRecoverEndpoint(ctx, event.Target)
 	case "rolling-restart":
-		return nil, r.Driver.RollingRestart(ctx, r.Environment)
+		return r.rollingRestartAndRecoverEndpoints(ctx)
 	case "statefulset-image-upgrade":
+		snapshots := r.managedEndpointSnapshots()
 		result, err := executeStatefulSetImageUpgradeEvent(ctx, r.Driver, r.Environment, event.Target)
-		return map[string]any{"statefulSetImageUpgrade": result}, err
+		payload := map[string]any{"statefulSetImageUpgrade": result}
+		if err != nil || len(snapshots) == 0 {
+			return payload, err
+		}
+		recoveries, recoveryErr := r.recoverEndpoints(ctx, snapshots)
+		payload["endpointRecoveries"] = recoveries
+		return payload, recoveryErr
 	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert":
 		result, err := executeProcedureInferenceEvent(ctx, r.Driver, r.Environment, r.Resources, r.procedureInferenceCheckpoints, event.Type, event.Target)
 		return map[string]any{"procedureInference": result}, err

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -44,12 +45,17 @@ type EndpointRecoveryEvidence struct {
 
 type EndpointRecovery interface {
 	SnapshotEndpoint(nodeName string) (EndpointForwardSnapshot, bool)
+	SnapshotEndpoints() []EndpointForwardSnapshot
 	RefreshAndAwaitEndpoint(ctx context.Context, nodeName string, afterGeneration uint64) (EndpointRecoveryEvidence, error)
+}
+
+type endpointRefreshRequest struct {
+	acknowledged chan uint64
 }
 
 type endpointForwardState struct {
 	endpoint   ConsoleEndpoint
-	refresh    chan struct{}
+	refresh    chan endpointRefreshRequest
 	refreshMu  sync.Mutex
 	generation uint64
 	ready      bool
@@ -93,7 +99,7 @@ func StartConsolePortForwards(ctx context.Context, environment Environment, endp
 	var wg sync.WaitGroup
 	for _, endpoint := range endpoints {
 		endpoint := endpoint
-		state := &endpointForwardState{endpoint: endpoint, refresh: make(chan struct{}, 1)}
+		state := &endpointForwardState{endpoint: endpoint, refresh: make(chan endpointRefreshRequest)}
 		session.states[endpoint.NodeName] = state
 		wg.Add(1)
 		go func() {
@@ -155,6 +161,25 @@ func (s *ConsolePortForwardSession) SnapshotEndpoint(nodeName string) (EndpointF
 	return EndpointForwardSnapshot{NodeName: nodeName, DaemonAddr: state.endpoint.DaemonAddr, Generation: state.generation, Ready: state.ready}, true
 }
 
+func (s *ConsolePortForwardSession) SnapshotEndpoints() []EndpointForwardSnapshot {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.states))
+	for name := range s.states {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	snapshots := make([]EndpointForwardSnapshot, 0, len(names))
+	for _, name := range names {
+		state := s.states[name]
+		snapshots = append(snapshots, EndpointForwardSnapshot{NodeName: name, DaemonAddr: state.endpoint.DaemonAddr, Generation: state.generation, Ready: state.ready})
+	}
+	return snapshots
+}
+
 func (s *ConsolePortForwardSession) RefreshAndAwaitEndpoint(ctx context.Context, nodeName string, afterGeneration uint64) (EndpointRecoveryEvidence, error) {
 	if s == nil {
 		return EndpointRecoveryEvidence{}, fmt.Errorf("endpoint recovery session is unavailable")
@@ -167,19 +192,30 @@ func (s *ConsolePortForwardSession) RefreshAndAwaitEndpoint(ctx context.Context,
 	}
 	state.refreshMu.Lock()
 	defer state.refreshMu.Unlock()
+	request := endpointRefreshRequest{acknowledged: make(chan uint64, 1)}
+	select {
+	case state.refresh <- request:
+	case <-ctx.Done():
+		return EndpointRecoveryEvidence{}, fmt.Errorf("endpoint transport did not become ready")
+	case <-s.done:
+		return EndpointRecoveryEvidence{}, fmt.Errorf("endpoint recovery session stopped")
+	}
+	var refreshGeneration uint64
+	select {
+	case refreshGeneration = <-request.acknowledged:
+	case <-ctx.Done():
+		return EndpointRecoveryEvidence{}, fmt.Errorf("endpoint transport did not become ready")
+	case <-s.done:
+		return EndpointRecoveryEvidence{}, fmt.Errorf("endpoint recovery session stopped")
+	}
+	if refreshGeneration < afterGeneration {
+		refreshGeneration = afterGeneration
+	}
 	s.mu.Lock()
 	current, ok := s.states[nodeName]
 	if !ok || current != state {
 		s.mu.Unlock()
 		return EndpointRecoveryEvidence{}, fmt.Errorf("endpoint recovery target is unavailable")
-	}
-	refreshGeneration := state.generation
-	if refreshGeneration < afterGeneration {
-		refreshGeneration = afterGeneration
-	}
-	select {
-	case state.refresh <- struct{}{}:
-	default:
 	}
 	for {
 		if state.ready && state.generation > refreshGeneration {
@@ -222,6 +258,12 @@ func (s *ConsolePortForwardSession) markEndpointUnavailable(state *endpointForwa
 	}
 }
 
+func (s *ConsolePortForwardSession) endpointGeneration(state *endpointForwardState) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return state.generation
+}
+
 func (s *ConsolePortForwardSession) signalEndpointChangeLocked() {
 	close(s.notify)
 	s.notify = make(chan struct{})
@@ -244,12 +286,12 @@ func runPortForwardLoop(ctx context.Context, environment Environment, session *C
 				}
 			})
 		}()
-		refreshed := false
+		var refreshRequest *endpointRefreshRequest
 		var err error
 		select {
 		case err = <-result:
-		case <-state.refresh:
-			refreshed = true
+		case request := <-state.refresh:
+			refreshRequest = &request
 			cancelRun()
 			err = <-result
 		case <-ctx.Done():
@@ -259,6 +301,9 @@ func runPortForwardLoop(ctx context.Context, environment Environment, session *C
 		}
 		cancelRun()
 		session.markEndpointUnavailable(state)
+		if refreshRequest != nil {
+			refreshRequest.acknowledged <- session.endpointGeneration(state)
+		}
 		if !reportedInitial {
 			if ctx.Err() != nil {
 				return
@@ -269,7 +314,7 @@ func runPortForwardLoop(ctx context.Context, environment Environment, session *C
 		if ctx.Err() != nil {
 			return
 		}
-		if refreshed {
+		if refreshRequest != nil {
 			continue
 		}
 		timer := time.NewTimer(time.Second)
@@ -277,8 +322,9 @@ func runPortForwardLoop(ctx context.Context, environment Environment, session *C
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-state.refresh:
+		case request := <-state.refresh:
 			timer.Stop()
+			request.acknowledged <- session.endpointGeneration(state)
 			continue
 		case <-timer.C:
 		}

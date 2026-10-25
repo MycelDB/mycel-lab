@@ -46,17 +46,56 @@ func (r *DriverRuntime) restartNodeAndRecoverEndpoint(ctx context.Context, targe
 	}
 	recoveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	transport, err := r.EndpointRecovery.RefreshAndAwaitEndpoint(recoveryCtx, node, snapshot.Generation)
+	result, err := r.recoverEndpoint(recoveryCtx, snapshot)
+	return map[string]any{"endpointRecovery": result}, err
+}
+
+func (r *DriverRuntime) rollingRestartAndRecoverEndpoints(ctx context.Context) (map[string]any, error) {
+	snapshots := r.managedEndpointSnapshots()
+	if err := r.Driver.RollingRestart(ctx, r.Environment); err != nil {
+		return nil, err
+	}
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+	recoveries, err := r.recoverEndpoints(ctx, snapshots)
+	return map[string]any{"endpointRecoveries": recoveries}, err
+}
+
+func (r *DriverRuntime) managedEndpointSnapshots() []env.EndpointForwardSnapshot {
+	if r.EndpointRecovery == nil {
+		return nil
+	}
+	return r.EndpointRecovery.SnapshotEndpoints()
+}
+
+func (r *DriverRuntime) recoverEndpoints(ctx context.Context, snapshots []env.EndpointForwardSnapshot) ([]endpointRecoveryResult, error) {
+	recoveryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	results := make([]endpointRecoveryResult, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		result, err := r.recoverEndpoint(recoveryCtx, snapshot)
+		results = append(results, result)
+		if err != nil {
+			return results, err
+		}
+	}
+	return results, nil
+}
+
+func (r *DriverRuntime) recoverEndpoint(ctx context.Context, snapshot env.EndpointForwardSnapshot) (endpointRecoveryResult, error) {
+	failed := endpointRecoveryResult{NodeName: snapshot.NodeName, PreviousGeneration: snapshot.Generation, TransportStatus: "failed", GRPCProbeStatus: "not-started"}
+	transport, err := r.EndpointRecovery.RefreshAndAwaitEndpoint(ctx, snapshot.NodeName, snapshot.Generation)
 	if err != nil {
-		return map[string]any{"endpointRecovery": endpointRecoveryResult{NodeName: node, PreviousGeneration: snapshot.Generation, TransportStatus: "failed", GRPCProbeStatus: "not-started"}}, err
+		return failed, err
 	}
 	probe := r.endpointProbe
 	if probe == nil {
 		probe = probeExternalGraphEndpoint
 	}
-	attempts, err := probe(recoveryCtx, r.Resources, transport.DaemonAddr)
+	attempts, err := probe(ctx, r.Resources, transport.DaemonAddr)
 	result := endpointRecoveryResult{
-		NodeName:           node,
+		NodeName:           snapshot.NodeName,
 		PreviousGeneration: snapshot.Generation,
 		RefreshGeneration:  transport.RefreshGeneration,
 		ReadyGeneration:    transport.ReadyGeneration,
@@ -67,9 +106,9 @@ func (r *DriverRuntime) restartNodeAndRecoverEndpoint(ctx context.Context, targe
 	}
 	if err != nil {
 		result.GRPCProbeStatus = "failed"
-		return map[string]any{"endpointRecovery": result}, errors.New("external endpoint did not become ready")
+		return result, errors.New("external endpoint did not become ready")
 	}
-	return map[string]any{"endpointRecovery": result}, nil
+	return result, nil
 }
 
 func probeExternalGraphEndpoint(ctx context.Context, resources *provision.ScenarioResources, daemonAddr string) (int, error) {
@@ -84,7 +123,7 @@ func probeExternalGraphEndpoint(ctx context.Context, resources *provision.Scenar
 		}
 		attempts++
 		attemptCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		client, err := mycel.Dial(attemptCtx, mycel.Config{Addr: daemonAddr, AccessToken: assignment.AccessToken, RefreshToken: assignment.RefreshToken, ClientName: "mycel-lab-endpoint-readiness"})
+		client, err := mycel.Dial(attemptCtx, mycel.Config{Addr: daemonAddr, AccessToken: assignment.AccessToken, ClientName: "mycel-lab-endpoint-readiness"})
 		if err == nil {
 			callCtx, callCancel := client.AuthCallContext(attemptCtx)
 			_, err = client.Space.GetSpace(callCtx, &clientv1.GetSpaceRequest{SpaceId: assignment.SpaceID}, grpc.WaitForReady(true))
