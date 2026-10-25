@@ -41,8 +41,8 @@ func TestRunRecorderRegistersSystemBackupFixtureExpectedCounts(t *testing.T) {
 	if got := recorder.expectedByActor["backup-writer"]; got != (graphCounts{Nodes: 9, Edges: 3}) {
 		t.Fatalf("repeated expected counts=%+v", got)
 	}
-	if got := aggregateExpectedGraphCounts(recorder.expectedByActor); got.Nodes != 9 || got.Edges != 3 {
-		t.Fatalf("aggregate expected counts=%+v", got)
+	if got, err := aggregateExpectedGraphCounts(recorder.expectedByActor); err != nil || got.Nodes != 9 || got.Edges != 3 {
+		t.Fatalf("aggregate expected counts=%+v err=%v", got, err)
 	}
 	record.Payload["systemBackup"] = events.SystemBackupOperationResult{}
 	if err := recorder.recordRuntimeExpectedGraphCounts(record); err == nil {
@@ -51,6 +51,36 @@ func TestRunRecorderRegistersSystemBackupFixtureExpectedCounts(t *testing.T) {
 	record.Payload = map[string]any{"dryRun": true, "repeat": 1}
 	if err := recorder.recordRuntimeExpectedGraphCounts(record); err != nil {
 		t.Fatalf("dry-run fixture planning rejected: %v", err)
+	}
+}
+
+func TestRunRecorderRegistersSystemBackupFixtureSourceActorAlias(t *testing.T) {
+	recorder := &runRecorder{}
+	record := events.Record{Type: "event-completed", EventType: "system-backup-fixture", Target: map[string]any{"sourceActorId": "backup-writer"}, Payload: map[string]any{"repeat": 1, "systemBackup": events.SystemBackupOperationResult{FixtureNodes: 3, FixtureEdges: 1}}}
+	if err := recorder.recordRuntimeExpectedGraphCounts(record); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.expectedByActor["backup-writer"]; got != (graphCounts{Nodes: 3, Edges: 1}) {
+		t.Fatalf("expected counts=%+v", got)
+	}
+}
+
+func TestExpectedGraphCountOverflowFailsClosed(t *testing.T) {
+	maximumInt := int(^uint(0) >> 1)
+	multiplication := events.Record{Type: "event-completed", EventType: "system-backup-fixture", Target: map[string]any{"actorId": "backup-writer"}, Payload: map[string]any{"repeat": 2, "systemBackup": events.SystemBackupOperationResult{FixtureNodes: int64(maximumInt), FixtureEdges: 1}}}
+	if err := (&runRecorder{}).recordRuntimeExpectedGraphCounts(multiplication); err == nil {
+		t.Fatal("fixture repeat overflow accepted")
+	}
+	recorder := &runRecorder{expectedByActor: map[string]graphCounts{"backup-writer": {Nodes: maximumInt, Edges: maximumInt}}}
+	record := events.Record{Type: "event-completed", EventType: "system-backup-fixture", Target: map[string]any{"actorId": "backup-writer"}, Payload: map[string]any{"repeat": 1, "systemBackup": events.SystemBackupOperationResult{FixtureNodes: 1, FixtureEdges: 1}}}
+	if err := recorder.recordRuntimeExpectedGraphCounts(record); err == nil {
+		t.Fatal("cumulative fixture overflow accepted")
+	}
+	if got := recorder.expectedByActor["backup-writer"]; got != (graphCounts{Nodes: maximumInt, Edges: maximumInt}) {
+		t.Fatalf("overflow changed expected counts=%+v", got)
+	}
+	if _, err := aggregateExpectedGraphCounts(map[string]graphCounts{"first": {Nodes: maximumInt}, "second": {Nodes: 1}}); err == nil {
+		t.Fatal("cross-actor expected-count overflow accepted")
 	}
 }
 

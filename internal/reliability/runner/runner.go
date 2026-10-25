@@ -869,9 +869,13 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 			failedReads++
 		}
 	}
+	expectedCounts, err := aggregateExpectedGraphCounts(expectedByActor)
+	if err != nil {
+		return err
+	}
 	report := finalOracleReport{
 		AcknowledgedTransactions: len(acknowledged),
-		ExpectedCounts:           aggregateExpectedGraphCounts(expectedByActor),
+		ExpectedCounts:           expectedCounts,
 		ExpectedCountsByActor:    expectedByActor,
 		ReadChecks:               len(readChecks),
 		FailedReads:              failedReads,
@@ -1142,13 +1146,24 @@ func cloneGraphCountsMap(in map[string]graphCounts) map[string]graphCounts {
 	return out
 }
 
-func aggregateExpectedGraphCounts(expectedByActor map[string]graphCounts) oracle.Counts {
-	var counts oracle.Counts
+func aggregateExpectedGraphCounts(expectedByActor map[string]graphCounts) (oracle.Counts, error) {
+	var total graphCounts
 	for _, expected := range expectedByActor {
-		counts.Nodes += expected.Nodes
-		counts.Edges += expected.Edges
+		var err error
+		total, err = checkedAddGraphCounts(total, expected)
+		if err != nil {
+			return oracle.Counts{}, err
+		}
 	}
-	return counts
+	return oracle.Counts{Nodes: total.Nodes, Edges: total.Edges}, nil
+}
+
+func checkedAddGraphCounts(current, delta graphCounts) (graphCounts, error) {
+	maximumInt := int(^uint(0) >> 1)
+	if current.Nodes < 0 || current.Edges < 0 || delta.Nodes < 0 || delta.Edges < 0 || delta.Nodes > maximumInt-current.Nodes || delta.Edges > maximumInt-current.Edges {
+		return graphCounts{}, errors.New("expected graph counts overflow")
+	}
+	return graphCounts{Nodes: current.Nodes + delta.Nodes, Edges: current.Edges + delta.Edges}, nil
 }
 
 func countTransactionOps(tx oracle.Transaction) graphCounts {
@@ -1370,15 +1385,18 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 	switch event.Type {
 	case "graph-transaction-acknowledged":
 		r.mu.Lock()
-		r.acknowledged = append(r.acknowledged, event.Transaction)
 		if r.expectedByActor == nil {
 			r.expectedByActor = map[string]graphCounts{}
 		}
 		counts := countTransactionOps(event.Transaction)
 		current := r.expectedByActor[event.ActorID]
-		current.Nodes += counts.Nodes
-		current.Edges += counts.Edges
-		r.expectedByActor[event.ActorID] = current
+		updated, err := checkedAddGraphCounts(current, counts)
+		if err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		r.acknowledged = append(r.acknowledged, event.Transaction)
+		r.expectedByActor[event.ActorID] = updated
 		r.mu.Unlock()
 		_, _ = r.sink.AppendJSONL("actors/acknowledged-commits.jsonl", event.Transaction)
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName})
@@ -1430,6 +1448,9 @@ func (r *runRecorder) recordRuntimeExpectedGraphCounts(record events.Record) err
 		return nil
 	}
 	actorID, _ := record.Target["actorId"].(string)
+	if strings.TrimSpace(actorID) == "" {
+		actorID, _ = record.Target["sourceActorId"].(string)
+	}
 	fixture, ok := record.Payload["systemBackup"].(events.SystemBackupOperationResult)
 	repeat, _ := record.Payload["repeat"].(int)
 	maximumInt := int64(^uint(0) >> 1)
@@ -1442,9 +1463,11 @@ func (r *runRecorder) recordRuntimeExpectedGraphCounts(record events.Record) err
 		r.expectedByActor = map[string]graphCounts{}
 	}
 	current := r.expectedByActor[actorID]
-	current.Nodes += int(fixture.FixtureNodes) * repeat
-	current.Edges += int(fixture.FixtureEdges) * repeat
-	r.expectedByActor[actorID] = current
+	updated, err := checkedAddGraphCounts(current, graphCounts{Nodes: int(fixture.FixtureNodes) * repeat, Edges: int(fixture.FixtureEdges) * repeat})
+	if err != nil {
+		return err
+	}
+	r.expectedByActor[actorID] = updated
 	return nil
 }
 
