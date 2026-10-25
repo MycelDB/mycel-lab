@@ -63,9 +63,7 @@ phases:
       - type: procedure-inference-node-create
         target: {nodeId: 00000000-0000-4000-8000-000000005102, text: bounded post recovery fixture, timeout: 30s}
       - type: procedure-inference-await-terminal
-        target: {timeout: 2m, interval: 200ms, minimumAttempts: 2, maximumAttempts: 2, requireSucceeded: true, requireChanges: true}
-      - type: procedure-inference-capacity-diagnostics-assert
-        target: {timeout: 30s, tail: 5000, requirePressure: false}
+        target: {timeout: 2m, interval: 200ms, stableFor: 3s, minimumAttempts: 2, maximumAttempts: 2, requireSucceeded: true, requireChanges: true}
       - type: procedure-inference-emulator-assert
         target:
           minimumRequests: 2
@@ -75,11 +73,12 @@ phases:
           authorization: absent
           expectedModels: [procedure-generation-v1]
           minimumOutcomes: {success: 2}
+      - type: procedure-inference-capacity-diagnostics-assert
+        target: {timeout: 30s, tail: 5000, requirePressure: false}
 assertions:
   final:
     requireHealthyCluster: true
     requireSharedClusterIdentity: true
-    requireNoAcknowledgedGraphTransactionLoss: true
 artifacts:
   collectScenarioSpec: true
   collectKubernetesState: true

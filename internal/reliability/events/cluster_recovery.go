@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,13 +16,17 @@ import (
 )
 
 type ClusterRecoveryWaitResult struct {
-	Attempts       int                         `json:"attempts"`
-	Timeout        string                      `json:"timeout"`
-	Interval       string                      `json:"interval"`
-	ExpectedGroups int                         `json:"expectedGroups"`
-	CommandTimeout string                      `json:"commandTimeout"`
-	Ready          bool                        `json:"ready"`
-	Nodes          []ClusterRecoveryNodeResult `json:"nodes"`
+	Attempts                  int                         `json:"attempts"`
+	Timeout                   string                      `json:"timeout"`
+	Interval                  string                      `json:"interval"`
+	ExpectedGroups            int                         `json:"expectedGroups"`
+	CommandTimeout            string                      `json:"commandTimeout"`
+	MinimumStablePolls        int                         `json:"minimumStablePolls"`
+	StablePolls               int                         `json:"stablePolls"`
+	RequireZeroApplyLag       bool                        `json:"requireZeroApplyLag"`
+	RequireConsistentProgress bool                        `json:"requireConsistentProgress"`
+	Ready                     bool                        `json:"ready"`
+	Nodes                     []ClusterRecoveryNodeResult `json:"nodes"`
 }
 
 type ClusterRecoveryNodeResult struct {
@@ -34,16 +39,28 @@ type ClusterRecoveryNodeResult struct {
 	UnexpectedGroups    []string `json:"unexpectedGroups,omitempty"`
 	GroupsWithoutLeader []string `json:"groupsWithoutLeader,omitempty"`
 	UnhealthyGroups     []string `json:"unhealthyGroups,omitempty"`
+	LaggingGroups       []string `json:"laggingGroups,omitempty"`
+	RegressingGroups    []string `json:"regressingGroups,omitempty"`
 	ReadinessStdout     string   `json:"readinessStdout,omitempty"`
 	ReadinessError      string   `json:"readinessError,omitempty"`
 	RaftGroupsStdout    string   `json:"raftGroupsStdout,omitempty"`
 	RaftGroupsError     string   `json:"raftGroupsError,omitempty"`
+	progress            map[string]clusterRaftProgress
+}
+
+type clusterRaftProgress struct {
+	CommitIndex  uint64
+	AppliedIndex uint64
+	LastIndex    uint64
 }
 
 type clusterRaftGroup struct {
 	GroupID      string `json:"group_id"`
 	LeaderNodeID uint64 `json:"leader_node_id"`
 	Health       string `json:"health"`
+	CommitIndex  uint64 `json:"commit_index"`
+	AppliedIndex uint64 `json:"applied_index"`
+	LastIndex    uint64 `json:"last_index"`
 }
 
 type clusterRaftGroupsResponse struct {
@@ -75,6 +92,12 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 	if commandTimeout > timeout {
 		commandTimeout = timeout
 	}
+	minimumStablePolls := intTarget(target, "minimumStablePolls", 1)
+	if minimumStablePolls < 1 || minimumStablePolls > 1000 {
+		return ClusterRecoveryWaitResult{}, errors.New("cluster-recovery-wait minimumStablePolls must be between 1 and 1000")
+	}
+	requireZeroApplyLag := boolTarget(target, "requireZeroApplyLag", false)
+	requireConsistentProgress := boolTarget(target, "requireConsistentProgress", false)
 	ordinals := nodeTargetOrdinalSequence(target)
 	if len(ordinals) == 0 {
 		for ordinal := 0; ordinal < scenario.Cluster.Nodes; ordinal++ {
@@ -86,15 +109,16 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 	if configured := intTarget(target, "expectedGroups", expectedGroups); configured != expectedGroups {
 		return ClusterRecoveryWaitResult{}, fmt.Errorf("cluster-recovery-wait expectedGroups=%d does not match system plus %d configured partitions (%d groups)", configured, scenario.Cluster.Raft.PartitionCount, expectedGroups)
 	}
-	result := ClusterRecoveryWaitResult{Timeout: timeout.String(), Interval: interval.String(), ExpectedGroups: expectedGroups, CommandTimeout: commandTimeout.String()}
+	result := ClusterRecoveryWaitResult{Timeout: timeout.String(), Interval: interval.String(), ExpectedGroups: expectedGroups, CommandTimeout: commandTimeout.String(), MinimumStablePolls: minimumStablePolls, RequireZeroApplyLag: requireZeroApplyLag, RequireConsistentProgress: requireConsistentProgress}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	timeoutError := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return fmt.Errorf("cluster did not recover readiness and exact Raft groups %v on ordinals %v within %s", expectedGroupIDs, ordinals, timeout)
+		return fmt.Errorf("cluster did not recover stable readiness and exact Raft groups %v on ordinals %v within %s", expectedGroupIDs, ordinals, timeout)
 	}
+	previousProgress := make(map[int]map[string]clusterRaftProgress, len(ordinals))
 	for {
 		result.Attempts++
 		result.Nodes = make([]ClusterRecoveryNodeResult, len(ordinals))
@@ -108,14 +132,24 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 		}
 		inspections.Wait()
 		allReady := true
-		for _, nodeResult := range result.Nodes {
+		for index := range result.Nodes {
+			nodeResult := &result.Nodes[index]
+			if requireConsistentProgress {
+				enforceClusterProgressConsistency(nodeResult, previousProgress[nodeResult.Ordinal])
+			}
+			previousProgress[nodeResult.Ordinal] = cloneClusterProgress(nodeResult.progress)
 			if !nodeResult.ReadinessReady || !nodeResult.RaftGroupsReady {
 				allReady = false
 			}
 		}
 		if allReady {
-			result.Ready = true
-			return result, nil
+			result.StablePolls++
+			if result.StablePolls >= minimumStablePolls {
+				result.Ready = true
+				return result, nil
+			}
+		} else {
+			result.StablePolls = 0
 		}
 		if waitCtx.Err() != nil {
 			return result, timeoutError()
@@ -175,12 +209,13 @@ func inspectClusterRecoveryNode(ctx context.Context, driver env.EnvironmentDrive
 		result.RaftGroupsError = "decode raft groups: " + err.Error()
 		return result
 	}
-	evaluateClusterRaftGroups(&result, response.Groups, expectedGroupIDs)
+	evaluateClusterRaftGroups(&result, response.Groups, expectedGroupIDs, boolTarget(target, "requireZeroApplyLag", false))
 	return result
 }
 
-func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clusterRaftGroup, expectedGroupIDs []string) {
+func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clusterRaftGroup, expectedGroupIDs []string, requireZeroApplyLag bool) {
 	result.GroupCount = len(groups)
+	result.progress = make(map[string]clusterRaftProgress, len(groups))
 	expected := make(map[string]struct{}, len(expectedGroupIDs))
 	for _, groupID := range expectedGroupIDs {
 		expected[groupID] = struct{}{}
@@ -194,6 +229,10 @@ func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clust
 		}
 		if !strings.EqualFold(strings.TrimSpace(group.Health), "healthy") {
 			result.UnhealthyGroups = append(result.UnhealthyGroups, groupID+":"+group.Health)
+		}
+		result.progress[groupID] = clusterRaftProgress{CommitIndex: group.CommitIndex, AppliedIndex: group.AppliedIndex, LastIndex: group.LastIndex}
+		if requireZeroApplyLag && group.CommitIndex != group.AppliedIndex {
+			result.LaggingGroups = append(result.LaggingGroups, fmt.Sprintf("%s:%d", groupID, absoluteDifference(group.CommitIndex, group.AppliedIndex)))
 		}
 	}
 	for _, groupID := range expectedGroupIDs {
@@ -220,7 +259,8 @@ func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clust
 	sort.Strings(result.UnexpectedGroups)
 	sort.Strings(result.GroupsWithoutLeader)
 	sort.Strings(result.UnhealthyGroups)
-	result.RaftGroupsReady = result.GroupCount == len(expectedGroupIDs) && len(result.MissingGroups) == 0 && len(result.DuplicateGroups) == 0 && len(result.UnexpectedGroups) == 0 && len(result.GroupsWithoutLeader) == 0 && len(result.UnhealthyGroups) == 0
+	sort.Strings(result.LaggingGroups)
+	result.RaftGroupsReady = result.GroupCount == len(expectedGroupIDs) && len(result.MissingGroups) == 0 && len(result.DuplicateGroups) == 0 && len(result.UnexpectedGroups) == 0 && len(result.GroupsWithoutLeader) == 0 && len(result.UnhealthyGroups) == 0 && len(result.LaggingGroups) == 0
 	if result.RaftGroupsReady {
 		return
 	}
@@ -243,5 +283,52 @@ func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clust
 	if len(result.UnhealthyGroups) > 0 {
 		reasons = append(reasons, "unhealthy groups: "+strings.Join(result.UnhealthyGroups, ", "))
 	}
+	if len(result.LaggingGroups) > 0 {
+		reasons = append(reasons, "groups with apply lag: "+strings.Join(result.LaggingGroups, ", "))
+	}
 	result.RaftGroupsError = strings.Join(reasons, "; ")
+}
+
+func enforceClusterProgressConsistency(result *ClusterRecoveryNodeResult, previous map[string]clusterRaftProgress) {
+	if len(previous) == 0 || len(result.progress) == 0 {
+		return
+	}
+	for groupID, current := range result.progress {
+		prior, ok := previous[groupID]
+		if !ok {
+			continue
+		}
+		if current.CommitIndex < prior.CommitIndex || current.AppliedIndex < prior.AppliedIndex || current.LastIndex < prior.LastIndex {
+			result.RegressingGroups = append(result.RegressingGroups, groupID)
+		}
+	}
+	if len(result.RegressingGroups) == 0 {
+		return
+	}
+	sort.Strings(result.RegressingGroups)
+	result.RaftGroupsReady = false
+	reason := "groups with regressing progress: " + strings.Join(result.RegressingGroups, ", ")
+	if result.RaftGroupsError == "" {
+		result.RaftGroupsError = reason
+	} else {
+		result.RaftGroupsError += "; " + reason
+	}
+}
+
+func cloneClusterProgress(progress map[string]clusterRaftProgress) map[string]clusterRaftProgress {
+	if len(progress) == 0 {
+		return nil
+	}
+	cloned := make(map[string]clusterRaftProgress, len(progress))
+	for groupID, value := range progress {
+		cloned[groupID] = value
+	}
+	return cloned
+}
+
+func absoluteDifference(left, right uint64) uint64 {
+	if left >= right {
+		return left - right
+	}
+	return right - left
 }

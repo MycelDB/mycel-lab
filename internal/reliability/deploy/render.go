@@ -43,6 +43,9 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_PARTITION_COUNT: %q\n", fmt.Sprint(cluster.Raft.PartitionCount))
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: %q\n", fmt.Sprint(cluster.Raft.ReplicaFactor))
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_NODE_ADDRS: %q\n", strings.Join(raftNodeAddrs, ","))
+	if _, configured := cluster.Env["MYCELD_LOG_FORMAT"]; !configured {
+		fmt.Fprintf(&b, "  MYCELD_LOG_FORMAT: %q\n", "json")
+	}
 	for _, key := range sortedResourceKeys(cluster.Env) {
 		fmt.Fprintf(&b, "  %s: %q\n", key, cluster.Env[key])
 	}

@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -244,11 +245,52 @@ func TestClusterRecoveryRequiresExactRaftGroupIdentities(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := ClusterRecoveryNodeResult{}
-			evaluateClusterRaftGroups(&result, tc.groups, expected)
+			evaluateClusterRaftGroups(&result, tc.groups, expected, false)
 			if result.RaftGroupsReady || result.RaftGroupsError == "" || !tc.check(result) {
 				t.Fatalf("result=%+v, want exact identity failure", result)
 			}
 		})
+	}
+}
+
+func TestClusterRecoveryRejectsApplyLagWhenZeroLagRequired(t *testing.T) {
+	result := ClusterRecoveryNodeResult{}
+	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy", CommitIndex: 10, AppliedIndex: 9, LastIndex: 10}}, []string{"system"}, true)
+	if result.RaftGroupsReady || len(result.LaggingGroups) != 1 || result.LaggingGroups[0] != "system:1" || !strings.Contains(result.RaftGroupsError, "apply lag") {
+		t.Fatalf("result=%+v, want zero-lag rejection", result)
+	}
+}
+
+func TestClusterRecoveryRequiresConfiguredConsecutiveStablePolls(t *testing.T) {
+	raftCalls := 0
+	driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
+		if strings.Contains(command, "cluster readiness check") {
+			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+		}
+		if strings.Contains(command, "cluster raft-groups") {
+			raftCalls++
+			return env.ExecResult{Stdout: fmt.Sprintf(`{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy","commit_index":%d,"applied_index":%d,"last_index":%d}]}`, raftCalls, raftCalls, raftCalls)}, nil
+		}
+		return env.ExecResult{Stdout: `{}`}, nil
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	runtime := NewDriverRuntimeWithScenario(driver, env.Environment{Name: "test", Driver: "test"}, scenario, nil)
+	phase := spec.PhaseSpec{Name: "recovery", Events: []spec.EventSpec{{Type: "cluster-recovery-wait", Target: map[string]any{"ordinals": []any{0}, "timeout": "100ms", "interval": "1ms", "minimumStablePolls": 3, "requireZeroApplyLag": true, "requireConsistentProgress": true}}}}
+	recorder := &recordingEventRecorder{}
+	if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, recorder); err != nil {
+		t.Fatal(err)
+	}
+	payload := recorder.records[1].Payload["clusterRecovery"].(ClusterRecoveryWaitResult)
+	if payload.Attempts != 3 || payload.StablePolls != 3 || payload.MinimumStablePolls != 3 || !payload.RequireZeroApplyLag || !payload.RequireConsistentProgress {
+		t.Fatalf("payload=%+v, want three consecutive stable polls", payload)
+	}
+}
+
+func TestClusterRecoveryRejectsRegressingProgress(t *testing.T) {
+	result := ClusterRecoveryNodeResult{RaftGroupsReady: true, progress: map[string]clusterRaftProgress{"system": {CommitIndex: 9, AppliedIndex: 9, LastIndex: 9}}}
+	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: 10, AppliedIndex: 10, LastIndex: 10}})
+	if result.RaftGroupsReady || len(result.RegressingGroups) != 1 || result.RegressingGroups[0] != "system" || !strings.Contains(result.RaftGroupsError, "regressing") {
+		t.Fatalf("result=%+v, want progress regression rejection", result)
 	}
 }
 

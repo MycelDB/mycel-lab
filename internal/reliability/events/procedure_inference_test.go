@@ -146,6 +146,66 @@ func TestProcedureInferenceCapacityDiagnosticsReadsBoundedComposeDaemonFiles(t *
 	}
 }
 
+func TestProcedureInferenceCapacityDiagnosticsReadsBoundedK3DDaemonFiles(t *testing.T) {
+	const bounds = `{"msg":"procedure_inference_capacity_bounds","attempt_capacity_per_space":10000,"change_capacity_per_space":50000,"state_byte_capacity_per_space":67108864,"history_byte_capacity_per_space":67108864,"retention_age_seconds":2592000,"attempt_byte_capacity":65536,"evidence_string_byte_capacity":1024}`
+	environment := env.Environment{Driver: "k3d", Context: "k3d-test", Namespace: "bounded-ns", Metadata: map[string]string{"nodeCount": "3"}}
+	resources := &provision.ScenarioResources{ProcedureInference: &provision.ProcedureInferenceResources{ProcedureID: "procedure", BindingID: "binding"}}
+	var calls []string
+	runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		calls = append(calls, call)
+		if strings.Contains(call, " get pods ") {
+			return []byte("myceld-2\nmyceld-0\nmyceld-1\n"), nil
+		}
+		return []byte(bounds), nil
+	}
+	result, err := assertProcedureInferenceCapacityDiagnosticsWithRunner(context.Background(), environment, resources, map[string]any{"timeout": "1s", "tail": 321}, runner)
+	if err != nil {
+		t.Fatalf("assertProcedureInferenceCapacityDiagnosticsWithRunner() error=%v", err)
+	}
+	if !result.CapacityBoundsProved || result.DiagnosticRecordCount != 3 {
+		t.Fatalf("result=%+v, want one bounds record per daemon", result)
+	}
+	if len(calls) != 4 || !strings.Contains(calls[0], `kubectl --context k3d-test -n bounded-ns get pods -l app=myceld -o jsonpath=`) {
+		t.Fatalf("calls=%v, want one bounded pod list plus three daemon reads", calls)
+	}
+	for index, pod := range []string{"myceld-0", "myceld-1", "myceld-2"} {
+		call := calls[index+1]
+		for _, required := range []string{"kubectl --context k3d-test -n bounded-ns exec " + pod + " -- sh -c", "/data/mycel/log/myceld.log", "tail -c 1048576", "tail -n 321"} {
+			if !strings.Contains(call, required) {
+				t.Fatalf("call[%d]=%q, want %q", index+1, call, required)
+			}
+		}
+		if strings.Contains(call, " logs ") {
+			t.Fatalf("call[%d]=%q reads container output instead of daemon file", index+1, call)
+		}
+	}
+}
+
+func TestProcedureInferenceCapacityDiagnosticsRejectsUnsafeK3DPodIdentity(t *testing.T) {
+	environment := env.Environment{Driver: "k3d", Context: "k3d-test", Namespace: "bounded-ns", Metadata: map[string]string{"nodeCount": "1"}}
+	resources := &provision.ScenarioResources{ProcedureInference: &provision.ProcedureInferenceResources{ProcedureID: "procedure", BindingID: "binding"}}
+	_, err := assertProcedureInferenceCapacityDiagnosticsWithRunner(context.Background(), environment, resources, map[string]any{"timeout": "1s"}, func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("myceld-0;unsafe\n"), nil
+	})
+	if err == nil || err.Error() != "collect procedure inference capacity diagnostics" {
+		t.Fatalf("error=%v, want closed pod identity failure", err)
+	}
+}
+
+func TestProcedureInferenceCapacityDiagnosticsRequiresEveryK3DPod(t *testing.T) {
+	environment := env.Environment{Driver: "k3d", Context: "k3d-test", Namespace: "bounded-ns", Metadata: map[string]string{"nodeCount": "3"}}
+	resources := &provision.ScenarioResources{ProcedureInference: &provision.ProcedureInferenceResources{ProcedureID: "procedure", BindingID: "binding"}}
+	calls := 0
+	_, err := assertProcedureInferenceCapacityDiagnosticsWithRunner(context.Background(), environment, resources, map[string]any{"timeout": "1s"}, func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		return []byte("myceld-0\nmyceld-1\n"), nil
+	})
+	if err == nil || err.Error() != "collect procedure inference capacity diagnostics" || calls != 1 {
+		t.Fatalf("error=%v calls=%d, want closed incomplete-pod failure before file reads", err, calls)
+	}
+}
+
 func TestProcedureInferenceCapacityDiagnosticsHidesComposeFileReadFailure(t *testing.T) {
 	environment := env.Environment{Driver: "compose", Metadata: map[string]string{"serviceNames": "myceld-a"}}
 	resources := &provision.ScenarioResources{ProcedureInference: &provision.ProcedureInferenceResources{ProcedureID: "procedure", BindingID: "binding"}}

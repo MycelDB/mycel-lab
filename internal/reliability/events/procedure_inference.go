@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 )
 
@@ -603,7 +603,7 @@ func procedureInferenceRunReferencesAttempt(response procedureInferenceRunRespon
 type procedureInferenceDiagnosticCommandRunner func(context.Context, string, ...string) ([]byte, error)
 
 func runProcedureInferenceDiagnosticCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	return executil.CommandContext(ctx, name, args...).Output()
 }
 
 func collectProcedureInferenceCapacityDiagnostics(ctx context.Context, environment env.Environment, tail int, run procedureInferenceDiagnosticCommandRunner) ([]byte, error) {
@@ -639,15 +639,55 @@ func collectProcedureInferenceCapacityDiagnostics(ctx context.Context, environme
 		}
 		return output.Bytes(), nil
 	case "k3d":
-		args := []string{}
+		baseArgs := []string{}
 		if environment.Context != "" {
-			args = append(args, "--context", environment.Context)
+			baseArgs = append(baseArgs, "--context", environment.Context)
 		}
 		if environment.Namespace != "" {
-			args = append(args, "-n", environment.Namespace)
+			baseArgs = append(baseArgs, "-n", environment.Namespace)
 		}
-		args = append(args, "logs", "statefulset/myceld", "--all-containers=true", "--tail="+strconv.Itoa(tail))
-		return run(ctx, "kubectl", args...)
+		listArgs := append(append([]string(nil), baseArgs...), "get", "pods", "-l", "app=myceld", "-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`)
+		podOutput, err := run(ctx, "kubectl", listArgs...)
+		if err != nil {
+			return nil, errors.New("list k3d daemon pods for diagnostics")
+		}
+		if len(podOutput) > 4096 {
+			return nil, errors.New("k3d daemon pod list exceeds diagnostic bound")
+		}
+		listedPods := strings.Fields(string(podOutput))
+		expectedPods, err := strconv.Atoi(strings.TrimSpace(environment.Metadata["nodeCount"]))
+		if err != nil || expectedPods < 1 || expectedPods > 32 || len(listedPods) != expectedPods {
+			return nil, errors.New("k3d daemon pod list is unavailable")
+		}
+		podSet := make(map[string]struct{}, len(listedPods))
+		for _, pod := range listedPods {
+			if !validMyceldPodName(pod) {
+				return nil, errors.New("k3d daemon pod identity is invalid")
+			}
+			if _, duplicate := podSet[pod]; duplicate {
+				return nil, errors.New("k3d daemon pod identity is invalid")
+			}
+			podSet[pod] = struct{}{}
+		}
+		pods := make([]string, 0, expectedPods)
+		for ordinal := 0; ordinal < expectedPods; ordinal++ {
+			pod := fmt.Sprintf("myceld-%d", ordinal)
+			if _, ok := podSet[pod]; !ok {
+				return nil, errors.New("k3d daemon pod list is unavailable")
+			}
+			pods = append(pods, pod)
+		}
+		var output bytes.Buffer
+		for _, pod := range pods {
+			args := append(append([]string(nil), baseArgs...), "exec", pod, "--", "sh", "-c", env.BoundedDaemonLogCommand("/data/mycel/log/myceld.log", tail))
+			podLog, err := run(ctx, "kubectl", args...)
+			if err != nil {
+				return nil, errors.New("collect k3d daemon diagnostic log")
+			}
+			output.Write(podLog)
+			output.WriteByte('\n')
+		}
+		return output.Bytes(), nil
 	default:
 		return nil, fmt.Errorf("procedure inference diagnostics do not support environment driver %q", environment.Driver)
 	}
@@ -708,6 +748,22 @@ func assertProcedureInferenceCapacityDiagnosticsWithRunner(ctx context.Context, 
 	result.PressureDiagnosticsProved = pressureLines > 0
 	result.DiagnosticRecordCount = boundsLines + pressureLines
 	return result, nil
+}
+
+func validMyceldPodName(name string) bool {
+	if !strings.HasPrefix(name, "myceld-") {
+		return false
+	}
+	ordinal := strings.TrimPrefix(name, "myceld-")
+	if ordinal == "" {
+		return false
+	}
+	for _, value := range ordinal {
+		if value < '0' || value > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func diagnosticFieldMatches(line, key, value string) bool {
