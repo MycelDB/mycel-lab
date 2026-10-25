@@ -294,6 +294,45 @@ func TestClusterRecoveryRejectsRegressingProgress(t *testing.T) {
 	}
 }
 
+func TestClusterRecoveryProgressHighWaterCannotBeForgotten(t *testing.T) {
+	run := func(t *testing.T, sequence []int, timeout string) (ClusterRecoveryWaitResult, error) {
+		t.Helper()
+		raftCalls := 0
+		driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
+			if strings.Contains(command, "cluster readiness check") {
+				return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+			}
+			if strings.Contains(command, "cluster raft-groups") {
+				index := raftCalls
+				if index >= len(sequence) {
+					index = len(sequence) - 1
+				}
+				raftCalls++
+				value := sequence[index]
+				return env.ExecResult{Stdout: fmt.Sprintf(`{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy","commit_index":%d,"applied_index":%d,"last_index":%d}]}`, value, value, value)}, nil
+			}
+			return env.ExecResult{Stdout: `{}`}, nil
+		}}
+		scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+		return executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{"ordinals": []any{0}, "timeout": timeout, "interval": "1ms", "minimumStablePolls": 3, "requireConsistentProgress": true})
+	}
+	t.Run("regressed plateau times out", func(t *testing.T) {
+		result, err := run(t, []int{10, 9}, "20ms")
+		if err == nil || result.Ready {
+			t.Fatalf("result=%+v error=%v, want retained high-water timeout", result, err)
+		}
+	})
+	t.Run("recovery to high water can stabilize", func(t *testing.T) {
+		result, err := run(t, []int{10, 9, 10, 10, 10}, "100ms")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Ready || result.Attempts != 5 || result.StablePolls != 3 {
+			t.Fatalf("result=%+v, want three stable polls only after high-water recovery", result)
+		}
+	})
+}
+
 func TestDriverRuntimeRecordsPartialClusterRecoveryDiagnosticsOnFailure(t *testing.T) {
 	driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
 		if strings.Contains(command, "cluster readiness check") {
@@ -334,6 +373,21 @@ func TestClusterRecoveryTimeoutCancelsBlockedInspection(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("recovery timeout elapsed=%s, want <=1s", elapsed)
+	}
+}
+
+func TestClusterRecoveryCannotSucceedAfterDeadline(t *testing.T) {
+	driver := &recordingDriver{execWithContext: func(ctx context.Context, command string) (env.ExecResult, error) {
+		if strings.Contains(command, "cluster readiness check") {
+			<-ctx.Done()
+			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+		}
+		return env.ExecResult{Stdout: `{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy"}]}`}, nil
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	result, err := executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{"ordinals": []any{0}, "timeout": "5ms", "interval": "1ms"})
+	if err == nil || result.Ready || !strings.Contains(err.Error(), "within 5ms") {
+		t.Fatalf("result=%+v error=%v, want timeout before accepting valid late output", result, err)
 	}
 }
 

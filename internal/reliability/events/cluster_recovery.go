@@ -118,7 +118,7 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 		}
 		return fmt.Errorf("cluster did not recover stable readiness and exact Raft groups %v on ordinals %v within %s", expectedGroupIDs, ordinals, timeout)
 	}
-	previousProgress := make(map[int]map[string]clusterRaftProgress, len(ordinals))
+	progressHighWater := make(map[int]map[string]clusterRaftProgress, len(ordinals))
 	for {
 		result.Attempts++
 		result.Nodes = make([]ClusterRecoveryNodeResult, len(ordinals))
@@ -131,13 +131,16 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 			}(i, ordinal)
 		}
 		inspections.Wait()
+		if waitCtx.Err() != nil {
+			return result, timeoutError()
+		}
 		allReady := true
 		for index := range result.Nodes {
 			nodeResult := &result.Nodes[index]
 			if requireConsistentProgress {
-				enforceClusterProgressConsistency(nodeResult, previousProgress[nodeResult.Ordinal])
+				enforceClusterProgressConsistency(nodeResult, progressHighWater[nodeResult.Ordinal])
 			}
-			previousProgress[nodeResult.Ordinal] = cloneClusterProgress(nodeResult.progress)
+			progressHighWater[nodeResult.Ordinal] = mergeClusterProgressHighWater(progressHighWater[nodeResult.Ordinal], nodeResult.progress)
 			if !nodeResult.ReadinessReady || !nodeResult.RaftGroupsReady {
 				allReady = false
 			}
@@ -315,15 +318,27 @@ func enforceClusterProgressConsistency(result *ClusterRecoveryNodeResult, previo
 	}
 }
 
-func cloneClusterProgress(progress map[string]clusterRaftProgress) map[string]clusterRaftProgress {
-	if len(progress) == 0 {
-		return nil
+func mergeClusterProgressHighWater(highWater, observed map[string]clusterRaftProgress) map[string]clusterRaftProgress {
+	if len(observed) == 0 {
+		return highWater
 	}
-	cloned := make(map[string]clusterRaftProgress, len(progress))
-	for groupID, value := range progress {
-		cloned[groupID] = value
+	if highWater == nil {
+		highWater = make(map[string]clusterRaftProgress, len(observed))
 	}
-	return cloned
+	for groupID, current := range observed {
+		prior := highWater[groupID]
+		if current.CommitIndex > prior.CommitIndex {
+			prior.CommitIndex = current.CommitIndex
+		}
+		if current.AppliedIndex > prior.AppliedIndex {
+			prior.AppliedIndex = current.AppliedIndex
+		}
+		if current.LastIndex > prior.LastIndex {
+			prior.LastIndex = current.LastIndex
+		}
+		highWater[groupID] = prior
+	}
+	return highWater
 }
 
 func absoluteDifference(left, right uint64) uint64 {
