@@ -339,14 +339,15 @@ func TestRunScenarioPersistsFinalProviderEmulatorObservations(t *testing.T) {
 	scenario.Phases = []spec.PhaseSpec{{Name: "first"}, {Name: "second"}}
 	observations := providerObservationJSONL(t, 2)
 	driver := &recordingDriver{environmentDriver: "dry-run", providerEmulator: true, providerObservations: observations}
-	result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver, EventRuntime: orderingEventRuntime{driver: driver}, harnessBuildIdentityOverride: cleanTestHarnessBuildIdentity()})
+	orderingStore := &orderingRunStore{MemoryStore: store.NewMemoryStore(), driver: driver}
+	result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver, Store: orderingStore, harnessBuildIdentityOverride: cleanTestHarnessBuildIdentity()})
 	if err != nil {
 		t.Fatalf("RunScenario() error=%v", err)
 	}
 	if driver.providerObservationCalls != 1 {
 		t.Fatalf("final provider observation captures=%d, want 1", driver.providerObservationCalls)
 	}
-	if got, want := strings.Join(driver.order, ","), "phase:first,phase:second,capture,delete"; got != want {
+	if got, want := strings.Join(driver.order, ","), "phase-passed:first,phase-passed:second,capture,delete"; got != want {
 		t.Fatalf("production ordering=%q, want %q", got, want)
 	}
 	raw, err := os.ReadFile(filepath.Join(result.ArtifactRoot, "provider", "emulator-observations.jsonl"))
@@ -376,7 +377,8 @@ func TestRunScenarioFinalProviderObservationFailuresRemainClosedAndCleanUp(t *te
 			scenario.Phases = []spec.PhaseSpec{{Name: "only"}}
 			scenario.Assertions = nil
 			driver := &recordingDriver{environmentDriver: "dry-run", providerEmulator: true, providerObservations: test.output, providerObservationErr: test.captureErr}
-			result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver, EventRuntime: orderingEventRuntime{driver: driver}, harnessBuildIdentityOverride: cleanTestHarnessBuildIdentity()})
+			orderingStore := &orderingRunStore{MemoryStore: store.NewMemoryStore(), driver: driver}
+			result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver, Store: orderingStore, harnessBuildIdentityOverride: cleanTestHarnessBuildIdentity()})
 			if err == nil || result.Status != RunFailed {
 				t.Fatalf("RunScenario() status=%s error=%v, want failed", result.Status, err)
 			}
@@ -386,7 +388,7 @@ func TestRunScenarioFinalProviderObservationFailuresRemainClosedAndCleanUp(t *te
 			if !driver.deleted || !driver.verifiedDeleted {
 				t.Fatalf("failure cleanup incomplete: deleted=%t verified=%t", driver.deleted, driver.verifiedDeleted)
 			}
-			if got, want := strings.Join(driver.order, ","), "phase:only,capture,delete"; got != want {
+			if got, want := strings.Join(driver.order, ","), "phase-passed:only,capture,delete"; got != want {
 				t.Fatalf("failure ordering=%q, want %q", got, want)
 			}
 			cleanupRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "post-run-cleanup.json"))
@@ -461,13 +463,16 @@ func providerObservationJSONL(t *testing.T, count int) string {
 	return lines.String()
 }
 
-type orderingEventRuntime struct {
+type orderingRunStore struct {
+	*store.MemoryStore
 	driver *recordingDriver
 }
 
-func (runtime orderingEventRuntime) ExecutePhaseEvents(_ context.Context, phase spec.PhaseSpec, _ bool, _ events.Recorder) error {
-	runtime.driver.order = append(runtime.driver.order, "phase:"+phase.Name)
-	return nil
+func (ordering *orderingRunStore) AppendEvent(ctx context.Context, event store.RunEvent) error {
+	if event.EventType == "phase-passed" {
+		ordering.driver.order = append(ordering.driver.order, "phase-passed:"+event.PhaseName)
+	}
+	return ordering.MemoryStore.AppendEvent(ctx, event)
 }
 
 type providerObservationInspector struct {
