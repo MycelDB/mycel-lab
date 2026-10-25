@@ -18,7 +18,7 @@ type DriverRuntime struct {
 	Scenario                      spec.ResolvedScenario
 	Resources                     *provision.ScenarioResources
 	EndpointRecovery              env.EndpointRecovery
-	endpointProbe                 func(context.Context, *provision.ScenarioResources, string) (int, error)
+	endpointProbe                 func(context.Context, *provision.ScenarioResources, string) (endpointProbeObservation, error)
 	userBackups                   map[string]UserBackupOperationResult
 	systemBackups                 map[string]SystemBackupOperationResult
 	procedureInferenceCheckpoints map[string]procedureInferenceCheckpoint

@@ -16,6 +16,17 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+const (
+	endpointRecoveryTimeout      = 2 * time.Minute
+	endpointRecoveryBatchTimeout = 2 * time.Minute
+)
+
+type endpointProbeObservation struct {
+	Attempts int
+	Code     string
+	Stage    string
+}
+
 type endpointRecoveryResult struct {
 	NodeName           string `json:"nodeName"`
 	PreviousGeneration uint64 `json:"previousGeneration"`
@@ -24,6 +35,8 @@ type endpointRecoveryResult struct {
 	Reconnected        bool   `json:"reconnected"`
 	TransportStatus    string `json:"transportStatus"`
 	GRPCProbeStatus    string `json:"grpcProbeStatus"`
+	GRPCProbeCode      string `json:"grpcProbeCode"`
+	GRPCProbeStage     string `json:"grpcProbeStage"`
 	ProbeAttempts      int    `json:"probeAttempts"`
 }
 
@@ -44,7 +57,7 @@ func (r *DriverRuntime) restartNodeAndRecoverEndpoint(ctx context.Context, targe
 	if !managed {
 		return nil, nil
 	}
-	recoveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	recoveryCtx, cancel := context.WithTimeout(ctx, endpointRecoveryTimeout)
 	defer cancel()
 	result, err := r.recoverEndpoint(recoveryCtx, snapshot)
 	return map[string]any{"endpointRecovery": result}, err
@@ -74,7 +87,7 @@ func (r *DriverRuntime) recoverNodeFromSnapshots(ctx context.Context, snapshots 
 		if snapshot.NodeName != nodeName {
 			continue
 		}
-		recoveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		recoveryCtx, cancel := context.WithTimeout(ctx, endpointRecoveryTimeout)
 		defer cancel()
 		result, err := r.recoverEndpoint(recoveryCtx, snapshot)
 		return result, true, err
@@ -83,7 +96,7 @@ func (r *DriverRuntime) recoverNodeFromSnapshots(ctx context.Context, snapshots 
 }
 
 func (r *DriverRuntime) recoverEndpoints(ctx context.Context, snapshots []env.EndpointForwardSnapshot) ([]endpointRecoveryResult, error) {
-	recoveryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	recoveryCtx, cancel := context.WithTimeout(ctx, endpointRecoveryBatchTimeout)
 	defer cancel()
 	results := make([]endpointRecoveryResult, 0, len(snapshots))
 	for _, snapshot := range snapshots {
@@ -97,7 +110,7 @@ func (r *DriverRuntime) recoverEndpoints(ctx context.Context, snapshots []env.En
 }
 
 func (r *DriverRuntime) recoverEndpoint(ctx context.Context, snapshot env.EndpointForwardSnapshot) (endpointRecoveryResult, error) {
-	failed := endpointRecoveryResult{NodeName: snapshot.NodeName, PreviousGeneration: snapshot.Generation, TransportStatus: "failed", GRPCProbeStatus: "not-started"}
+	failed := endpointRecoveryResult{NodeName: snapshot.NodeName, PreviousGeneration: snapshot.Generation, TransportStatus: "failed", GRPCProbeStatus: "not-started", GRPCProbeCode: "not-started", GRPCProbeStage: "transport"}
 	transport, err := r.EndpointRecovery.RefreshAndAwaitEndpoint(ctx, snapshot.NodeName, snapshot.Generation)
 	if err != nil {
 		return failed, err
@@ -106,7 +119,7 @@ func (r *DriverRuntime) recoverEndpoint(ctx context.Context, snapshot env.Endpoi
 	if probe == nil {
 		probe = probeExternalGraphEndpoint
 	}
-	attempts, err := probe(ctx, r.Resources, transport.DaemonAddr)
+	observation, err := probe(ctx, r.Resources, transport.DaemonAddr)
 	result := endpointRecoveryResult{
 		NodeName:           snapshot.NodeName,
 		PreviousGeneration: snapshot.Generation,
@@ -115,7 +128,9 @@ func (r *DriverRuntime) recoverEndpoint(ctx context.Context, snapshot env.Endpoi
 		Reconnected:        transport.Reconnected,
 		TransportStatus:    transport.Status,
 		GRPCProbeStatus:    "completed",
-		ProbeAttempts:      attempts,
+		GRPCProbeCode:      observation.Code,
+		GRPCProbeStage:     observation.Stage,
+		ProbeAttempts:      observation.Attempts,
 	}
 	if err != nil {
 		result.GRPCProbeStatus = "failed"
@@ -124,20 +139,21 @@ func (r *DriverRuntime) recoverEndpoint(ctx context.Context, snapshot env.Endpoi
 	return result, nil
 }
 
-func probeExternalGraphEndpoint(ctx context.Context, resources *provision.ScenarioResources, daemonAddr string) (int, error) {
+func probeExternalGraphEndpoint(ctx context.Context, resources *provision.ScenarioResources, daemonAddr string) (endpointProbeObservation, error) {
 	assignment, ok := endpointProbeAssignment(resources, daemonAddr)
 	if !ok {
-		return 0, errors.New("external endpoint probe assignment is unavailable")
+		return endpointProbeObservation{Code: "configuration", Stage: "assignment"}, errors.New("external endpoint probe assignment is unavailable")
 	}
-	attempts := 0
+	observation := endpointProbeObservation{Code: "unknown", Stage: "dial"}
 	for {
 		if err := ctx.Err(); err != nil {
-			return attempts, err
+			return observation, err
 		}
-		attempts++
+		observation.Attempts++
 		attemptCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		client, err := mycel.Dial(attemptCtx, mycel.Config{Addr: daemonAddr, AccessToken: assignment.AccessToken, ClientName: "mycel-lab-endpoint-readiness"})
 		if err == nil {
+			observation.Stage = "get-space"
 			callCtx, callCancel := client.AuthCallContext(attemptCtx)
 			_, err = client.Space.GetSpace(callCtx, &clientv1.GetSpaceRequest{SpaceId: assignment.SpaceID}, grpc.WaitForReady(true))
 			callCancel()
@@ -145,19 +161,73 @@ func probeExternalGraphEndpoint(ctx context.Context, resources *provision.Scenar
 		}
 		cancel()
 		if err == nil {
-			return attempts, nil
+			observation.Code = "ok"
+			return observation, nil
 		}
 		code := status.Code(err)
-		if code != codes.Unavailable && code != codes.DeadlineExceeded && code != codes.Canceled {
-			return attempts, errors.New("external endpoint readiness probe was rejected")
+		observation.Code = canonicalProbeCode(code)
+		if !retryableEndpointReadinessCode(code) {
+			return observation, errors.New("external endpoint readiness probe was rejected")
 		}
 		timer := time.NewTimer(200 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return attempts, ctx.Err()
+			return observation, ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+func retryableEndpointReadinessCode(code codes.Code) bool {
+	switch code {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Aborted,
+		codes.FailedPrecondition, codes.NotFound, codes.Internal, codes.Unknown,
+		codes.ResourceExhausted:
+		return true
+	default:
+		return false
+	}
+}
+
+func canonicalProbeCode(code codes.Code) string {
+	switch code {
+	case codes.OK:
+		return "ok"
+	case codes.Canceled:
+		return "canceled"
+	case codes.Unknown:
+		return "unknown"
+	case codes.InvalidArgument:
+		return "invalid-argument"
+	case codes.DeadlineExceeded:
+		return "deadline-exceeded"
+	case codes.NotFound:
+		return "not-found"
+	case codes.AlreadyExists:
+		return "already-exists"
+	case codes.PermissionDenied:
+		return "permission-denied"
+	case codes.ResourceExhausted:
+		return "resource-exhausted"
+	case codes.FailedPrecondition:
+		return "failed-precondition"
+	case codes.Aborted:
+		return "aborted"
+	case codes.OutOfRange:
+		return "out-of-range"
+	case codes.Unimplemented:
+		return "unimplemented"
+	case codes.Internal:
+		return "internal"
+	case codes.Unavailable:
+		return "unavailable"
+	case codes.DataLoss:
+		return "data-loss"
+	case codes.Unauthenticated:
+		return "unauthenticated"
+	default:
+		return "unknown"
 	}
 }
 

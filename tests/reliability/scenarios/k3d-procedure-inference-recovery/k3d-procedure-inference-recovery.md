@@ -22,7 +22,7 @@ graph LR
 
 ## Scenario phases
 
-Provision/configure, trigger and observe the first terminal attempt, restart one node, assert stable cluster recovery, refresh the affected per-node host tunnel, prove readiness through the same external authenticated gRPC path, re-read retained evidence, trigger a second event, and reconcile emulator observations and bounded diagnostics.
+Provision/configure, trigger and observe the first terminal attempt, restart one node, refresh the affected per-node host tunnel, await readiness through the same external authenticated gRPC read path while bounded replay-sensitive statuses remain transient, assert stable zero-lag cluster recovery, re-read retained evidence, trigger a second event, and reconcile emulator observations and bounded diagnostics.
 
 ## Actors
 
@@ -34,11 +34,11 @@ All restart, health, poll, request, token, page, and attempt budgets are finite 
 
 ## Evidence and artifacts
 
-Sanitized attempt/change/run assertions, restart results, bounded endpoint generation/reconnection/gRPC-probe evidence, stable emulator digests/categories, image provenance, cluster reports, and redaction output.
+Sanitized attempt/change/run assertions, restart results, bounded endpoint generation/reconnection/gRPC-probe stage and canonical status evidence, stable emulator digests/categories, image provenance, cluster reports, and redaction output.
 
 ## Common failure modes
 
-Missing retained evidence, changed event IDs, history gaps, duplicate attempts, missing run references, extra provider calls, unstable Raft recovery, a stale or unready external endpoint generation, or unsafe artifacts fail the run. Only the idempotent readiness probe is retried; graph mutations and provider operations are never retried by endpoint recovery.
+Missing retained evidence, changed event IDs, history gaps, duplicate attempts, missing run references, extra provider calls, unstable Raft recovery, a stale or unready external endpoint generation, or unsafe artifacts fail the run. Only the idempotent readiness read is retried for allowlisted transport/replay-readiness statuses; authentication and authorization rejection fail immediately. Graph mutations and provider operations are never retried by endpoint recovery.
 
 ## When to run
 

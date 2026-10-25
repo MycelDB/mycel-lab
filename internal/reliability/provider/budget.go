@@ -26,6 +26,7 @@ type Demand struct {
 }
 
 type BudgetSnapshot struct {
+	AccountingScope            string    `json:"accountingScope"`
 	StartedAt                  time.Time `json:"startedAt"`
 	Deadline                   time.Time `json:"deadline"`
 	Closed                     bool      `json:"closed"`
@@ -61,6 +62,7 @@ func NewLedger(budget Budget) (*Ledger, error) {
 	}
 	now := time.Now().UTC()
 	ledger := &Ledger{budget: budget, started: now, clock: func() time.Time { return time.Now().UTC() }}
+	ledger.state.AccountingScope = "harness-originated-reservations"
 	ledger.state.StartedAt = now
 	ledger.state.Deadline = now.Add(budget.TotalTimeout.Duration)
 	return ledger, nil

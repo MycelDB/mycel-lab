@@ -45,6 +45,10 @@ func (r *orderedEndpointRecovery) RefreshAndAwaitEndpoint(_ context.Context, nod
 	return env.EndpointRecoveryEvidence{NodeName: nodeName, DaemonAddr: snapshot.DaemonAddr, PreviousGeneration: afterGeneration, RefreshGeneration: afterGeneration, ReadyGeneration: afterGeneration + 1, Reconnected: true, Status: "transport-ready"}, nil
 }
 
+func successfulEndpointProbe(context.Context, *provision.ScenarioResources, string) (endpointProbeObservation, error) {
+	return endpointProbeObservation{Attempts: 1, Code: "ok", Stage: "get-space"}, nil
+}
+
 type recordingEndpointRecovery struct {
 	driver       *recordingDriver
 	snapshotNode string
@@ -81,9 +85,9 @@ func TestDriverRuntimeRestartsEndpointAndProbesExternalGRPCBeforeCompleting(t *t
 	runtime := NewDriverRuntimeWithResources(driver, env.Environment{Name: "test", Driver: "k3d"}, &provision.ScenarioResources{})
 	runtime.SetEndpointRecovery(recovery)
 	probeAddr := ""
-	runtime.endpointProbe = func(_ context.Context, _ *provision.ScenarioResources, daemonAddr string) (int, error) {
+	runtime.endpointProbe = func(_ context.Context, _ *provision.ScenarioResources, daemonAddr string) (endpointProbeObservation, error) {
 		probeAddr = daemonAddr
-		return 2, nil
+		return endpointProbeObservation{Attempts: 2, Code: "ok", Stage: "get-space"}, nil
 	}
 	payload, err := runtime.applyEvent(context.Background(), spec.EventSpec{Type: "node-restart", Target: map[string]any{"ordinal": 0}})
 	if err != nil {
@@ -96,7 +100,7 @@ func TestDriverRuntimeRestartsEndpointAndProbesExternalGRPCBeforeCompleting(t *t
 	if recovery.snapshotNode != "myceld-0" || recovery.refreshNode != "myceld-0" || recovery.after != 4 || probeAddr != "127.0.0.1:20091" {
 		t.Fatalf("recovery=%+v probeAddr=%q", recovery, probeAddr)
 	}
-	if result.TransportStatus != "transport-ready" || result.GRPCProbeStatus != "completed" || result.PreviousGeneration != 4 || result.RefreshGeneration != 4 || result.ReadyGeneration != 5 || result.ProbeAttempts != 2 || !result.Reconnected {
+	if result.TransportStatus != "transport-ready" || result.GRPCProbeStatus != "completed" || result.GRPCProbeCode != "ok" || result.GRPCProbeStage != "get-space" || result.PreviousGeneration != 4 || result.RefreshGeneration != 4 || result.ReadyGeneration != 5 || result.ProbeAttempts != 2 || !result.Reconnected {
 		t.Fatalf("endpoint recovery result=%+v", result)
 	}
 }
@@ -106,7 +110,7 @@ func TestDriverRuntimeRollingRestartRecoversEveryManagedEndpoint(t *testing.T) {
 	recovery := &recordingEndpointRecovery{driver: driver}
 	runtime := NewDriverRuntimeWithResources(driver, env.Environment{Name: "test", Driver: "k3d"}, &provision.ScenarioResources{})
 	runtime.SetEndpointRecovery(recovery)
-	runtime.endpointProbe = func(context.Context, *provision.ScenarioResources, string) (int, error) { return 1, nil }
+	runtime.endpointProbe = successfulEndpointProbe
 	payload, err := runtime.applyEvent(context.Background(), spec.EventSpec{Type: "rolling-restart"})
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +129,7 @@ func TestDriverRuntimeImageUpgradeRecoversEveryManagedEndpoint(t *testing.T) {
 	recovery := &recordingEndpointRecovery{driver: driver}
 	runtime := NewDriverRuntimeWithResources(driver, env.Environment{Name: "test", Driver: "k3d"}, &provision.ScenarioResources{})
 	runtime.SetEndpointRecovery(recovery)
-	runtime.endpointProbe = func(context.Context, *provision.ScenarioResources, string) (int, error) { return 1, nil }
+	runtime.endpointProbe = successfulEndpointProbe
 	payload, err := runtime.applyEvent(context.Background(), spec.EventSpec{Type: "statefulset-image-upgrade", Target: map[string]any{"image": "mycel:test"}})
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +153,7 @@ func TestDriverRuntimeIdentityReplayRecoversRestartedEndpoint(t *testing.T) {
 	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3}}
 	runtime := NewDriverRuntimeWithScenario(driver, env.Environment{Name: "test", Driver: "k3d"}, scenario, &provision.ScenarioResources{})
 	runtime.SetEndpointRecovery(recovery)
-	runtime.endpointProbe = func(context.Context, *provision.ScenarioResources, string) (int, error) { return 1, nil }
+	runtime.endpointProbe = successfulEndpointProbe
 	payload, err := runtime.applyEvent(context.Background(), spec.EventSpec{Type: "identity-duplicate-principal-replay", Target: map[string]any{"settle": "0s"}})
 	if err != nil {
 		t.Fatal(err)
@@ -173,7 +177,7 @@ func TestDriverRuntimeRaftPVCReplacementRecoversReplacedEndpoint(t *testing.T) {
 	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3}}
 	runtime := NewDriverRuntimeWithScenario(driver, env.Environment{Name: "test", Driver: "k3d"}, scenario, &provision.ScenarioResources{})
 	runtime.SetEndpointRecovery(recovery)
-	runtime.endpointProbe = func(context.Context, *provision.ScenarioResources, string) (int, error) { return 1, nil }
+	runtime.endpointProbe = successfulEndpointProbe
 	payload, err := runtime.applyEvent(context.Background(), spec.EventSpec{Type: "raft-pvc-replace-node", Target: map[string]any{"statefulSet": "myceld", "ordinal": 2}})
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +209,7 @@ func TestDriverRuntimeClusterRestoreRecoversEveryManagedEndpoint(t *testing.T) {
 	runtime := NewDriverRuntimeWithScenario(driver, env.Environment{Name: "test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-test"}, scenario, &provision.ScenarioResources{})
 	runtime.systemBackups["default"] = backup
 	runtime.SetEndpointRecovery(recovery)
-	runtime.endpointProbe = func(context.Context, *provision.ScenarioResources, string) (int, error) { return 1, nil }
+	runtime.endpointProbe = successfulEndpointProbe
 	payload, err := runtime.applyEvent(context.Background(), spec.EventSpec{Type: "cluster-restore-apply", Target: map[string]any{"statefulSet": "myceld"}})
 	if err != nil {
 		t.Fatal(err)
@@ -223,7 +227,7 @@ func TestDriverRuntimePersistsClosedEndpointRecoveryEvidence(t *testing.T) {
 	driver := &recordingDriver{}
 	runtime := NewDriverRuntimeWithResources(driver, env.Environment{Name: "test", Driver: "k3d"}, &provision.ScenarioResources{})
 	runtime.SetEndpointRecovery(&recordingEndpointRecovery{driver: driver})
-	runtime.endpointProbe = func(context.Context, *provision.ScenarioResources, string) (int, error) { return 1, nil }
+	runtime.endpointProbe = successfulEndpointProbe
 	recorder := &recordingEventRecorder{}
 	phase := spec.PhaseSpec{Name: "restart", Events: []spec.EventSpec{{Type: "node-restart", Target: map[string]any{"ordinal": 0}}}}
 	if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, recorder); err != nil {
@@ -236,7 +240,7 @@ func TestDriverRuntimePersistsClosedEndpointRecoveryEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{`"nodeName":"myceld-0"`, `"previousGeneration":4`, `"refreshGeneration":4`, `"readyGeneration":5`, `"transportStatus":"transport-ready"`, `"grpcProbeStatus":"completed"`, `"probeAttempts":1`} {
+	for _, required := range []string{`"nodeName":"myceld-0"`, `"previousGeneration":4`, `"refreshGeneration":4`, `"readyGeneration":5`, `"transportStatus":"transport-ready"`, `"grpcProbeStatus":"completed"`, `"grpcProbeCode":"ok"`, `"grpcProbeStage":"get-space"`, `"probeAttempts":1`} {
 		if !bytes.Contains(encoded, []byte(required)) {
 			t.Fatalf("endpoint recovery evidence missing %s: %s", required, encoded)
 		}
@@ -252,15 +256,15 @@ func TestDriverRuntimeFailsClosedWhenExternalGRPCProbeFails(t *testing.T) {
 	driver := &recordingDriver{}
 	runtime := NewDriverRuntimeWithResources(driver, env.Environment{Name: "test", Driver: "k3d"}, &provision.ScenarioResources{})
 	runtime.SetEndpointRecovery(&recordingEndpointRecovery{driver: driver})
-	runtime.endpointProbe = func(context.Context, *provision.ScenarioResources, string) (int, error) {
-		return 3, errors.New("raw probe failure")
+	runtime.endpointProbe = func(context.Context, *provision.ScenarioResources, string) (endpointProbeObservation, error) {
+		return endpointProbeObservation{Attempts: 3, Code: "permission-denied", Stage: "get-space"}, errors.New("raw probe failure")
 	}
 	payload, err := runtime.applyEvent(context.Background(), spec.EventSpec{Type: "node-restart", Target: map[string]any{"ordinal": 0}})
 	if err == nil || err.Error() != "external endpoint did not become ready" {
 		t.Fatalf("applyEvent() error=%v", err)
 	}
 	result := payload["endpointRecovery"].(endpointRecoveryResult)
-	if result.GRPCProbeStatus != "failed" || result.ProbeAttempts != 3 {
+	if result.GRPCProbeStatus != "failed" || result.GRPCProbeCode != "permission-denied" || result.GRPCProbeStage != "get-space" || result.ProbeAttempts != 3 {
 		t.Fatalf("endpoint recovery result=%+v", result)
 	}
 }
