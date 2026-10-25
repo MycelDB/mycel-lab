@@ -41,7 +41,7 @@ phases:
     duration: 1ms
     events:
       - type: cluster-recovery-wait
-        target: {timeout: 10s, interval: 200ms, commandTimeout: 3s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true, reuseEndpointSessions: true}
+        target: {timeout: 2m, interval: 200ms, commandTimeout: 3s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
       - type: procedure-inference-setup
         target: {timeout: 30s}
       - type: system-backup-fixture
@@ -83,7 +83,7 @@ phases:
       - type: procedure-inference-node-create
         target: {nodeId: 00000000-0000-4000-8000-000000005202, text: bounded post backup fixture, timeout: 30s}
       - type: procedure-inference-await-terminal
-        target: {timeout: 2m, interval: 200ms, minimumAttempts: 2, maximumAttempts: 2, requireSucceeded: true, requireChanges: true}
+        target: {timeout: 2m, interval: 200ms, stableFor: 3s, minimumAttempts: 2, maximumAttempts: 2, requireSucceeded: true, requireChanges: true}
       - type: procedure-inference-emulator-assert
         target: {minimumRequests: 2, maximumRequests: 2, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 2}, minimumStatuses: {"200": 2}}
   - name: restore-fresh-pvcs
@@ -91,6 +91,8 @@ phases:
     events:
       - type: cluster-restore-apply
         target: {backup: default, statefulSet: myceld}
+      - type: cluster-recovery-wait
+        target: {timeout: 2m, interval: 500ms, commandTimeout: 5s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
       - type: procedure-inference-emulator-assert
         target: {minimumRequests: 0, maximumRequests: 0, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent}
   - name: verify-restored-ledger-and-watermarks
@@ -110,8 +112,6 @@ phases:
         target: {nodeId: 00000000-0000-4000-8000-000000005204, text: bounded restored enabled fixture, timeout: 30s}
       - type: procedure-inference-await-terminal
         target: {timeout: 2m, interval: 500ms, stableFor: 3s, minimumAttempts: 2, maximumAttempts: 2, requireSucceeded: true, requireChanges: true}
-      - type: procedure-inference-capacity-diagnostics-assert
-        target: {timeout: 30s, tail: 5000, requirePressure: false}
       - type: procedure-inference-emulator-assert
         target:
           minimumRequests: 1
@@ -123,6 +123,8 @@ phases:
           expectedModels: [procedure-generation-v1]
           minimumOutcomes: {success: 1}
           minimumStatuses: {"200": 1}
+      - type: procedure-inference-capacity-diagnostics-assert
+        target: {timeout: 30s, tail: 5000, requirePressure: false}
       - type: cluster-backup-cleanup
         target: {backup: default}
 assertions:

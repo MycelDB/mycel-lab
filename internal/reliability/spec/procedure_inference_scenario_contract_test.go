@@ -46,6 +46,51 @@ func TestProcedureInferenceScenarioContractsValidate(t *testing.T) {
 	}
 }
 
+func TestProcedureInferenceBackupRestoreScenarioRecoveryFences(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "k3d-procedure-inference-backup-restore", "k3d-procedure-inference-backup-restore.yaml")
+	loaded, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario := loaded.(Scenario)
+	phases := make(map[string]PhaseSpec, len(scenario.Phases))
+	for _, phase := range scenario.Phases {
+		phases[phase.Name] = phase
+	}
+	initial := phases["establish-backed-up-attempt"].Events[0]
+	if initial.Type != "cluster-recovery-wait" || initial.Target["timeout"] != "2m" || initial.Target["minimumStablePolls"] != 3 || initial.Target["requireZeroApplyLag"] != true || initial.Target["requireConsistentProgress"] != true {
+		t.Fatalf("initial recovery fence=%+v", initial)
+	}
+	if _, legacy := initial.Target["reuseEndpointSessions"]; legacy {
+		t.Fatal("initial recovery fence retains removed endpoint-session option")
+	}
+	negativeControl := phases["create-post-backup-negative-control"]
+	if stable := negativeControl.Events[2].Target["stableFor"]; stable != "3s" {
+		t.Fatalf("post-backup terminal stability=%v, want 3s", stable)
+	}
+	restore := phases["restore-fresh-pvcs"]
+	if len(restore.Events) != 3 || restore.Events[0].Type != "cluster-restore-apply" || restore.Events[1].Type != "cluster-recovery-wait" || restore.Events[2].Type != "procedure-inference-emulator-assert" {
+		t.Fatalf("restore events=%+v, want apply, stable recovery, zero-call assertion", restore.Events)
+	}
+	recovery := restore.Events[1].Target
+	if recovery["timeout"] != "2m" || recovery["minimumStablePolls"] != 3 || recovery["requireZeroApplyLag"] != true || recovery["requireConsistentProgress"] != true {
+		t.Fatalf("post-restore recovery fence=%+v", recovery)
+	}
+	final := phases["verify-restored-ledger-and-watermarks"]
+	emulatorIndex, diagnosticsIndex := -1, -1
+	for index, event := range final.Events {
+		switch event.Type {
+		case "procedure-inference-emulator-assert":
+			emulatorIndex = index
+		case "procedure-inference-capacity-diagnostics-assert":
+			diagnosticsIndex = index
+		}
+	}
+	if emulatorIndex < 0 || diagnosticsIndex < 0 || emulatorIndex > diagnosticsIndex {
+		t.Fatalf("final emulator index=%d diagnostics index=%d, want formal provider assertion first", emulatorIndex, diagnosticsIndex)
+	}
+}
+
 func TestProcedureInferenceEventTargetsFailClosed(t *testing.T) {
 	tests := []struct {
 		name, event string
