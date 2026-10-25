@@ -376,11 +376,16 @@ type composeCaptureRunner struct {
 	k3dEmulatorImageIDs           string
 	k3dEmulatorImageError         error
 	inspectPlatformOutputs        map[string]string
+	inspectPlatformManifestOutput string
+	inspectPlatformManifestError  error
 }
 
 func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, "docker image save") {
+		return executil.Result{Command: cmd, Stdout: r.inspectPlatformManifestOutput}, r.inspectPlatformManifestError
+	}
 	if strings.Contains(cmd, "get pods -l app=mycel-provider-emulator") && strings.Contains(cmd, "imageID") {
 		return executil.Result{Command: cmd, Stdout: r.k3dEmulatorImageIDs}, r.k3dEmulatorImageError
 	}
@@ -424,6 +429,35 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (execut
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
+func TestConfiguredImageConfigDigestIsBoundedAndFailClosed(t *testing.T) {
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const configDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	for _, test := range []struct {
+		name   string
+		output string
+		err    error
+		want   string
+	}{
+		{name: "oci", output: `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + configDigest + `"}}`, want: configDigest},
+		{name: "docker v2", output: `{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"digest":"` + configDigest + `"}}`, want: configDigest},
+		{name: "index rejected", output: `{"mediaType":"application/vnd.oci.image.index.v1+json","config":{"digest":"` + configDigest + `"}}`},
+		{name: "malformed", output: `{`},
+		{name: "oversized", output: strings.Repeat("x", 1024*1024+1)},
+		{name: "producer failure", err: errors.New("secret save error")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &composeCaptureRunner{inspectPlatformManifestOutput: test.output, inspectPlatformManifestError: test.err}
+			if got := configuredImageConfigDigest(context.Background(), runner, indexDigest, manifestDigest); got != test.want {
+				t.Fatalf("configuredImageConfigDigest()=%q want %q", got, test.want)
+			}
+			if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "head -c 1048577") || !strings.Contains(commands, indexDigest) || !strings.Contains(commands, manifestDigest) {
+				t.Fatalf("config inspection was not immutable and bounded: %s", commands)
+			}
+		})
+	}
 }
 
 func TestCanonicalImagePlatformIsAllowlisted(t *testing.T) {
@@ -482,24 +516,26 @@ func TestRunningImageSourceEvidenceBindsK3DPlatformManifestFromLocalOCIIndex(t *
 	for _, test := range []struct {
 		architecture           string
 		platformManifestDigest string
+		configDigest           string
 	}{
-		{architecture: "arm64", platformManifestDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-		{architecture: "amd64", platformManifestDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+		{architecture: "arm64", platformManifestDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", configDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+		{architecture: "amd64", platformManifestDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", configDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
 	} {
 		t.Run(test.architecture, func(t *testing.T) {
 			platform := "linux/" + test.architecture
 			runner := &composeCaptureRunner{
-				inspectIdentityOutput:  `{"id":"` + indexDigest + `","os":"linux","architecture":"` + test.architecture + `","repoDigests":["local/mycel@` + indexDigest + `"]}`,
-				inspectPlatformOutputs: map[string]string{platform: `{"id":"` + test.platformManifestDigest + `","repoDigests":[]}`},
-				inspectOutput:          `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+				inspectIdentityOutput:         `{"id":"` + indexDigest + `","os":"linux","architecture":"` + test.architecture + `","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+				inspectPlatformOutputs:        map[string]string{platform: `{"id":"` + test.platformManifestDigest + `","repoDigests":[]}`},
+				inspectPlatformManifestOutput: `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + test.configDigest + `"}}`,
+				inspectOutput:                 `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
 			}
-			evidence := runningImageSourceEvidence(context.Background(), runner, "local/mycel:head", "containerd://"+test.platformManifestDigest+"\n", nil)
-			if evidence.ConfiguredImageID != indexDigest || evidence.Platform != platform || len(evidence.ConfiguredDigests) != 2 || evidence.ID != test.platformManifestDigest || !runningImageMatchesConfigured(evidence) || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") {
+			evidence := runningImageSourceEvidence(context.Background(), runner, "local/mycel:head", "containerd://"+test.configDigest+"\n", nil)
+			if evidence.ConfiguredImageID != indexDigest || evidence.Platform != platform || len(evidence.ConfiguredDigests) != 3 || evidence.ID != test.configDigest || !runningImageMatchesConfigured(evidence) || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") {
 				t.Fatalf("platform runtime manifest was not bound to configured OCI index: %+v", evidence)
 			}
 			commands := strings.Join(runner.commands, "\n")
-			if !strings.Contains(commands, "docker image inspect --platform "+platform+" "+indexDigest) {
-				t.Fatalf("platform identity was not inspected: %s", commands)
+			if !strings.Contains(commands, "docker image inspect --platform "+platform+" "+indexDigest) || !strings.Contains(commands, "docker image save") || !strings.Contains(commands, test.platformManifestDigest) {
+				t.Fatalf("platform identity or config was not inspected: %s", commands)
 			}
 		})
 	}

@@ -1362,10 +1362,10 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 	configuredDigests := map[string]bool{}
 	if evidence.ImageOverride != "" {
 		const identityFormat = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"repoDigests":{{json .RepoDigests}}}`
-		captureConfiguredIdentity := func(args ...string) {
+		captureConfiguredIdentity := func(args ...string) string {
 			configured, err := runner.Run(ctx, "docker", args...)
 			if err != nil {
-				return
+				return ""
 			}
 			var identity struct {
 				ID           string   `json:"id"`
@@ -1374,7 +1374,7 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 				RepoDigests  []string `json:"repoDigests"`
 			}
 			if json.Unmarshal([]byte(strings.TrimSpace(configured.Stdout)), &identity) != nil {
-				return
+				return ""
 			}
 			configuredID := canonicalImageDigest(identity.ID)
 			if evidence.ConfiguredImageID == "" {
@@ -1389,6 +1389,7 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 					configuredDigests[digest] = true
 				}
 			}
+			return configuredID
 		}
 		captureConfiguredIdentity("image", "inspect", evidence.ImageOverride, "--format", identityFormat)
 		// Docker's containerd image store reports an OCI index for an unqualified
@@ -1396,7 +1397,10 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 		// Resolve the platform descriptor from the already captured immutable
 		// index, not the mutable tag, and bind both exact digests.
 		if evidence.ConfiguredImageID != "" && evidence.Platform != "" {
-			captureConfiguredIdentity("image", "inspect", "--platform", evidence.Platform, evidence.ConfiguredImageID, "--format", identityFormat)
+			platformManifestDigest := captureConfiguredIdentity("image", "inspect", "--platform", evidence.Platform, evidence.ConfiguredImageID, "--format", identityFormat)
+			if configDigest := configuredImageConfigDigest(ctx, runner, evidence.ConfiguredImageID, platformManifestDigest); configDigest != "" {
+				configuredDigests[configDigest] = true
+			}
 		}
 	}
 	for digest := range configuredDigests {
@@ -1429,6 +1433,36 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 	// repository digest has been proven equivalent to the runtime identity.
 	evidence.Provenance = captureImageProvenance(ctx, runner, evidence.ConfiguredImageID)
 	return evidence
+}
+
+func configuredImageConfigDigest(ctx context.Context, runner executil.Runner, immutableImageDigest, platformManifestDigest string) string {
+	immutableImageDigest = canonicalImageDigest(immutableImageDigest)
+	platformManifestDigest = canonicalImageDigest(platformManifestDigest)
+	if immutableImageDigest == "" || platformManifestDigest == "" {
+		return ""
+	}
+	const maxManifestBytes = 1024 * 1024
+	const script = `set -o pipefail
+	docker image save "$1" | tar -xOf - "blobs/sha256/${2#sha256:}" | head -c 1048577`
+	result, err := runner.Run(ctx, "bash", "-c", script, "mycel-lab-image-config", immutableImageDigest, platformManifestDigest)
+	if err != nil || len(result.Stdout) == 0 || len(result.Stdout) > maxManifestBytes {
+		return ""
+	}
+	var manifest struct {
+		MediaType string `json:"mediaType"`
+		Config    struct {
+			Digest string `json:"digest"`
+		} `json:"config"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &manifest) != nil {
+		return ""
+	}
+	switch manifest.MediaType {
+	case "application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json":
+		return canonicalImageDigest(manifest.Config.Digest)
+	default:
+		return ""
+	}
 }
 
 func canonicalImagePlatform(osName, architecture string) string {
