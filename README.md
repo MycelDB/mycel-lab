@@ -47,6 +47,9 @@ mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --dry-run
+mycel-lab run suite compose-procedure-inference-control-emulator --dry-run
+mycel-lab run suite k3d-procedure-inference-recovery --dry-run
+mycel-lab run suite k3d-procedure-inference-backup-restore --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run
 mycel-lab run suite cluster-release-gate --dry-run
 # Compose runs require Docker Compose and a local mycel image compatible with the fixture.

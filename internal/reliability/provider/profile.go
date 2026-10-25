@@ -97,17 +97,71 @@ type Capabilities struct {
 	Routing          *Capability `yaml:"routing,omitempty" json:"routing,omitempty"`
 }
 
+// ProtocolEmulatorCapability returns the single capability that owns the
+// protocol-emulator script. Profiles with multiple scripts are rejected so one
+// deployed emulator always has one finite, reviewable outcome contract.
+func (p Profile) ProtocolEmulatorCapability() (*Capability, string, error) {
+	candidates := []struct {
+		name  string
+		value *Capability
+	}{
+		{"embedding", p.Capabilities.Embedding},
+		{"generation", p.Capabilities.Generation},
+		{"enrichment", p.Capabilities.Enrichment},
+		{"structured-output", p.Capabilities.StructuredOutput},
+		{"routing", p.Capabilities.Routing},
+	}
+	var selected *Capability
+	var name string
+	for _, candidate := range candidates {
+		if candidate.value == nil || candidate.value.EmulatorScript == nil {
+			continue
+		}
+		if selected != nil {
+			return nil, "", errors.New("provider emulator profile must define exactly one protocol script")
+		}
+		selected, name = candidate.value, candidate.name
+	}
+	if selected == nil {
+		return nil, "", errors.New("provider emulator profile requires a protocol script")
+	}
+	return selected, name, nil
+}
+
 type Capability struct {
-	ConnectorType     string           `yaml:"connectorType" json:"connectorType"`
-	EndpointKey       string           `yaml:"endpointKey" json:"endpointKey"`
-	BaseURL           string           `yaml:"baseURL,omitempty" json:"baseURL,omitempty"`
-	ModelKey          string           `yaml:"modelKey" json:"modelKey"`
-	ProviderModelName string           `yaml:"providerModelName,omitempty" json:"providerModelName,omitempty"`
-	Dimensions        int              `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
-	VectorSpaceKey    string           `yaml:"vectorSpaceKey,omitempty" json:"vectorSpaceKey,omitempty"`
-	FixtureStrategy   string           `yaml:"fixtureStrategy,omitempty" json:"fixtureStrategy,omitempty"`
-	SecretRef         *SecretReference `yaml:"secretRef,omitempty" json:"secretRef,omitempty"`
-	Batching          Batching         `yaml:"batching" json:"batching"`
+	ConnectorType     string                  `yaml:"connectorType" json:"connectorType"`
+	EndpointKey       string                  `yaml:"endpointKey" json:"endpointKey"`
+	BaseURL           string                  `yaml:"baseURL,omitempty" json:"baseURL,omitempty"`
+	ModelKey          string                  `yaml:"modelKey" json:"modelKey"`
+	ProviderModelName string                  `yaml:"providerModelName,omitempty" json:"providerModelName,omitempty"`
+	Dimensions        int                     `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
+	VectorSpaceKey    string                  `yaml:"vectorSpaceKey,omitempty" json:"vectorSpaceKey,omitempty"`
+	FixtureStrategy   string                  `yaml:"fixtureStrategy,omitempty" json:"fixtureStrategy,omitempty"`
+	EmulatorScript    *ProtocolEmulatorScript `yaml:"emulatorScript,omitempty" json:"emulatorScript,omitempty"`
+	SecretRef         *SecretReference        `yaml:"secretRef,omitempty" json:"secretRef,omitempty"`
+	Batching          Batching                `yaml:"batching" json:"batching"`
+}
+
+type ProtocolEmulatorScript struct {
+	Version      string                        `yaml:"version" json:"version"`
+	RequireMatch bool                          `yaml:"requireMatch" json:"require_match"`
+	MaxRequests  int                           `yaml:"maxRequests" json:"max_requests"`
+	Entries      []ProtocolEmulatorScriptEntry `yaml:"entries" json:"entries"`
+}
+
+type ProtocolEmulatorScriptEntry struct {
+	InputSHA256 string                    `yaml:"inputSHA256" json:"input_sha256"`
+	Outcomes    []ProtocolEmulatorOutcome `yaml:"outcomes" json:"outcomes"`
+}
+
+type ProtocolEmulatorOutcome struct {
+	Kind         string `yaml:"kind" json:"kind"`
+	Status       int    `yaml:"status,omitempty" json:"status,omitempty"`
+	DelayMS      int    `yaml:"delayMS,omitempty" json:"delay_ms,omitempty"`
+	RetryAfterMS int    `yaml:"retryAfterMS,omitempty" json:"retry_after_ms,omitempty"`
+	Dimensions   int    `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
+	Model        string `yaml:"model,omitempty" json:"model,omitempty"`
+	RequestID    string `yaml:"requestID,omitempty" json:"request_id,omitempty"`
 }
 
 type SecretReference struct {
@@ -208,10 +262,11 @@ func (r ResolvedProfile) RuntimeSecretValues() []string {
 }
 
 type ResolveOptions struct {
-	DryRun    bool
-	Selection string
-	Manifest  CapabilityManifest
-	LookupEnv func(string) (string, bool)
+	DryRun               bool
+	Selection            string
+	RequiredCapabilities []string
+	Manifest             CapabilityManifest
+	LookupEnv            func(string) (string, bool)
 }
 
 func Load(raw []byte) (Profile, error) {
@@ -363,6 +418,14 @@ func validateCapability(mode Mode, name string, capability *Capability) error {
 			return fmt.Errorf("%s deterministic capability requires fake connectorType and fixtureStrategy", prefix)
 		}
 	}
+	if capability.EmulatorScript != nil {
+		if mode != ModeEmulator || capability.ConnectorType != "openai-compatible" {
+			return fmt.Errorf("%s emulatorScript requires emulator openai-compatible mode", prefix)
+		}
+		if err := validateProtocolEmulatorScript(prefix+".emulatorScript", capability.EmulatorScript); err != nil {
+			return err
+		}
+	}
 	if (mode == ModeDeterministic || mode == ModeEmulator) && capability.SecretRef != nil {
 		return fmt.Errorf("%s %s mode cannot declare secretRef", prefix, mode)
 	}
@@ -375,6 +438,71 @@ func validateCapability(mode Mode, name string, capability *Capability) error {
 		}
 		if !validEnvironmentName(capability.SecretRef.Env) {
 			return fmt.Errorf("%s.secretRef.env must be a portable environment variable name", prefix)
+		}
+	}
+	return nil
+}
+
+func ValidateProtocolEmulatorScript(script *ProtocolEmulatorScript) error {
+	if script == nil {
+		return errors.New("emulator script is required")
+	}
+	return validateProtocolEmulatorScript("emulatorScript", script)
+}
+
+func validateProtocolEmulatorScript(prefix string, script *ProtocolEmulatorScript) error {
+	if script.Version != "v1" {
+		return fmt.Errorf("%s.version must be v1", prefix)
+	}
+	if script.MaxRequests <= 0 || script.MaxRequests > 100000 {
+		return fmt.Errorf("%s.maxRequests must be between 1 and 100000", prefix)
+	}
+	if len(script.Entries) > 256 {
+		return fmt.Errorf("%s.entries must contain at most 256 items", prefix)
+	}
+	seen := make(map[string]struct{}, len(script.Entries))
+	for entryIndex, entry := range script.Entries {
+		digest := strings.TrimSpace(entry.InputSHA256)
+		decoded, err := hex.DecodeString(digest)
+		if err != nil || len(decoded) != sha256.Size || digest != strings.ToLower(digest) {
+			return fmt.Errorf("%s.entries[%d].inputSHA256 must be lowercase SHA-256", prefix, entryIndex)
+		}
+		if _, exists := seen[digest]; exists {
+			return fmt.Errorf("%s.entries[%d].inputSHA256 is duplicated", prefix, entryIndex)
+		}
+		seen[digest] = struct{}{}
+		if len(entry.Outcomes) == 0 || len(entry.Outcomes) > 32 {
+			return fmt.Errorf("%s.entries[%d].outcomes must contain between 1 and 32 items", prefix, entryIndex)
+		}
+		for outcomeIndex, outcome := range entry.Outcomes {
+			switch outcome.Kind {
+			case "success", "http-error", "malformed-json", "truncated-json", "refusal", "wrong-dimensions":
+			default:
+				return fmt.Errorf("%s.entries[%d].outcomes[%d].kind is unsupported", prefix, entryIndex, outcomeIndex)
+			}
+			if outcome.DelayMS < 0 || outcome.DelayMS > 30000 || outcome.RetryAfterMS < 0 || outcome.RetryAfterMS > 30000 {
+				return fmt.Errorf("%s.entries[%d].outcomes[%d] delay bounds exceed 30000ms", prefix, entryIndex, outcomeIndex)
+			}
+			if outcome.Kind == "http-error" {
+				if outcome.Status < 400 || outcome.Status > 599 {
+					return fmt.Errorf("%s.entries[%d].outcomes[%d].status must be between 400 and 599", prefix, entryIndex, outcomeIndex)
+				}
+			} else if outcome.Status != 0 {
+				return fmt.Errorf("%s.entries[%d].outcomes[%d].status is valid only for http-error", prefix, entryIndex, outcomeIndex)
+			}
+			if outcome.Dimensions < 0 || outcome.Dimensions > 65536 {
+				return fmt.Errorf("%s.entries[%d].outcomes[%d].dimensions is out of range", prefix, entryIndex, outcomeIndex)
+			}
+			if len(outcome.Model) > 256 || len(outcome.RequestID) > 128 {
+				return fmt.Errorf("%s.entries[%d].outcomes[%d] identity exceeds bounds", prefix, entryIndex, outcomeIndex)
+			}
+			for _, value := range []string{outcome.Model, outcome.RequestID} {
+				for _, character := range value {
+					if character < 0x21 || character > 0x7e {
+						return fmt.Errorf("%s.entries[%d].outcomes[%d] identity contains unsafe characters", prefix, entryIndex, outcomeIndex)
+					}
+				}
+			}
 		}
 	}
 	return nil
@@ -443,30 +571,50 @@ func Resolve(profile Profile, source []byte, opts ResolveOptions) (ResolvedProfi
 	if err := profile.Validate(); err != nil {
 		return ResolvedProfile{}, err
 	}
-	if profile.Capabilities.Embedding == nil {
-		return ResolvedProfile{}, errors.New("provider profile does not provide required embedding capability")
+	required := append([]string(nil), opts.RequiredCapabilities...)
+	if len(required) == 0 {
+		required = []string{"embedding"}
+	}
+	if len(required) != 1 || (required[0] != "embedding" && required[0] != "generation") {
+		return ResolvedProfile{}, fmt.Errorf("required provider capabilities %v are not available in this harness version", required)
+	}
+	var selected *Capability
+	switch required[0] {
+	case "embedding":
+		selected = profile.Capabilities.Embedding
+	case "generation":
+		selected = profile.Capabilities.Generation
+	}
+	if selected == nil {
+		return ResolvedProfile{}, fmt.Errorf("provider profile does not provide required %s capability", required[0])
 	}
 	for _, named := range profile.Capabilities.named() {
-		if named.name != "embedding" {
-			return ResolvedProfile{}, fmt.Errorf("required provider capability %s is not available in this harness version", named.name)
+		if named.name != required[0] {
+			return ResolvedProfile{}, fmt.Errorf("provider capability %s is outside the selected %s contract", named.name, required[0])
 		}
 	}
-	embedding := profile.Capabilities.Embedding
-	switch profile.Mode {
-	case ModeDeterministic:
-		if embedding.ConnectorType != "fake" || embedding.FixtureStrategy != "token-basis-v1" {
-			return ResolvedProfile{}, errors.New("deterministic embedding requires supported fake token-basis-v1 fixture")
+	switch required[0] {
+	case "embedding":
+		switch profile.Mode {
+		case ModeDeterministic:
+			if selected.ConnectorType != "fake" || selected.FixtureStrategy != "token-basis-v1" {
+				return ResolvedProfile{}, errors.New("deterministic embedding requires supported fake token-basis-v1 fixture")
+			}
+		case ModeEmulator, ModeLive:
+			if selected.ConnectorType != "openai-compatible" {
+				return ResolvedProfile{}, fmt.Errorf("%s embedding connector %q is not supported", profile.Mode, selected.ConnectorType)
+			}
 		}
-	case ModeEmulator, ModeLive:
-		if embedding.ConnectorType != "openai-compatible" {
-			return ResolvedProfile{}, fmt.Errorf("%s embedding connector %q is not supported", profile.Mode, embedding.ConnectorType)
+	case "generation":
+		if profile.Mode == ModeDeterministic || selected.ConnectorType != "openai-compatible" {
+			return ResolvedProfile{}, fmt.Errorf("%s generation connector %q is not supported", profile.Mode, selected.ConnectorType)
 		}
-		if strings.TrimSpace(embedding.BaseURL) == "" || strings.TrimSpace(embedding.ProviderModelName) == "" {
-			return ResolvedProfile{}, fmt.Errorf("%s embedding requires baseURL and providerModelName", profile.Mode)
-		}
+	}
+	if (profile.Mode == ModeEmulator || profile.Mode == ModeLive) && (strings.TrimSpace(selected.BaseURL) == "" || strings.TrimSpace(selected.ProviderModelName) == "") {
+		return ResolvedProfile{}, fmt.Errorf("%s %s requires baseURL and providerModelName", profile.Mode, required[0])
 	}
 	manifest := BuiltInHarnessManifest()
-	if profile.Mode == ModeDeterministic && embedding.ConnectorType == "fake" && embedding.Batching.Mode == "single" && embedding.Batching.MaxItems == 1 {
+	if profile.Mode == ModeDeterministic && selected.ConnectorType == "fake" && selected.Batching.Mode == "single" && selected.Batching.MaxItems == 1 {
 		manifest = manifest.With(EnforceProviderBatchItems, "daemon-fake-connector-single-item-contract")
 	}
 	for capability, source := range opts.Manifest.Capabilities {

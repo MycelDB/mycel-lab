@@ -295,9 +295,9 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 				setSemanticCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit references")
 				continue
 			}
-			message := fmt.Sprintf("delete %s %s: %v", step.resource, step.id, err)
+			message := sanitizedSemanticCleanupFailure(step.resource, err)
 			failures = append(failures, message)
-			setSemanticCleanupStatus(resources, step.resource, "failed", err.Error())
+			setSemanticCleanupStatus(resources, step.resource, "failed", message)
 			continue
 		}
 		setSemanticCleanupStatus(resources, step.resource, "completed", "")
@@ -305,55 +305,89 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 	return failures
 }
 
-func semanticCleanupRetainedByAudit(err error) bool {
+const (
+	maxCleanupReferenceEvidence     = 20
+	maxCleanupReferenceTokens       = maxCleanupReferenceEvidence + 1
+	maxCleanupReferenceMessageBytes = 4096
+)
+
+type semanticCleanupReference struct {
+	Type string
+	ID   string
+}
+
+func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, int) {
 	if status.Code(err) != codes.FailedPrecondition {
-		return false
+		return nil, "not-failed-precondition", 0
 	}
 	message := status.Convert(err).Message()
+	if len(message) > maxCleanupReferenceMessageBytes {
+		return nil, "reference-evidence-too-large", 0
+	}
 	const marker = " is referenced by "
 	index := strings.Index(message, marker)
 	if index < 0 {
-		return false
+		return nil, "unrecognized-precondition", 0
 	}
-	references := strings.Split(message[index+len(marker):], ",")
+	referenceText := strings.TrimSpace(message[index+len(marker):])
+	if referenceText == "" {
+		return nil, "empty-reference-list", 0
+	}
+	observedReferenceCount := strings.Count(referenceText, ",") + 1
+	tokens := strings.SplitN(referenceText, ",", maxCleanupReferenceTokens+1)
+	parseTokens := tokens
+	forcedRejection := ""
+	if observedReferenceCount > maxCleanupReferenceTokens || (observedReferenceCount > maxCleanupReferenceEvidence && !semanticCleanupTruncationPattern.MatchString(strings.TrimSpace(tokens[observedReferenceCount-1]))) {
+		forcedRejection = "reference-list-too-large"
+		parseTokens = tokens[:maxCleanupReferenceEvidence]
+	}
+	references := make([]semanticCleanupReference, 0, min(len(parseTokens), maxCleanupReferenceEvidence))
+	for _, token := range parseTokens {
+		token = strings.TrimSpace(token)
+		matches := semanticCleanupReferencePattern.FindStringSubmatch(token)
+		if len(matches) != 3 {
+			// The daemon truncates untyped reference lists with "...N more".
+			// Reject those lists because the hidden references are not proven to
+			// belong to immutable audit history.
+			if forcedRejection != "" {
+				return references, forcedRejection, observedReferenceCount
+			}
+			if semanticCleanupTruncationPattern.MatchString(token) {
+				return references, "truncated-reference-list", observedReferenceCount
+			}
+			return references, "malformed-reference-list", observedReferenceCount
+		}
+		references = append(references, semanticCleanupReference{Type: matches[1], ID: strings.ToLower(matches[2])})
+	}
 	if len(references) == 0 {
-		return false
+		return nil, "empty-reference-list", 0
 	}
-	auditReferenceCount := 0
-	for index, reference := range references {
-		reference = strings.TrimSpace(reference)
-		if semanticAuditReferenceToken(reference) {
-			auditReferenceCount++
-			continue
-		}
-		if auditReferenceCount > 0 && index == len(references)-1 && semanticAuditTruncationToken(reference) {
-			continue
-		}
-		return false
+	if forcedRejection != "" {
+		return references, forcedRejection, observedReferenceCount
 	}
-	return auditReferenceCount > 0
+	return references, "", len(references)
 }
 
-var semanticAuditReferencePattern = regexp.MustCompile(`^(usage_event|policy_decision):[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-
-func semanticAuditReferenceToken(reference string) bool {
-	return semanticAuditReferencePattern.MatchString(reference)
-}
-
-func semanticAuditTruncationToken(reference string) bool {
-	if !strings.HasPrefix(reference, "...") || !strings.HasSuffix(reference, " more") {
+func semanticCleanupRetainedByAudit(err error) bool {
+	references, rejectionCategory, _ := semanticCleanupReferences(err)
+	if rejectionCategory != "" {
 		return false
 	}
-	digits := strings.TrimSuffix(strings.TrimPrefix(reference, "..."), " more")
-	if digits == "" || digits[0] == '0' {
-		return false
-	}
-	for _, digit := range digits {
-		if digit < '0' || digit > '9' {
+	for _, reference := range references {
+		if reference.Type != "usage_event" && reference.Type != "policy_decision" {
 			return false
 		}
 	}
 	return true
+}
+
+var (
+	semanticCleanupReferencePattern  = regexp.MustCompile(`^([a-z][a-z_]*):([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
+	semanticCleanupTruncationPattern = regexp.MustCompile(`^\.\.\.[1-9][0-9]* more$`)
+)
+
+func sanitizedSemanticCleanupFailure(resource string, err error) string {
+	return fmt.Sprintf("delete %s: %s", resource, sanitizedProcedureInferenceProvisionError(err))
 }
 
 func setSemanticCleanupStatus(resources *SemanticResources, resource, state, message string) {

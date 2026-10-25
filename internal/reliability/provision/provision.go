@@ -21,18 +21,20 @@ const (
 )
 
 type ScenarioResources struct {
-	ScenarioName string             `json:"scenarioName"`
-	RunID        string             `json:"runId"`
-	DryRun       bool               `json:"dryRun"`
-	AdminAddr    string             `json:"adminAddr,omitempty"`
-	Principals   []Principal        `json:"principals"`
-	Spaces       []Space            `json:"spaces"`
-	Domains      []Domain           `json:"domains"`
-	Assignments  []ActorAssignment  `json:"assignments"`
-	Semantic     *SemanticResources `json:"semantic,omitempty"`
-	Cleanup      CleanupStatus      `json:"cleanup,omitempty"`
-	semanticPlan *semanticProvisionPlan
-	CreatedAt    time.Time `json:"createdAt"`
+	ScenarioName           string                       `json:"scenarioName"`
+	RunID                  string                       `json:"runId"`
+	DryRun                 bool                         `json:"dryRun"`
+	AdminAddr              string                       `json:"adminAddr,omitempty"`
+	Principals             []Principal                  `json:"principals"`
+	Spaces                 []Space                      `json:"spaces"`
+	Domains                []Domain                     `json:"domains"`
+	Assignments            []ActorAssignment            `json:"assignments"`
+	Semantic               *SemanticResources           `json:"semantic,omitempty"`
+	ProcedureInference     *ProcedureInferenceResources `json:"procedureInference,omitempty"`
+	Cleanup                CleanupStatus                `json:"cleanup,omitempty"`
+	semanticPlan           *semanticProvisionPlan
+	procedureInferencePlan *procedureInferenceProvisionPlan
+	CreatedAt              time.Time `json:"createdAt"`
 }
 
 type Principal struct {
@@ -81,9 +83,38 @@ type ActorAssignment struct {
 }
 
 type CleanupStatus struct {
-	Attempted bool     `json:"attempted"`
-	Completed bool     `json:"completed"`
-	Errors    []string `json:"errors,omitempty"`
+	Attempted       bool     `json:"attempted"`
+	Completed       bool     `json:"completed"`
+	Errors          []string `json:"-"`
+	ErrorCategories []string `json:"errorCategories,omitempty"`
+}
+
+type ProcedureInferenceResources struct {
+	TargetActorID          string              `json:"targetActorId"`
+	AuditActorID           string              `json:"auditActorId"`
+	SpaceID                string              `json:"spaceId,omitempty"`
+	DomainID               string              `json:"domainId,omitempty"`
+	PackageName            string              `json:"packageName"`
+	PackageVersion         string              `json:"packageVersion"`
+	PackageID              string              `json:"packageId,omitempty"`
+	EndpointKey            string              `json:"endpointKey"`
+	EndpointID             string              `json:"endpointId,omitempty"`
+	ModelKey               string              `json:"modelKey"`
+	ModelID                string              `json:"modelId,omitempty"`
+	CapabilityID           string              `json:"capabilityId,omitempty"`
+	IntelligenceProfileKey string              `json:"intelligenceProfileKey"`
+	IntelligenceProfileID  string              `json:"intelligenceProfileId,omitempty"`
+	CredentialKey          string              `json:"credentialKey"`
+	CredentialID           string              `json:"credentialId,omitempty"`
+	CredentialGrantID      string              `json:"credentialGrantId,omitempty"`
+	AccessPolicyID         string              `json:"accessPolicyId,omitempty"`
+	ProcedureID            string              `json:"procedureId"`
+	BindingID              string              `json:"bindingId"`
+	TargetLabels           []string            `json:"targetLabels"`
+	Operations             []SemanticOperation `json:"operations"`
+	Cleanup                []SemanticOperation `json:"cleanup"`
+	cleanupProof           *procedureInferenceCleanupProof
+	cleanupRound           int
 }
 
 type SemanticResources struct {
@@ -119,12 +150,28 @@ type SemanticResources struct {
 }
 
 type SemanticOperation struct {
-	Sequence int            `json:"sequence"`
-	Action   string         `json:"action"`
-	Resource string         `json:"resource"`
-	Status   string         `json:"status"`
-	Details  map[string]any `json:"details,omitempty"`
-	Error    string         `json:"error,omitempty"`
+	Sequence int                       `json:"sequence"`
+	Action   string                    `json:"action"`
+	Resource string                    `json:"resource"`
+	Status   string                    `json:"status"`
+	Details  map[string]any            `json:"details,omitempty"`
+	Error    string                    `json:"error,omitempty"`
+	Attempts []CleanupOperationAttempt `json:"attempts,omitempty"`
+}
+
+type CleanupOperationAttempt struct {
+	Round      int            `json:"round"`
+	Pass       string         `json:"pass"`
+	RPCOutcome string         `json:"rpcOutcome"`
+	Status     string         `json:"status"`
+	Details    map[string]any `json:"details,omitempty"`
+	Error      string         `json:"error,omitempty"`
+}
+
+type procedureInferenceProvisionPlan struct {
+	Spec       spec.ProcedureInferenceScenarioSpec
+	Capability providerCapability
+	Secret     string
 }
 
 type semanticProvisionPlan struct {
@@ -182,7 +229,7 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 				resources.Assignments = append(resources.Assignments, assignment)
 				writerAssignments[group.Name] = append(writerAssignments[group.Name], assignment)
 			}
-		case "gql-read":
+		case "gql-read", "procedure-inference-audit":
 			targetGroups := targetGroups(group)
 			var targets []ActorAssignment
 			for _, name := range targetGroups {
@@ -211,7 +258,67 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 		resources.Semantic = semanticResources
 		resources.semanticPlan = plan
 	}
+	if scenario.ProcedureInference != nil {
+		procedureResources, plan, err := planProcedureInferenceResources(scenario, resources, shortRun)
+		if err != nil {
+			return ScenarioResources{}, err
+		}
+		resources.ProcedureInference = procedureResources
+		resources.procedureInferencePlan = plan
+	}
 	return resources, nil
+}
+
+func planProcedureInferenceResources(scenario spec.ResolvedScenario, resources ScenarioResources, shortRun string) (*ProcedureInferenceResources, *procedureInferenceProvisionPlan, error) {
+	if scenario.ProcedureInference == nil || scenario.ProviderProfile == nil || scenario.ProviderProfile.Profile.Capabilities.Generation == nil {
+		return nil, nil, errors.New("procedure inference provisioning requires a resolved generation provider profile")
+	}
+	var target, audit ActorAssignment
+	for _, assignment := range resources.Assignments {
+		switch assignment.GroupName {
+		case scenario.ProcedureInference.TargetActorGroup:
+			if target.ActorID == "" {
+				target = assignment
+			}
+		case scenario.ProcedureInference.AuditActorGroup:
+			if audit.ActorID == "" {
+				audit = assignment
+			}
+		}
+	}
+	if target.ActorID == "" || audit.ActorID == "" {
+		return nil, nil, errors.New("procedure inference target and audit actor assignments are required")
+	}
+	capability := scenario.ProviderProfile.Profile.Capabilities.Generation
+	prefix := "mlab-" + shortRun
+	out := &ProcedureInferenceResources{
+		TargetActorID: target.ActorID, AuditActorID: audit.ActorID,
+		PackageName: prefix + "-procedure-inference", PackageVersion: "1",
+		EndpointKey: prefix + "-procedure-endpoint", ModelKey: prefix + "-procedure-model",
+		IntelligenceProfileKey: prefix + "-procedure-profile", CredentialKey: prefix + "-procedure-credential",
+		ProcedureID: scenario.ProcedureInference.ProcedureID, BindingID: scenario.ProcedureInference.BindingID,
+		TargetLabels: append([]string(nil), scenario.ProcedureInference.TargetLabels...),
+	}
+	for index, item := range []struct{ action, resource string }{
+		{"apply", "inference-package"}, {"create", "intelligence-profile"}, {"create", "credential"},
+		{"create", "credential-grant"}, {"create", "access-policy"},
+	} {
+		out.Operations = append(out.Operations, SemanticOperation{Sequence: index + 1, Action: item.action, Resource: item.resource, Status: "planned"})
+	}
+	for index, item := range []struct{ action, resource string }{
+		{"delete", "access-policy"}, {"delete", "credential-grant"}, {"delete", "credential"},
+		{"delete", "intelligence-profile"}, {"delete", "capability"}, {"delete", "model"}, {"delete", "endpoint"},
+		{"retain", "inference-package"},
+	} {
+		out.Cleanup = append(out.Cleanup, SemanticOperation{Sequence: index + 1, Action: item.action, Resource: item.resource, Status: "planned"})
+	}
+	secret := ""
+	if values := scenario.ProviderProfile.RuntimeSecretValues(); len(values) > 0 {
+		secret = values[0]
+	}
+	return out, &procedureInferenceProvisionPlan{Spec: *scenario.ProcedureInference, Secret: secret, Capability: providerCapability{
+		ConnectorType: capability.ConnectorType, BaseURL: capability.BaseURL, ProviderModel: capability.ProviderModelName, Mode: string(scenario.ProviderProfile.Profile.Mode),
+	}}, nil
 }
 
 func planSemanticResources(scenario spec.ResolvedScenario, resources ScenarioResources, shortRun string) (*SemanticResources, *semanticProvisionPlan, error) {
@@ -345,7 +452,7 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 	}
 	for i := range resources.Assignments {
 		a := &resources.Assignments[i]
-		if a.BehaviorType == "gql-read" && a.TargetActorID != "" {
+		if (a.BehaviorType == "gql-read" || a.BehaviorType == "procedure-inference-audit") && a.TargetActorID != "" {
 			if target, ok := targets[a.TargetActorID]; ok {
 				a.SpaceID = target.SpaceID
 				a.DomainID = target.DomainID
@@ -355,6 +462,30 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 			if _, err := admin.SetPrincipalRolesForScope(ctx, a.PrincipalID, "space", a.SpaceID, "", []string{"space.viewer"}, "mycel-lab reader provisioning"); err != nil {
 				return fmt.Errorf("grant reader access for %s on space %s: %w", a.Username, a.SpaceID, err)
 			}
+		}
+		if a.BehaviorType == "procedure-inference-audit" && a.SpaceID != "" && a.PrincipalID != "" {
+			if _, err := admin.SetPrincipalRolesForScope(ctx, a.PrincipalID, "space", a.SpaceID, "", []string{"space.viewer", "automation.admin"}, "mycel-lab procedure inference audit provisioning"); err != nil {
+				return fmt.Errorf("grant procedure inference audit access for %s on space %s: %w", a.Username, a.SpaceID, err)
+			}
+		}
+	}
+	if resources.ProcedureInference != nil {
+		for _, assignment := range resources.Assignments {
+			if assignment.ActorID == resources.ProcedureInference.TargetActorID {
+				resources.ProcedureInference.SpaceID = assignment.SpaceID
+				resources.ProcedureInference.DomainID = assignment.DomainID
+				break
+			}
+		}
+		if err := provisionProcedureInferenceResources(ctx, admin, resources); err != nil {
+			rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			rollbackRound := nextProcedureInferenceCleanupRound(resources.ProcedureInference)
+			rollbackFailures := cleanupProcedureInferenceResources(rollbackCtx, admin, resources.ProcedureInference, procedureInferenceCleanupPass{Round: rollbackRound, Name: "provision-rollback"})
+			rollbackCancel()
+			if len(rollbackFailures) > 0 {
+				return errors.Join(fmt.Errorf("provision procedure inference resources: %w", err), fmt.Errorf("procedure inference rollback: %s", strings.Join(rollbackFailures, "; ")))
+			}
+			return fmt.Errorf("provision procedure inference resources: %w", err)
 		}
 	}
 	if resources.Semantic != nil {
@@ -407,19 +538,34 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 		return nil
 	}
 	resources.Cleanup.Attempted = true
+	resources.Cleanup.Completed = false
+	resources.Cleanup.Errors = nil
+	resources.Cleanup.ErrorCategories = nil
 	addr := firstNonEmpty(resources.AdminAddr, firstAddr(opts.DaemonAddrs))
 	if addr == "" {
 		resources.Cleanup.Errors = append(resources.Cleanup.Errors, "daemon address is required for cleanup")
+		resources.Cleanup.ErrorCategories = []string{"daemon_address_missing"}
 		return fmt.Errorf("daemon address is required for cleanup")
 	}
 	admin, err := dialAdminWithRetry(ctx, addr, opts)
 	if err != nil {
 		resources.Cleanup.Errors = append(resources.Cleanup.Errors, err.Error())
+		resources.Cleanup.ErrorCategories = []string{"daemon_connect_failed"}
 		return err
 	}
 	defer admin.Close()
+	procedureRound := nextProcedureInferenceCleanupRound(resources.ProcedureInference)
+	procedurePass := 0
 	errs := cleanupAcrossSpaceBarrier(
-		func() []string { return cleanupSemanticResources(ctx, admin, resources.Semantic) },
+		func() []string {
+			procedurePass++
+			passName := "pre-space-barrier"
+			if procedurePass > 1 {
+				passName = "post-space-barrier"
+			}
+			failures := cleanupProcedureInferenceResources(ctx, admin, resources.ProcedureInference, procedureInferenceCleanupPass{Round: procedureRound, Name: passName})
+			return append(failures, cleanupSemanticResources(ctx, admin, resources.Semantic)...)
+		},
 		func() []string {
 			var failures []string
 			seenSpaces := map[string]bool{}
@@ -454,6 +600,7 @@ func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Opt
 	resources.Cleanup.Errors = errs
 	resources.Cleanup.Completed = len(errs) == 0
 	if len(errs) > 0 {
+		resources.Cleanup.ErrorCategories = []string{"resource_cleanup_failed"}
 		return fmt.Errorf("cleanup scenario resources: %s", strings.Join(errs, "; "))
 	}
 	return nil

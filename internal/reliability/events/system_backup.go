@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +19,8 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	mycel "github.com/myceldb/mycel-go-sdk"
+	clientv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/client/v1"
 )
 
 type SystemBackupOperationResult struct {
@@ -30,8 +34,12 @@ type SystemBackupOperationResult struct {
 	RestorePlan    string                      `json:"restorePlan,omitempty"`
 	RestoreResults []SystemBackupRestoreResult `json:"restoreResults,omitempty"`
 	VerifiedPods   int                         `json:"verifiedPods,omitempty"`
+	FixtureNodes   int64                       `json:"fixtureNodes,omitempty"`
+	FixtureEdges   int64                       `json:"fixtureEdges,omitempty"`
+	FixtureProved  bool                        `json:"fixtureProved,omitempty"`
 	Stdout         string                      `json:"stdout,omitempty"`
 	Stderr         string                      `json:"stderr,omitempty"`
+	fixture        *userBackupFixtureResult
 }
 
 const backupSetManifestName = "backup-set.json"
@@ -95,9 +103,11 @@ func executeSystemBackupEvent(ctx context.Context, driver env.EnvironmentDriver,
 	result := SystemBackupOperationResult{Operation: eventType, BackupDir: firstNonEmpty(stringTarget(target, "backupDir"), "/tmp/mycel-system-backups"), HostDir: expandTargetPath(firstNonEmpty(stringTarget(target, "hostDir"), filepath.Join(os.TempDir(), "{runID}-system-backup")), environment, resources)}
 	switch eventType {
 	case "system-backup-fixture":
-		_, _, _, err := executeUserBackupFixture(ctx, driver, environment, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}, resources, target)
+		fixture, _, _, err := executeUserBackupFixture(ctx, driver, environment, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}, resources, target)
+		result.FixtureNodes, result.FixtureEdges, result.fixture = int64(fixture.NodesCreated), int64(fixture.EdgesCreated), &fixture
 		return result, err
 	case "cluster-backup-create":
+		result.fixture = state[systemBackupKey(target)].fixture
 		return executeClusterBackupCreate(ctx, driver, environment, scenario, target, result)
 	case "cluster-backup-validate":
 		return executeClusterBackupValidate(ctx, driver, environment, state, target, result)
@@ -105,9 +115,39 @@ func executeSystemBackupEvent(ctx context.Context, driver env.EnvironmentDriver,
 		return executeClusterRestoreApply(ctx, driver, environment, scenario, state, target, result)
 	case "cluster-restore-verify":
 		return executeClusterRestoreVerify(ctx, driver, environment, resources, state, target, result)
+	case "cluster-backup-cleanup":
+		backup := state[systemBackupKey(target)]
+		if strings.TrimSpace(backup.HostDir) == "" {
+			return result, fmt.Errorf("no cluster backup host directory recorded for %q", systemBackupKey(target))
+		}
+		if !safeSystemBackupHostDir(backup.HostDir) {
+			return result, errors.New("cluster backup host cleanup path is outside the managed temporary root")
+		}
+		if err := os.RemoveAll(backup.HostDir); err != nil {
+			return result, errors.New("remove cluster backup host directory")
+		}
+		if _, err := os.Stat(backup.HostDir); !os.IsNotExist(err) {
+			return result, errors.New("cluster backup host directory still exists after cleanup")
+		}
+		delete(state, systemBackupKey(target))
+		result.HostDir = ""
+		return result, nil
 	default:
 		return result, fmt.Errorf("unsupported system backup event type %q", eventType)
 	}
+}
+
+func safeSystemBackupHostDir(path string) bool {
+	root, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return false
+	}
+	candidate, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil || candidate == root {
+		return false
+	}
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
 }
 
 func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {
@@ -268,6 +308,7 @@ func stageClusterBackupForValidation(ctx context.Context, driver env.Environment
 
 func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, state map[string]SystemBackupOperationResult, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {
 	backup := state[systemBackupKey(target)]
+	result.BackupDir, result.HostDir, result.fixture = backup.BackupDir, backup.HostDir, backup.fixture
 	if len(backup.Artifacts) == 0 {
 		return result, fmt.Errorf("no cluster backup artifacts recorded for %q", systemBackupKey(target))
 	}
@@ -363,7 +404,13 @@ func restoreArtifactsForEnv(artifacts []SystemBackupArtifact) []env.RestoreArtif
 	return out
 }
 
+type systemBackupFixtureCounter func(context.Context, provision.ActorAssignment, int, userBackupFixtureResult) (int64, int64, error)
+
 func executeClusterRestoreVerify(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, state map[string]SystemBackupOperationResult, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {
+	return executeClusterRestoreVerifyWithCounter(ctx, driver, environment, resources, state, target, result, querySystemBackupFixtureCounts)
+}
+
+func executeClusterRestoreVerifyWithCounter(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, state map[string]SystemBackupOperationResult, target map[string]any, result SystemBackupOperationResult, countFixture systemBackupFixtureCounter) (SystemBackupOperationResult, error) {
 	actorID := firstNonEmpty(stringTarget(target, "actorId"), stringTarget(target, "sourceActorId"))
 	assignment, ok := findAssignment(resources, actorID)
 	if !ok {
@@ -407,7 +454,122 @@ func executeClusterRestoreVerify(ctx context.Context, driver env.EnvironmentDriv
 		}
 	}
 	result.VerifiedPods = len(verified)
+	expectedNodes := intTarget(target, "expectedNodes", 3)
+	expectedEdges := intTarget(target, "expectedEdges", 1)
+	if expectedNodes < 1 || expectedNodes > 100 || expectedEdges < 0 || expectedEdges > 100 {
+		return result, errors.New("restored system-backup fixture expectations are invalid")
+	}
+	fixture := state[systemBackupKey(target)].fixture
+	if fixture == nil || len(fixture.nodeIDs) != expectedNodes || fixture.edgeID == "" {
+		return result, errors.New("system-backup fixture identity checkpoint is unavailable")
+	}
+	nodeCount, edgeCount, err := countFixture(verifyCtx, assignment, expectedEdges, *fixture)
+	if err != nil {
+		return result, errors.New("restored system-backup fixture count verification failed")
+	}
+	result.FixtureNodes, result.FixtureEdges = nodeCount, edgeCount
+	if nodeCount != int64(expectedNodes) || edgeCount != int64(expectedEdges) {
+		return result, fmt.Errorf("restored system-backup fixture counts do not match expected nodes=%d edges=%d", expectedNodes, expectedEdges)
+	}
+	result.FixtureProved = true
 	return result, nil
+}
+
+func querySystemBackupFixtureCounts(ctx context.Context, assignment provision.ActorAssignment, expectedEdges int, fixture userBackupFixtureResult) (int64, int64, error) {
+	client, err := mycel.Dial(ctx, mycel.Config{Addr: assignment.DaemonAddr, Username: assignment.Username, Password: assignment.Password, ClientName: "mycel-lab-system-backup-verify"})
+	if err != nil {
+		return 0, 0, err
+	}
+	defer client.Close()
+	nodeResult, err := client.QueryGQLReadOnly(ctx, assignment.SpaceID, assignment.DomainID, "MATCH (n) RETURN count(n) FETCH FIRST 1 ROW ONLY", 1)
+	if err != nil {
+		return 0, 0, err
+	}
+	nodeCount, err := systemBackupCountFromResult(nodeResult)
+	if err != nil {
+		return 0, 0, err
+	}
+	sessionID, err := client.OpenSession(ctx, assignment.SpaceID, assignment.DomainID)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = client.CloseSession(ctx, sessionID) }()
+	transactionID, err := client.BeginReadOnlyTransaction(ctx, sessionID)
+	if err != nil {
+		return 0, 0, err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = client.CloseTransaction(ctx, transactionID)
+		}
+	}()
+	observedNodes := make([]*clientv1.Node, 0, len(fixture.nodeIDs))
+	for _, nodeID := range fixture.nodeIDs {
+		node, getErr := client.GetNode(ctx, transactionID, nodeID)
+		if getErr != nil {
+			return 0, 0, errors.New("restored system-backup fixture node identity mismatch")
+		}
+		observedNodes = append(observedNodes, node)
+	}
+	callCtx, cancel := client.AuthCallContext(ctx)
+	edgeResponse, edgeErr := client.Graph.GetEdge(callCtx, &clientv1.GetEdgeRequest{TransactionId: transactionID, EdgeId: fixture.edgeID})
+	cancel()
+	if edgeErr != nil || !systemBackupFixtureIdentityMatches(fixture, observedNodes, edgeResponse.GetEdge()) {
+		return 0, 0, errors.New("restored system-backup fixture identity mismatch")
+	}
+	var edgeCount int64
+	pageToken := ""
+	seenTokens := map[string]struct{}{}
+	for edgeCount <= int64(expectedEdges) {
+		callCtx, cancel := client.AuthCallContext(ctx)
+		response, listErr := client.Graph.ListEdges(callCtx, &clientv1.ListEdgesRequest{TransactionId: transactionID, PageSize: 100, PageToken: pageToken})
+		cancel()
+		if listErr != nil {
+			return 0, 0, listErr
+		}
+		edgeCount += int64(len(response.GetEdges()))
+		pageToken = response.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+		if _, duplicate := seenTokens[pageToken]; duplicate {
+			return 0, 0, errors.New("restored system-backup fixture edge pagination repeated")
+		}
+		seenTokens[pageToken] = struct{}{}
+	}
+	if err := client.CloseTransaction(ctx, transactionID); err != nil {
+		return 0, 0, err
+	}
+	closed = true
+	return nodeCount, edgeCount, nil
+}
+
+func systemBackupFixtureIdentityMatches(fixture userBackupFixtureResult, nodes []*clientv1.Node, edge *clientv1.Edge) bool {
+	if len(nodes) != len(fixture.nodeIDs) || edge == nil || edge.GetEdgeId() != fixture.edgeID || edge.GetFromNodeId() != fixture.edgeFrom || edge.GetToNodeId() != fixture.edgeTo {
+		return false
+	}
+	for index, nodeID := range fixture.nodeIDs {
+		if nodes[index] == nil || nodes[index].GetNodeId() != nodeID {
+			return false
+		}
+	}
+	return true
+}
+
+func systemBackupCountFromResult(result *clientv1.QueryResult) (int64, error) {
+	if len(result.GetRows()) != 1 {
+		return 0, errors.New("restored system-backup count query returned an invalid row count")
+	}
+	for _, value := range result.GetRows()[0].GetFields() {
+		if scalar := value.GetScalar(); scalar != nil {
+			number := scalar.GetNumberValue()
+			if math.Trunc(number) == number && number >= 0 {
+				return int64(number), nil
+			}
+		}
+	}
+	return 0, errors.New("restored system-backup count query did not return a nonnegative integer")
 }
 
 func systemBackupKey(target map[string]any) string {

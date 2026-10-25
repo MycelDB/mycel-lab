@@ -1,0 +1,11 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: procedure-inference-auditor
+  description: Read-only runtime actor with automation audit authority over a target writer scope.
+behavior:
+  type: procedure-inference-audit
+  targetGroups: [graph-writers]
+  identity:
+    mode: per-instance
+    principalPrefix: procedure-inference-auditor

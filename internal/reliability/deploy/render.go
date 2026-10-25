@@ -2,6 +2,10 @@ package deploy
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -39,6 +43,9 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_PARTITION_COUNT: %q\n", fmt.Sprint(cluster.Raft.PartitionCount))
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: %q\n", fmt.Sprint(cluster.Raft.ReplicaFactor))
 	fmt.Fprintf(&b, "  MYCELD_CLUSTER_RAFT_NODE_ADDRS: %q\n", strings.Join(raftNodeAddrs, ","))
+	if _, configured := cluster.Env["MYCELD_LOG_FORMAT"]; !configured {
+		fmt.Fprintf(&b, "  MYCELD_LOG_FORMAT: %q\n", "json")
+	}
 	for _, key := range sortedResourceKeys(cluster.Env) {
 		fmt.Fprintf(&b, "  %s: %q\n", key, cluster.Env[key])
 	}
@@ -47,6 +54,9 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	for i := 0; i < cluster.Nodes; i++ {
 		podName := fmt.Sprintf("myceld-%d", i)
 		fmt.Fprintf(&b, "apiVersion: v1\nkind: Service\nmetadata:\n  name: %s-client\n  namespace: %s\nspec:\n  selector:\n    statefulset.kubernetes.io/pod-name: %s\n  ports:\n    - name: grpc\n      port: 9091\n      targetPort: 9091\n---\n", podName, namespace, podName)
+	}
+	if err := renderProviderEmulator(&b, scenario, namespace); err != nil {
+		return ManifestSet{}, err
 	}
 	fmt.Fprintf(&b, "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: myceld\n  namespace: %s\nspec:\n  serviceName: myceld\n  replicas: %d\n  selector:\n    matchLabels:\n      app: myceld\n  template:\n    metadata:\n      labels:\n        app: myceld\n    spec:\n      containers:\n        - name: myceld\n          image: %s\n          imagePullPolicy: IfNotPresent\n          command:\n            - /bin/sh\n            - -ec\n            - |\n              ordinal=\"${HOSTNAME##*-}\"\n              export MYCELD_NODE_NAME=\"$HOSTNAME\"\n              export MYCELD_CLUSTER_RAFT_LOCAL_NODE_ID=\"$((ordinal + 1))\"\n              export MYCELD_CLUSTER_BACKEND_ADVERTISE_ADDR=\"$HOSTNAME.myceld.%s.svc.cluster.local:9091\"\n              exec myceld\n          envFrom:\n            - configMapRef:\n                name: myceld-config\n", namespace, cluster.Nodes, cluster.Image, namespace)
 	if len(cluster.Resources.Requests) > 0 || len(cluster.Resources.Limits) > 0 {
@@ -74,6 +84,36 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	}
 	fmt.Fprintf(&b, "        resources:\n          requests:\n            storage: %s\n", storageSize)
 	return ManifestSet{Namespace: namespace, StatefulSet: "myceld", YAML: b.String()}, nil
+}
+
+func renderProviderEmulator(b *bytes.Buffer, scenario spec.ResolvedScenario, namespace string) error {
+	if scenario.ProviderProfile == nil || string(scenario.ProviderProfile.Profile.Mode) != "emulator" {
+		return nil
+	}
+	capability, _, err := scenario.ProviderProfile.Profile.ProtocolEmulatorCapability()
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(capability.EmulatorScript)
+	if err != nil {
+		return fmt.Errorf("encode provider emulator script: %w", err)
+	}
+	script := base64.StdEncoding.EncodeToString(raw)
+	hash := sha256.Sum256(raw)
+	image := "local/mycel-provider-emulator:dev"
+	if configured, ok := scenario.Environment.Options["providerEmulatorImage"].(string); ok && strings.TrimSpace(configured) != "" {
+		image = strings.TrimSpace(configured)
+	}
+	fmt.Fprintf(b, "apiVersion: v1\nkind: Service\nmetadata:\n  name: mycel-provider-emulator\n  namespace: %s\nspec:\n  selector:\n    app: mycel-provider-emulator\n  ports:\n    - name: http\n      port: 18080\n      targetPort: 18080\n---\n", namespace)
+	fmt.Fprintf(b, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: mycel-provider-emulator\n  namespace: %s\n  annotations:\n    reliability.mycel.io/script-sha256: %q\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: mycel-provider-emulator\n  template:\n    metadata:\n      labels:\n        app: mycel-provider-emulator\n    spec:\n      securityContext:\n        fsGroup: 65532\n      containers:\n        - name: emulator\n          image: %s\n          imagePullPolicy: IfNotPresent\n          args: [\"serve\"]\n          env:\n            - name: MYCEL_EMULATOR_DIMENSIONS\n              value: %q\n            - name: MYCEL_EMULATOR_SCRIPT_B64\n              value: %q\n            - name: MYCEL_EMULATOR_OBSERVATIONS\n              value: /data/observations.jsonl\n          ports:\n            - name: http\n              containerPort: 18080\n          readinessProbe:\n            exec:\n              command: [\"/mycel-provider-emulator\", \"health\"]\n            initialDelaySeconds: 1\n            periodSeconds: 1\n            timeoutSeconds: 2\n          volumeMounts:\n            - name: observations\n              mountPath: /data\n      volumes:\n        - name: observations\n          emptyDir: {}\n---\n", namespace, hex.EncodeToString(hash[:]), image, fmt.Sprint(emulatorDimensions(capability.Dimensions)), script)
+	return nil
+}
+
+func emulatorDimensions(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return 8
 }
 
 func sortedResourceKeys(m map[string]string) []string {

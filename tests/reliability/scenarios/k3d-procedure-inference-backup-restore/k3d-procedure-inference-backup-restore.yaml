@@ -1,0 +1,146 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-procedure-inference-backup-restore
+  description: System backup/restore acceptance for procedure-inference ledgers, watermarks, run references, and control state.
+seed: 5052
+providerProfileRef: openai-compatible-procedure-emulator
+environment:
+  driver: k3d
+  namespace: mycel-procedure-inference-backup
+  options:
+    clusterNamePrefix: mlab-pib
+    createArguments: [--agents, "3", --timeout, 180s]
+    consolePortBase: 20191
+    providerEmulatorImage: local/mycel-provider-emulator:dev
+  capabilities:
+    required: [per-node-endpoints, node-exec, logs, volume-replacement, provider-emulator]
+clusterRef: raft-3-node
+clusterOverrides:
+  raft: {partitionCount: 4}
+actorGroups:
+  - name: graph-writers
+    profileRef: procedure-inference-writer
+    count: 1
+    rate: {mode: per-actor, commitsPerSecond: 0.0001}
+  - name: inference-auditors
+    profileRef: procedure-inference-auditor
+    count: 1
+    rate: {mode: per-actor, queriesPerSecond: 0.0001}
+    target: {actorGroups: [graph-writers]}
+  - name: system-backup-writers
+    profileRef: graph-committer
+    count: 1
+    rate: {mode: per-actor, commitsPerSecond: 0.0001}
+procedureInference:
+  targetActorGroup: graph-writers
+  auditActorGroup: inference-auditors
+  targetLabels: [ProcedureInferenceFixture]
+phases:
+  - name: establish-backed-up-attempt
+    duration: 1ms
+    events:
+      - type: cluster-recovery-wait
+        target: {timeout: 2m, interval: 200ms, commandTimeout: 3s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
+      - type: procedure-inference-setup
+        target: {timeout: 30s}
+      - type: system-backup-fixture
+        target:
+          actorId: system-backup-writers-0
+          label: procedure-inference-system-backup-fixture
+          blobPayload: bounded procedure inference backup fixture
+          ordinal: 0
+      - type: procedure-inference-node-create
+        target: {nodeId: 00000000-0000-4000-8000-000000005201, text: bounded backed up fixture, timeout: 30s}
+      - type: procedure-inference-await-terminal
+        target: {timeout: 2m, interval: 200ms, stableFor: 3s, minimumAttempts: 1, maximumAttempts: 1, requireSucceeded: true, requireChanges: true, checkpoint: backed-up-ledger}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
+      - type: procedure-inference-control
+        target: {action: disable, timeout: 30s, checkpoint: disabled-barrier}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
+  - name: capture-system-backup
+    duration: 1ms
+    events:
+      - type: cluster-backup-create
+        target:
+          backupDir: /tmp/mycel-system-backups
+          hostDir: "{tempDir}/{runID}-procedure-inference-system-backup"
+          archiveFormat: tar
+          reason: procedure inference ledger and control recovery
+          convergenceTimeout: 10m
+          waitTimeout: 15m
+      - type: cluster-backup-validate
+        target: {backupDir: /tmp/mycel-system-backups, ordinal: 0}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
+  - name: create-post-backup-negative-control
+    duration: 1ms
+    events:
+      - type: procedure-inference-control
+        target: {action: enable, timeout: 30s}
+      - type: procedure-inference-node-create
+        target: {nodeId: 00000000-0000-4000-8000-000000005202, text: bounded post backup fixture, timeout: 30s}
+      - type: procedure-inference-await-terminal
+        target: {timeout: 2m, interval: 200ms, stableFor: 3s, minimumAttempts: 2, maximumAttempts: 2, requireSucceeded: true, requireChanges: true}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 2, maximumRequests: 2, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 2}, minimumStatuses: {"200": 2}}
+  - name: restore-fresh-pvcs
+    duration: 1ms
+    events:
+      - type: cluster-restore-apply
+        target: {backup: default, statefulSet: myceld}
+      - type: cluster-recovery-wait
+        target: {timeout: 2m, interval: 500ms, commandTimeout: 5s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 0, maximumRequests: 0, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent}
+  - name: verify-restored-ledger-and-watermarks
+    duration: 1ms
+    events:
+      - type: cluster-restore-verify
+        target: {actorId: system-backup-writers-0, verifyTimeout: 5m, verifyInterval: 5s, expectedNodes: 3, expectedEdges: 1}
+      - type: procedure-inference-await-terminal
+        target: {timeout: 1m, interval: 500ms, stableFor: 3s, minimumAttempts: 1, maximumAttempts: 1, requireSucceeded: true, requireChanges: true, compareCheckpoint: backed-up-ledger}
+      - type: procedure-inference-control
+        target: {action: disable, timeout: 30s, compareCheckpoint: disabled-barrier}
+      - type: procedure-inference-node-create
+        target: {nodeId: 00000000-0000-4000-8000-000000005203, text: bounded restored disabled fixture, timeout: 30s}
+      - type: procedure-inference-await-terminal
+        target: {timeout: 30s, interval: 500ms, stableFor: 3s, minimumAttempts: 1, maximumAttempts: 1, requireSucceeded: true, requireChanges: true, compareCheckpoint: backed-up-ledger}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 0, maximumRequests: 0, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent}
+      - type: procedure-inference-control
+        target: {action: enable, timeout: 30s}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 0, maximumRequests: 0, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent}
+      - type: procedure-inference-node-create
+        target: {nodeId: 00000000-0000-4000-8000-000000005204, text: bounded restored enabled fixture, timeout: 30s}
+      - type: procedure-inference-await-terminal
+        target: {timeout: 2m, interval: 500ms, stableFor: 3s, minimumAttempts: 2, maximumAttempts: 2, requireSucceeded: true, requireChanges: true}
+      - type: procedure-inference-emulator-assert
+        target:
+          minimumRequests: 1
+          maximumRequests: 1
+          requireSingleItem: true
+          maximumBatchItems: 1
+          maximumAttemptsPerInput: 1
+          authorization: absent
+          expectedModels: [procedure-generation-v1]
+          minimumOutcomes: {success: 1}
+          minimumStatuses: {"200": 1}
+      - type: procedure-inference-capacity-diagnostics-assert
+        target: {timeout: 30s, tail: 5000, requirePressure: false}
+      - type: cluster-backup-cleanup
+        target: {backup: default}
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+artifacts:
+  collectScenarioSpec: true
+  collectKubernetesState: true
+  collectProviderEvidence: true
+  collectActorEvents: true
+  redactSecrets: true

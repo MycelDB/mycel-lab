@@ -185,6 +185,18 @@ func TestLiveProfileRequiresFiniteProviderBounds(t *testing.T) {
 	}
 }
 
+func TestResolveAcceptsExplicitEmulatorGenerationContract(t *testing.T) {
+	profile, source := mustLoadProfile(t, "openai-compatible-procedure-emulator.yaml")
+	resolved, err := Resolve(profile, source, ResolveOptions{DryRun: true, RequiredCapabilities: []string{"generation"}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	capability, name, err := resolved.Profile.ProtocolEmulatorCapability()
+	if err != nil || name != "generation" || capability.ProviderModelName != "procedure-generation-v1" {
+		t.Fatalf("generation emulator capability=%+v name=%q err=%v", capability, name, err)
+	}
+}
+
 func TestResolveRejectsUnavailableDeclaredCapability(t *testing.T) {
 	profile, source := mustLoadProfile(t, "deterministic-token-basis-v1.yaml")
 	copy := *profile.Capabilities.Embedding

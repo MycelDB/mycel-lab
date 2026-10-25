@@ -477,7 +477,11 @@ func executeSemanticGraphMutation(ctx context.Context, resources *provision.Scen
 	if actorGroup == "<nil>" {
 		actorGroup = ""
 	}
-	client, assignment, err := dialSemanticActorGroup(ctx, resources, actorGroup)
+	fallbackActorID := ""
+	if resources != nil && resources.Semantic != nil {
+		fallbackActorID = resources.Semantic.TargetActorID
+	}
+	client, assignment, err := dialGraphActorGroup(ctx, resources, actorGroup, fallbackActorID)
 	if err != nil {
 		return SemanticGraphMutationResult{}, err
 	}
@@ -557,6 +561,9 @@ func executeSemanticGraphMutation(ctx context.Context, resources *provision.Scen
 	committed = true
 	result := SemanticGraphMutationResult{Action: eventType, NodeID: nodeID, TransactionID: txID, CommitID: commit.GetCommitId(), CommittedRevision: commit.GetCommittedRevision()}
 	if capture := targetString(target, "captureRevisionAs"); capture != "" {
+		if resources.Semantic == nil {
+			return SemanticGraphMutationResult{}, errors.New("semantic revision capture requires semantic resources")
+		}
 		resources.Semantic.EvidenceValues[capture] = strconv.FormatInt(result.CommittedRevision, 10)
 	}
 	return result, nil
@@ -822,24 +829,31 @@ func dialSemanticActorGroup(ctx context.Context, resources *provision.ScenarioRe
 	if resources == nil || resources.Semantic == nil {
 		return nil, provision.ActorAssignment{}, errors.New("semantic resources are not provisioned")
 	}
+	return dialGraphActorGroup(ctx, resources, groupName, resources.Semantic.TargetActorID)
+}
+
+func dialGraphActorGroup(ctx context.Context, resources *provision.ScenarioResources, groupName, fallbackActorID string) (*mycel.Client, provision.ActorAssignment, error) {
+	if resources == nil {
+		return nil, provision.ActorAssignment{}, errors.New("graph actor resources are not provisioned")
+	}
 	for _, assignment := range resources.Assignments {
 		if groupName != "" {
 			if assignment.GroupName != groupName {
 				continue
 			}
-		} else if assignment.ActorID != resources.Semantic.TargetActorID {
+		} else if assignment.ActorID != fallbackActorID {
 			continue
 		}
 		if assignment.AccessToken == "" {
-			return nil, assignment, errors.New("semantic actor access token is unavailable")
+			return nil, assignment, errors.New("graph actor access token is unavailable")
 		}
-		client, err := mycel.Dial(ctx, mycel.Config{Addr: assignment.DaemonAddr, AccessToken: assignment.AccessToken, RefreshToken: assignment.RefreshToken, ClientName: "mycel-lab-semantic"})
+		client, err := mycel.Dial(ctx, mycel.Config{Addr: assignment.DaemonAddr, AccessToken: assignment.AccessToken, RefreshToken: assignment.RefreshToken, ClientName: "mycel-lab-graph-mutation"})
 		if err != nil {
-			return nil, assignment, fmt.Errorf("dial semantic actor: %w", err)
+			return nil, assignment, fmt.Errorf("dial graph actor: %w", err)
 		}
 		return client, assignment, nil
 	}
-	return nil, provision.ActorAssignment{}, errors.New("semantic target actor assignment was not found")
+	return nil, provision.ActorAssignment{}, errors.New("graph target actor assignment was not found")
 }
 
 func targetString(target map[string]any, key string) string {

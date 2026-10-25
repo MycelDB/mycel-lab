@@ -530,6 +530,30 @@ Acceptance:
 - daemon, emulator/provider, and harness request, attempt, and batch-item accounting reconcile or fail the run;
 - SGT9 cannot start when a required enforcement capability is absent.
 
+#### SGT1b superseding procedure-inference acceptance interpretation
+
+The client-managed budget API described above is no longer the planned public
+contract. The daemon now owns provider reservations/accounting and exposes only
+sanitized, read-only procedure-inference attempts, typed runs, immutable changes,
+and control barriers. Ordinary graph clients neither discover that a procedure
+uses inference nor provision enforcement scopes. `mycel-api#37` tracks only any
+remaining read-only diagnostics proven necessary by acceptance evidence.
+
+Mycel Lab issue [#50](https://github.com/MycelDB/mycel-lab/issues/50) supplies the
+provider-neutral acceptance layer. Its Compose emulator suite proves lifecycle,
+attribution, snapshot-to-poll continuity, typed run references, completed
+control barriers, disabled-work exclusion, and artifact sanitization. Its k3d
+suites prove restart/replay and system backup/restore preservation. The suite
+uses the local emulator and finite provider/harness budgets; it never calls a
+live provider. Extreme 10,000-attempt and 64 MiB boundary arithmetic remains
+daemon unit/race coverage rather than routine environment load.
+
+SGT1b is accepted only when a separately approved run records the exact daemon
+image digest and harness revision, passes redaction, and receives independent
+evidence review. SGT9 remains blocked until then. This section supersedes the
+public client-managed scope/API sequencing above; the historical frozen SGT0
+contract remains unchanged.
+
 ### SGT2: Deterministic daemon embedding prerequisite
 
 Repositories: `mycel`, then `mycel-lab` fixture goldens

@@ -92,6 +92,9 @@ func TestLedgerAccountsProviderDimensionsAtomically(t *testing.T) {
 	}
 	reservation.Release()
 	snapshot := ledger.Snapshot()
+	if snapshot.AccountingScope != "harness-originated-reservations" {
+		t.Fatalf("accounting scope=%q", snapshot.AccountingScope)
+	}
 	if snapshot.ProviderRequests != 2 || snapshot.Retries != 1 || snapshot.InputTokens != 10 || snapshot.OutputTokens != 5 || snapshot.EstimatedCostUSD != 0.5 {
 		t.Fatalf("unexpected accounting: %#v", snapshot)
 	}

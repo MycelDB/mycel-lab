@@ -34,7 +34,7 @@ artifacts:
 
 Profiles live under `tests/reliability/provider-profiles/`. They are strict: unknown fields, unsupported versions, invalid dimensions, unbounded orchestration, unsupported declared capabilities, and inconsistent mode/secret combinations fail resolution. Profile documents are byte-bounded, fixed-depth typed structures.
 
-Capability slots are independent. The v1alpha1 harness resolves embeddings. Generation, enrichment, structured-output, and routing slots are reserved but fail as unavailable when declared. Deterministic mode supports the daemon's explicit `fake`/`token-basis-v1` contract. Emulator and live embedding profiles currently support `openai-compatible`; Anthropic and OpenRouter are not inferred from provider names and remain unsupported until matching connectors and pipelines exist.
+Capability slots are independent. The v1alpha1 harness resolves exactly one capability required by the scenario: semantic scenarios select embedding, while procedure-inference scenarios select generation. Other declared slots fail closed rather than being ignored. Deterministic mode supports the daemon's explicit embedding `fake`/`token-basis-v1` contract. Emulator and live embedding or generation profiles support `openai-compatible`; Anthropic and OpenRouter are not inferred from provider names and remain unsupported until matching connectors and pipelines exist.
 
 A scenario selects a profile with `providerProfileRef`. `--provider-profile <name-or-path>` overrides only that selection. Resolution records the selection source and SHA-256 of the exact profile bytes in `provider/provider-profile-resolved.json` and the resolved scenario.
 
@@ -48,6 +48,12 @@ secretRef:
 ```
 
 Deterministic and emulator profiles reject secret references. Live execution resolves referenced environment variables only after non-secret profile and enforcement validation. Dry-runs never read credential values. Resolved JSON, catalog records, events, metrics, errors, and artifacts never include resolved values.
+
+## Local protocol emulator scripts
+
+An emulator embedding or generation capability may include a bounded `emulatorScript` (`version: v1`). The schema accepts only a finite request ceiling and a finite digest-keyed outcome sequence. Inputs are selected by SHA-256; source text is never part of the profile. Supported OpenAI-compatible outcomes are success, HTTP error, malformed JSON, truncated JSON, refusal, and wrong dimensions, with bounded delay and `Retry-After` values. Safe request/model identity fields reject control characters and whitespace.
+
+The dedicated `mycel-provider-emulator` command serves only `/healthz`, `/v1/embeddings`, and `/v1/chat/completions`. Compose gives it no host port; k3d uses an internal ClusterIP Service. The environment driver records the exact runtime image ID, script hash, bounded logs, and sanitized JSONL observations. An observation contains method, path, content length, capability, bounded model identities, sequence, attempt, batch count, body/input digests, outcome/status, cancellation, and authorization presence plus an allowlisted `Bearer`/`Basic`/`Other` scheme classification—never body text, vectors, generation output, authorization/arbitrary header values, or credentials. Generation observations also omit provider request IDs. Scenario assertions require contiguous sequence numbers, valid digests, declared batching, bounded attempts/counts, and exact or minimum safe protocol categories.
 
 ## Budgets and enforcement
 
@@ -66,7 +72,7 @@ Provider-owned limits are declared independently:
 
 A required limit resolves only when the responsible daemon/provider capability is advertised by trusted daemon/provider preflight. The bundled `openai-compatible-live` profile is an SGT1 contract fixture and intentionally cannot run until SGT1b adds that trusted discovery and enforcement path. Operators cannot assert enforcement with a CLI flag. A field is never labeled enforced merely because it exists. Advisory unavailable fields are recorded as `advisory`; required unavailable fields fail closed. SGT1b remains responsible for atomic daemon-side provider reservations and durable usage accounting.
 
-Reservations are atomic. Each provider-profile run owns one ledger and total-deadline context. Scenario provisioning, each finite runtime event, and each actor graph operation reserve before work; later semantic admin/search operations must use the same gate as they are added. Exhaustion cancels scheduling, closes the ledger to new work, fails the run, and persists `provider/budget-final.json`. Releasing a reservation reduces only in-flight concurrency; cumulative use is never refunded. Each operation context uses the earlier of request and total deadlines.
+Reservations are atomic. Each provider-profile run owns one ledger and total-deadline context. Scenario provisioning, each finite runtime event, and each actor graph operation reserve before work; later semantic admin/search operations must use the same gate as they are added. Exhaustion cancels scheduling, closes the ledger to new work, fails the run, and persists `provider/budget-final.json`. Its `accountingScope` is `harness-originated-reservations`: daemon-originated provider requests are counted authoritatively by validated emulator observations or daemon durable usage evidence, not by this harness ledger. Releasing a reservation reduces only in-flight concurrency; cumulative use is never refunded. Each operation context uses the earlier of request and total deadlines.
 
 ## Redaction and final gate
 

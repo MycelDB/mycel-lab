@@ -43,7 +43,7 @@ func (r KubernetesRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec,
 	defer release()
 	ctx = operationCtx
 	if recorder != nil {
-		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"dryRun": dryRun, "runtime": "kubernetes"}}); err != nil {
+		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"dryRun": dryRun, "runtime": "kubernetes"}}); err != nil {
 			return err
 		}
 	}
@@ -65,7 +65,7 @@ func (r KubernetesRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec,
 		}
 	}
 	if recorder != nil {
-		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"runtime": "kubernetes"}})
+		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"runtime": "kubernetes"}})
 	}
 	return nil
 }
@@ -136,7 +136,7 @@ func (r KubernetesRuntime) runner() executil.Runner {
 
 func (r KubernetesRuntime) recordFailure(ctx context.Context, recorder Recorder, phase spec.PhaseSpec, event spec.EventSpec, err error) error {
 	if recorder != nil {
-		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"error": err.Error(), "runtime": "kubernetes"}})
+		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"error": err.Error(), "runtime": "kubernetes"}})
 	}
 	return err
 }

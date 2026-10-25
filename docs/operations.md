@@ -176,12 +176,69 @@ mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
+mycel-lab run suite k3d-semantic-graph-index-recovery --dry-run
+mycel-lab run suite semantic-protocol-emulator --dry-run
+mycel-lab run suite semantic-advanced-matrix --dry-run
+mycel-lab run suite compose-procedure-inference-control-emulator --dry-run
+mycel-lab run suite k3d-procedure-inference-recovery --dry-run
+mycel-lab run suite k3d-procedure-inference-backup-restore --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run
 mycel-lab run suite cluster-release-gate --dry-run
 ```
 
 Destructive/operator variants use the same suite names with
-`--confirm-destructive`. Restart-soak suites are native Mycel Lab k3d scenarios
+`--confirm-destructive`. Procedure-inference suites are credential-free but still
+modify disposable Compose/k3d state; issue #50 requires fresh approval before
+each real run. Before a destructive SGT7 or procedure-inference emulator run,
+build or supply the exact emulator image declared by the scenarios. Acceptance
+runs use revision-labelled images and a built Lab binary so artifacts bind the
+executables to clean full source revisions:
+
+```sh
+LAB_REVISION=$(git rev-parse HEAD)
+LAB_CONTEXT_DIGEST=$(git ls-files -s | shasum -a 256 | awk '{print $1}')
+EMULATOR_IMAGE="local/mycel-provider-emulator:${LAB_REVISION%%????????????????????????????????}"
+docker build --platform linux/arm64 -f Dockerfile.emulator \
+  --build-arg SOURCE_REVISION="$LAB_REVISION" \
+  --build-arg SOURCE_DIRTY=false \
+  --build-arg BUILD_CONTEXT_DIGEST="$LAB_CONTEXT_DIGEST" \
+  --build-arg BUILD_IDENTITY=docker-buildx-local-linux-arm64-emulator \
+  -t "$EMULATOR_IMAGE" .
+go build -trimpath -o ./bin/mycel-lab ./cmd/mycel-lab
+./bin/mycel-lab run suite compose-procedure-inference-control-emulator \
+  --confirm-destructive \
+  --environment-option providerEmulatorImage="$EMULATOR_IMAGE"
+```
+
+Daemon acceptance images are built from the common repository root, with the
+Mycel and API trees included in the context digest:
+
+```sh
+DAEMON_REVISION=$(git -C mycel rev-parse HEAD)
+DAEMON_CONTEXT_DIGEST=$({ git -C mycel ls-files -s; git -C mycel-api ls-files -s; } | shasum -a 256 | awk '{print $1}')
+docker build --platform linux/arm64 -f mycel/Dockerfile \
+  --build-arg SOURCE_REVISION="$DAEMON_REVISION" \
+  --build-arg SOURCE_DIRTY=false \
+  --build-arg BUILD_CONTEXT_DIGEST="$DAEMON_CONTEXT_DIGEST" \
+  --build-arg BUILD_IDENTITY=docker-buildx-local-linux-arm64 \
+  -t local/mycel:"${DAEMON_REVISION%%????????????????????????????????}" .
+```
+
+Do not set `SOURCE_DIRTY=false` unless each included source tree is clean.
+Non-dry-run procedure-inference scenarios fail closed before provisioning unless
+the Lab executable reports a clean full Git revision. They fail before actor or
+provider work unless the daemon and emulator images expose complete clean
+revision, context-digest, source, and build-identity labels. Pass the same
+`--environment-option providerEmulatorImage="$EMULATOR_IMAGE"` override to each
+approved k3d procedure-inference suite; the scenarios' `:dev` default is for
+non-acceptance development only.
+Legacy development-only emulator builds may still use:
+
+```sh
+make build-provider-emulator PROVIDER_EMULATOR_IMAGE=local/mycel-provider-emulator:dev
+```
+
+Restart-soak suites are native Mycel Lab k3d scenarios
 with repeated rotating `node-restart` events. `compose-user-backup-operations`
 is a native Compose smoke suite for `user-backup-export`,
 `user-backup-validate`, and `user-backup-import` operations through the

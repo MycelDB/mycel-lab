@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	clientv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/client/v1"
 )
 
 func TestClusterBackupCreateUsesAsyncStartWait(t *testing.T) {
@@ -88,12 +90,56 @@ func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) 
 func TestClusterRestoreVerifyRetriesUntilRestoredAuthIsReady(t *testing.T) {
 	driver := &restoreVerifyDriver{failuresRemaining: 2}
 	resources := &provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", Username: "writer", Password: "writer-pass", SpaceID: "space", DomainID: "domain"}}}
-	result, err := executeClusterRestoreVerify(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, resources, nil, map[string]any{"actorId": "writer-0", "verifyTimeout": "200ms", "verifyInterval": "1ms"}, SystemBackupOperationResult{Operation: "cluster-restore-verify"})
+	fixture := &userBackupFixtureResult{nodeIDs: []string{"a", "b", "blob"}, edgeID: "edge", edgeFrom: "a", edgeTo: "b"}
+	state := map[string]SystemBackupOperationResult{"default": {fixture: fixture}}
+	counterCalls := 0
+	result, err := executeClusterRestoreVerifyWithCounter(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, resources, state, map[string]any{"actorId": "writer-0", "verifyTimeout": "200ms", "verifyInterval": "1ms", "expectedNodes": 3, "expectedEdges": 1}, SystemBackupOperationResult{Operation: "cluster-restore-verify"}, func(context.Context, provision.ActorAssignment, int, userBackupFixtureResult) (int64, int64, error) {
+		counterCalls++
+		return 3, 1, nil
+	})
 	if err != nil {
 		t.Fatalf("executeClusterRestoreVerify() error=%v", err)
 	}
-	if result.VerifiedPods != 1 || driver.execCalls != 3 {
-		t.Fatalf("verifiedPods=%d execCalls=%d, want 1 pod after retries", result.VerifiedPods, driver.execCalls)
+	if result.VerifiedPods != 1 || driver.execCalls != 3 || !result.FixtureProved || result.FixtureNodes != 3 || result.FixtureEdges != 1 || counterCalls != 1 {
+		t.Fatalf("result=%+v execCalls=%d counterCalls=%d, want endpoint retries and exact fixture proof", result, driver.execCalls, counterCalls)
+	}
+}
+
+func TestClusterRestoreVerifyRejectsFixtureCountMismatch(t *testing.T) {
+	driver := &restoreVerifyDriver{}
+	resources := &provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", Username: "writer", Password: "writer-pass", SpaceID: "space", DomainID: "domain"}}}
+	fixture := &userBackupFixtureResult{nodeIDs: []string{"a", "b", "blob"}, edgeID: "edge", edgeFrom: "a", edgeTo: "b"}
+	state := map[string]SystemBackupOperationResult{"default": {fixture: fixture}}
+	_, err := executeClusterRestoreVerifyWithCounter(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, resources, state, map[string]any{"actorId": "writer-0", "verifyTimeout": "200ms", "verifyInterval": "1ms", "expectedNodes": 3, "expectedEdges": 1}, SystemBackupOperationResult{Operation: "cluster-restore-verify"}, func(context.Context, provision.ActorAssignment, int, userBackupFixtureResult) (int64, int64, error) {
+		return 4, 1, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "counts do not match") {
+		t.Fatalf("error=%v, want exact backed-up fixture count rejection", err)
+	}
+}
+
+func TestSystemBackupFixtureCheckpointDoesNotMarshalIdentities(t *testing.T) {
+	result := SystemBackupOperationResult{Operation: "system-backup-fixture", FixtureNodes: 3, FixtureEdges: 1, fixture: &userBackupFixtureResult{nodeIDs: []string{"secret-node"}, edgeID: "secret-edge", edgeFrom: "secret-from", edgeTo: "secret-to"}}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, `"fixtureNodes":3`) || !strings.Contains(text, `"fixtureEdges":1`) || strings.Contains(text, "secret-") {
+		t.Fatalf("unsafe or incomplete fixture evidence: %s", text)
+	}
+}
+
+func TestSystemBackupFixtureIdentityRequiresExactNodesAndEdge(t *testing.T) {
+	fixture := userBackupFixtureResult{nodeIDs: []string{"a", "b", "blob"}, edgeID: "edge", edgeFrom: "a", edgeTo: "b"}
+	nodes := []*clientv1.Node{{NodeId: "a"}, {NodeId: "b"}, {NodeId: "blob"}}
+	edge := &clientv1.Edge{EdgeId: "edge", FromNodeId: "a", ToNodeId: "b"}
+	if !systemBackupFixtureIdentityMatches(fixture, nodes, edge) {
+		t.Fatal("exact restored fixture identity rejected")
+	}
+	edge.ToNodeId = "other"
+	if systemBackupFixtureIdentityMatches(fixture, nodes, edge) {
+		t.Fatal("changed restored edge identity accepted")
 	}
 }
 
@@ -108,7 +154,8 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 	driver := &restoreApplyDriver{}
 	hostDir := t.TempDir()
 	writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"complete":true,"state":"succeeded","nodes":[{"applied_indexes":{"system":1}}]}`)
-	backup := SystemBackupOperationResult{BackupDir: "/tmp/mycel-system-backups", HostDir: hostDir, Artifacts: []SystemBackupArtifact{
+	fixture := &userBackupFixtureResult{nodeIDs: []string{"a", "b", "blob"}, edgeID: "edge", edgeFrom: "a", edgeTo: "b"}
+	backup := SystemBackupOperationResult{BackupDir: "/tmp/mycel-system-backups", HostDir: hostDir, fixture: fixture, Artifacts: []SystemBackupArtifact{
 		{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", ManifestName: "node-0.manifest.json", LocalArchive: "/tmp/node-0.tar", LocalManifest: "/tmp/node-0.manifest.json"},
 		{PodName: "myceld-1", Ordinal: 1, ArchiveName: "node-1.tar", ManifestName: "node-1.manifest.json", LocalArchive: "/tmp/node-1.tar", LocalManifest: "/tmp/node-1.manifest.json"},
 	}}
@@ -122,6 +169,9 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 	}
 	if len(result.OldPVCUIDs) != 2 || len(result.NewPVCUIDs) != 2 {
 		t.Fatalf("result PVC evidence old=%v new=%v", result.OldPVCUIDs, result.NewPVCUIDs)
+	}
+	if result.HostDir != hostDir || result.BackupDir != backup.BackupDir || result.fixture != fixture {
+		t.Fatalf("restore did not retain cleanup/checkpoint state: host=%q backup=%q fixture=%p", result.HostDir, result.BackupDir, result.fixture)
 	}
 	if !strings.Contains(result.RestorePlan, "restore plan") || len(result.RestoreResults) != 2 {
 		t.Fatalf("missing restore-plan/results evidence: plan=%q results=%+v", result.RestorePlan, result.RestoreResults)

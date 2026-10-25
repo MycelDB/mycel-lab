@@ -99,11 +99,18 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 		if err != nil {
 			return spec.ResolvedScenario{}, fmt.Errorf("provider profile: %w", err)
 		}
-		resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{DryRun: opts.ProviderDryRun, Selection: selection, Manifest: opts.ProviderManifest, LookupEnv: opts.ProviderLookupEnv})
+		requiredCapabilities := []string{"embedding"}
+		if scenario.ProcedureInference != nil {
+			requiredCapabilities = []string{"generation"}
+		}
+		resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{DryRun: opts.ProviderDryRun, Selection: selection, RequiredCapabilities: requiredCapabilities, Manifest: opts.ProviderManifest, LookupEnv: opts.ProviderLookupEnv})
 		if err != nil {
 			return spec.ResolvedScenario{}, fmt.Errorf("provider profile %q: %w", selectedProviderRef, err)
 		}
 		resolvedProvider = &resolved
+	}
+	if scenario.ProcedureInference != nil && (resolvedProvider == nil || resolvedProvider.Profile.Capabilities.Generation == nil) {
+		return spec.ResolvedScenario{}, fmt.Errorf("procedureInference requires a resolved generation capability")
 	}
 
 	groups := make([]spec.ResolvedActorGroup, 0, len(scenario.ActorGroups))
@@ -129,6 +136,7 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 		ProviderProfileRef: selectedProviderRef,
 		ProviderProfile:    resolvedProvider,
 		Semantic:           scenario.Semantic,
+		ProcedureInference: scenario.ProcedureInference,
 		ActorGroups:        groups,
 		Phases:             scenario.Phases,
 		Assertions:         scenario.Assertions,

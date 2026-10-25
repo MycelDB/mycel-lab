@@ -42,6 +42,7 @@ func TestRenderKubernetesManifestsReflectClusterProfile(t *testing.T) {
 		`MYCELD_CLUSTER_RAFT_PARTITION_COUNT: "32"`,
 		`MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: "3"`,
 		`MYCELD_CLUSTER_RAFT_NODE_ADDRS: "myceld-0.myceld.mycel-lab.svc.cluster.local:9091,myceld-1.myceld.mycel-lab.svc.cluster.local:9091,myceld-2.myceld.mycel-lab.svc.cluster.local:9091"`,
+		`MYCELD_LOG_FORMAT: "json"`,
 		"imagePullPolicy: IfNotPresent",
 		"mountPath: /data/mycel",
 		`export MYCELD_CLUSTER_RAFT_LOCAL_NODE_ID="$((ordinal + 1))"`,

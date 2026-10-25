@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +62,7 @@ type PhaseState struct {
 
 type harnessBuildIdentity struct {
 	BuildInfoAvailable bool              `json:"buildInfoAvailable"`
+	ExecutableSHA256   string            `json:"executableSHA256,omitempty"`
 	GoVersion          string            `json:"goVersion,omitempty"`
 	ModulePath         string            `json:"modulePath,omitempty"`
 	ModuleVersion      string            `json:"moduleVersion,omitempty"`
@@ -67,35 +71,37 @@ type harnessBuildIdentity struct {
 }
 
 type Result struct {
-	RunID          string                   `json:"runId"`
-	ScenarioName   string                   `json:"scenarioName"`
-	Status         RunStatus                `json:"status"`
-	DryRun         bool                     `json:"dryRun"`
-	StartedAt      time.Time                `json:"startedAt"`
-	FinishedAt     time.Time                `json:"finishedAt"`
-	ArtifactRoot   string                   `json:"artifactRoot"`
-	Phases         []PhaseState             `json:"phases"`
-	ProviderBudget *provider.BudgetSnapshot `json:"providerBudget,omitempty"`
+	RunID           string                   `json:"runId"`
+	ScenarioName    string                   `json:"scenarioName"`
+	Status          RunStatus                `json:"status"`
+	DryRun          bool                     `json:"dryRun"`
+	StartedAt       time.Time                `json:"startedAt"`
+	FinishedAt      time.Time                `json:"finishedAt"`
+	ArtifactRoot    string                   `json:"artifactRoot"`
+	Phases          []PhaseState             `json:"phases"`
+	ProviderBudget  *provider.BudgetSnapshot `json:"providerBudget,omitempty"`
+	FailureCategory string                   `json:"failureCategory,omitempty"`
 }
 
 type Options struct {
-	DryRun                   bool
-	ArtifactRoot             string
-	Store                    store.Store
-	ScenarioVersion          int
-	ConfirmDestructive       bool
-	KeepEnvironmentOnFailure bool
-	ConsoleEndpoints         bool
-	ConsolePortBase          int
-	EnvironmentOverride      *spec.EnvironmentSpec
-	ImageOverride            string
-	ProviderProfileOverride  string
-	ProviderManifest         provider.CapabilityManifest
-	ProfileDirs              []string
-	ProgressWriter           io.Writer
-	EnvironmentDriver        env.EnvironmentDriver
-	EventRuntime             events.Runtime
-	ActorFactory             actors.Factory
+	DryRun                       bool
+	ArtifactRoot                 string
+	Store                        store.Store
+	ScenarioVersion              int
+	ConfirmDestructive           bool
+	KeepEnvironmentOnFailure     bool
+	ConsoleEndpoints             bool
+	ConsolePortBase              int
+	EnvironmentOverride          *spec.EnvironmentSpec
+	ImageOverride                string
+	ProviderProfileOverride      string
+	ProviderManifest             provider.CapabilityManifest
+	ProfileDirs                  []string
+	ProgressWriter               io.Writer
+	EnvironmentDriver            env.EnvironmentDriver
+	EventRuntime                 events.Runtime
+	ActorFactory                 actors.Factory
+	harnessBuildIdentityOverride *harnessBuildIdentity
 }
 
 type SuiteResult struct {
@@ -158,7 +164,23 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		ctx, budgetCancel = budgetLedger.TotalContext(ctx)
 		defer budgetCancel()
 	}
+	var sensitiveCleanup func() error
+	sensitiveCleanupDone := false
 	finish := func(status RunStatus, runErr error) (Result, error) {
+		if sensitiveCleanup != nil && !sensitiveCleanupDone {
+			sensitiveCleanupDone = true
+			cleanupErr := sensitiveCleanup()
+			cleanupEvidence := map[string]any{"completed": cleanupErr == nil}
+			if cleanupErr != nil {
+				cleanupEvidence["errorCategory"] = "sensitive_host_cleanup_failed"
+				runErr = errors.Join(runErr, errors.New("sensitive host artifact cleanup failed"))
+				status = RunFailed
+			}
+			if _, writeErr := sink.WriteJSON("environment/sensitive-host-cleanup.json", cleanupEvidence); writeErr != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("write sensitive host cleanup evidence: %w", writeErr))
+				status = RunFailed
+			}
+		}
 		if budgetLedger != nil {
 			snapshot := budgetLedger.Snapshot()
 			if errors.Is(context.Cause(ctx), provider.ErrTotalTimeout) || !time.Now().UTC().Before(snapshot.Deadline) {
@@ -202,16 +224,24 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	applyComposeImageOverride(&effectiveEnvironment, imageOverride)
 	scenario.Environment = effectiveEnvironment
-	if err := writeInitialArtifacts(sink, scenario); err != nil {
+	buildIdentity := currentHarnessBuildIdentity()
+	if opts.harnessBuildIdentityOverride != nil {
+		buildIdentity = *opts.harnessBuildIdentityOverride
+	}
+	if err := writeInitialArtifacts(sink, scenario, buildIdentity); err != nil {
 		return finish(RunFailed, err)
 	}
+	if !opts.DryRun && requiresImmutableBuildProvenance(scenario) && !validHarnessBuildIdentity(buildIdentity) {
+		return finish(RunFailed, errors.New("immutable harness build provenance is required"))
+	}
 	if opts.Store != nil {
-		resolvedJSON, sanitizeErr := sanitizedJSON(sink, scenario)
+		evidenceScenario := evidenceSafeResolvedScenario(scenario)
+		resolvedJSON, sanitizeErr := sanitizedJSON(sink, evidenceScenario)
 		if sanitizeErr != nil {
 			return finish(RunFailed, sanitizeErr)
 		}
 		var runPhases []store.RunPhase
-		for _, phase := range scenario.Phases {
+		for _, phase := range evidenceScenario.Phases {
 			phaseJSON, sanitizeErr := sanitizedJSON(sink, phase)
 			if sanitizeErr != nil {
 				return finish(RunFailed, sanitizeErr)
@@ -230,27 +260,142 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if err := driver.Preflight(ctx, effectiveEnvironment); err != nil {
 		return finish(RunFailed, err)
 	}
-	environment, err := driver.Create(ctx, scenario, effectiveEnvironment)
-	if err != nil {
-		return finish(RunFailed, err)
+	retainEnvironmentOnFailure := opts.KeepEnvironmentOnFailure || effectiveEnvironment.KeepOnFailure
+	environment, createErr := driver.Create(ctx, scenario, effectiveEnvironment)
+	if createErr != nil && strings.TrimSpace(environment.Name) == "" {
+		return finish(RunFailed, createErr)
 	}
-	if err := driver.WaitReady(ctx, environment); err != nil {
-		return finish(RunFailed, err)
+	if environment.Metadata == nil {
+		environment.Metadata = map[string]string{}
+	}
+	if scenario.ProcedureInference != nil && environment.Metadata["providerEmulator"] == "true" {
+		environment.Metadata["requireNonemptyProviderEmulatorObservations"] = "true"
+	}
+	if requiresImmutableBuildProvenance(scenario) {
+		environment.Metadata["requireImageProvenance"] = strconv.FormatBool(!opts.DryRun)
 	}
 	cleanupEnvironment := true
-	runFailedAfterEnvironmentCreate := false
+	var resources provision.ScenarioResources
+	resourcesPlanned := false
+	scenarioCleanupCompleted := false
+	var endpointAddrs []string
 	defer func() {
-		if cleanupEnvironment && !(runFailedAfterEnvironmentCreate && opts.KeepEnvironmentOnFailure) {
-			_ = driver.Delete(context.Background(), environment)
+		if cleanupEnvironment && !retainEnvironmentOnFailure {
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			_ = driver.Delete(deleteCtx, environment)
+			cancel()
 		}
 	}()
+	cleanupAfterEnvironment := func(retentionRequested bool) error {
+		evidence := map[string]any{
+			"schemaVersion":            "reliability.mycel.io/post-run-cleanup/v1alpha1",
+			"retentionRequested":       retentionRequested,
+			"scenarioCleanupAttempted": scenarioCleanupCompleted,
+			"scenarioCleanupAttempts":  0,
+			"scenarioCleanupCompleted": scenarioCleanupCompleted,
+			"driverDeleteAttempts":     0,
+			"driverDeleteCompleted":    false,
+			"completed":                false,
+		}
+		if retentionRequested {
+			cleanupEnvironment = false
+			evidence["retained"] = true
+			_, writeErr := sink.WriteJSON("environment/post-run-cleanup.json", evidence)
+			return writeErr
+		}
+		errorCategories := []string{}
+		if resourcesPlanned && !scenarioCleanupCompleted {
+			evidence["scenarioCleanupAttempted"] = true
+			cleanupDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
+			attempts, cleanupErr := runBoundedCleanupAttempts(3, 60*time.Second, func(cleanupCtx context.Context) error {
+				return provision.CleanupScenario(cleanupCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun})
+			})
+			evidence["scenarioCleanupAttempts"] = attempts
+			if cleanupErr == nil {
+				scenarioCleanupCompleted = true
+				evidence["scenarioCleanupCompleted"] = true
+			}
+			if !scenarioCleanupCompleted {
+				errorCategories = append(errorCategories, "scenario_cleanup_failed")
+			}
+			_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
+		}
+		deleteCompleted := false
+		for attempt := 1; attempt <= 3; attempt++ {
+			evidence["driverDeleteAttempts"] = attempt
+			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			deleteErr := driver.Delete(deleteCtx, environment)
+			deleteCancel()
+			if deleteErr == nil {
+				deleteCompleted = true
+				break
+			}
+		}
+		cleanupEnvironment = false
+		if deleteCompleted {
+			evidence["driverDeleteCompleted"] = true
+		} else {
+			errorCategories = append(errorCategories, "environment_delete_failed")
+		}
+		verification := env.DeletionVerification{}
+		if verifier, ok := driver.(env.EnvironmentDeletionVerifier); ok {
+			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			observed, err := verifier.VerifyDeleted(verifyCtx, environment)
+			verifyCancel()
+			verification = observed
+			if err != nil {
+				errorCategories = append(errorCategories, "environment_absence_check_failed")
+			}
+		} else if !opts.DryRun {
+			errorCategories = append(errorCategories, "environment_absence_check_unsupported")
+		}
+		evidence["absenceCheck"] = verification
+		verificationComplete := verification.Supported && verification.Completed
+		if opts.DryRun && !verification.Supported {
+			verificationComplete = true
+		}
+		completed := len(errorCategories) == 0 && deleteCompleted && verificationComplete
+		evidence["completed"] = completed
+		if len(errorCategories) > 0 {
+			evidence["errorCategories"] = errorCategories
+		}
+		if _, err := sink.WriteJSON("environment/post-run-cleanup.json", evidence); err != nil {
+			return err
+		}
+		if !completed {
+			return errors.New("post-run cleanup did not complete")
+		}
+		return nil
+	}
+	primaryCaptureFailed := false
 	failAfterEnvironmentCreate := func(status RunStatus, err error) (Result, error) {
-		runFailedAfterEnvironmentCreate = true
-		captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		_ = driver.CaptureState(captureCtx, environment, sink)
-		cancel()
-		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "error": err.Error()}))
+		result.FailureCategory = "environment-failure"
+		var captureErr error
+		if primaryCaptureFailed {
+			captureErr = errors.New("primary environment state capture failed")
+		} else {
+			captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			captureErr = driver.CaptureState(captureCtx, environment, sink)
+			cancel()
+		}
+		captureEvent := "environment-failure-state-captured"
+		captureStatus := "completed"
+		if captureErr != nil {
+			captureEvent = "environment-failure-state-capture-failed"
+			captureStatus = "failed"
+		}
+		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow(captureEvent, "", "", map[string]any{"status": status, "errorCategory": "environment_failure", "captureStatus": captureStatus}))
+		if cleanupErr := cleanupAfterEnvironment(retainEnvironmentOnFailure); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+			status = RunFailed
+		}
 		return finish(status, err)
+	}
+	if createErr != nil {
+		return failAfterEnvironmentCreate(RunFailed, createErr)
+	}
+	if err := driver.WaitReady(ctx, environment); err != nil {
+		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	nodes, err := driver.Nodes(ctx, environment)
 	if err != nil {
@@ -264,30 +409,33 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	if err := driver.CaptureState(ctx, environment, sink); err != nil {
+		primaryCaptureFailed = true
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	endpoints := consoleEndpointsFromDriver(driverEndpoints)
-	endpointAddrs := endpointAddresses(endpoints)
-	resources, err := provision.PlanScenario(scenario, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: opts.DryRun})
+	endpointAddrs = endpointAddresses(endpoints)
+	resources, err = provision.PlanScenario(scenario, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: opts.DryRun})
 	if err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
+	resourcesPlanned = true
 	if _, err := sink.WriteJSON("environment/scenario-resources.json", resources); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	needsActorEndpoints := len(resources.Assignments) > 0
 	portForwardEnvironment := environment.Driver == "k3d"
+	var portForwardSession *env.ConsolePortForwardSession
 	needsProvisioningEndpoint := portForwardEnvironment && len(endpointAddrs) > 0
 	if (opts.ConsoleEndpoints || needsActorEndpoints || needsProvisioningEndpoint) && !opts.DryRun {
 		if _, err := sink.WriteJSON("environment/console-endpoints.json", endpoints); err != nil {
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if portForwardEnvironment {
-			session, err := env.StartConsolePortForwards(ctx, environment, endpoints)
+			portForwardSession, err = env.StartConsolePortForwards(ctx, environment, endpoints)
 			if err != nil {
 				return failAfterEnvironmentCreate(RunFailed, err)
 			}
-			defer session.Stop(context.Background())
+			defer portForwardSession.Stop(context.Background())
 		}
 		if opts.ConsoleEndpoints {
 			writeConsoleEndpoints(opts.ProgressWriter, endpoints)
@@ -314,6 +462,12 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
 		eventRuntime = defaultEventRuntime(opts, driver, environment, scenario, &resources)
+	}
+	if endpointAware, ok := eventRuntime.(interface{ SetEndpointRecovery(env.EndpointRecovery) }); ok && portForwardSession != nil {
+		endpointAware.SetEndpointRecovery(portForwardSession)
+	}
+	if cleaner, ok := eventRuntime.(interface{ CleanupSensitiveHostArtifacts() error }); ok {
+		sensitiveCleanup = cleaner.CleanupSensitiveHostArtifacts
 	}
 	assignmentMap := provision.AssignmentMap(resources)
 	if provisionDryRun {
@@ -424,6 +578,16 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if budgetErr := recorder.budgetError(); budgetErr != nil {
 		return failAfterEnvironmentCreate(RunFailed, budgetErr)
 	}
+	if !opts.DryRun && environment.Metadata["providerEmulator"] == "true" {
+		inspector, ok := driver.(env.ProviderEmulatorInspector)
+		if !ok {
+			return failAfterEnvironmentCreate(RunFailed, errors.New("provider emulator observation capture is unsupported"))
+		}
+		requireNonempty := environment.Metadata["requireNonemptyProviderEmulatorObservations"] == "true"
+		if err := captureFinalProviderEmulatorObservations(ctx, sink, inspector, environment, requireNonempty); err != nil {
+			return failAfterEnvironmentCreate(RunFailed, err)
+		}
+	}
 	if err := runFinalClusterAssertions(ctx, sink, scenario, driver, environment, nodes, !provisionDryRun); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
@@ -434,8 +598,23 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
+	scenarioCleanupCompleted = true
 	_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
+	if err := cleanupAfterEnvironment(false); err != nil {
+		return finish(RunFailed, err)
+	}
 	return finish(RunPassed, nil)
+}
+
+func captureFinalProviderEmulatorObservations(ctx context.Context, sink *artifacts.Sink, inspector env.ProviderEmulatorInspector, environment env.Environment, requireNonempty bool) error {
+	observations, err := inspector.ProviderEmulatorObservations(ctx, environment)
+	if err != nil {
+		return errors.New("capture final provider emulator observations failed")
+	}
+	if err := env.PersistProviderEmulatorObservations(sink, observations.Stdout, requireNonempty); err != nil {
+		return errors.New("persist final provider emulator observations failed")
+	}
+	return nil
 }
 
 func markLastPassedPhaseFailed(phases []PhaseState) {
@@ -566,11 +745,35 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 	return out, nil
 }
 
-func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario) error {
-	if _, err := sink.WriteJSON("harness-build.json", currentHarnessBuildIdentity()); err != nil {
+func evidenceSafeResolvedScenario(scenario spec.ResolvedScenario) spec.ResolvedScenario {
+	copy := scenario
+	copy.Phases = append([]spec.PhaseSpec(nil), scenario.Phases...)
+	for phaseIndex := range copy.Phases {
+		copy.Phases[phaseIndex].Events = append([]spec.EventSpec(nil), scenario.Phases[phaseIndex].Events...)
+		for eventIndex := range copy.Phases[phaseIndex].Events {
+			event := &copy.Phases[phaseIndex].Events[eventIndex]
+			if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
+				continue
+			}
+			target := make(map[string]any, len(event.Target))
+			for key, value := range event.Target {
+				if key == "text" || key == "nodeId" || key == "blobPayload" {
+					continue
+				}
+				target[key] = value
+			}
+			target["graphContentRedacted"] = true
+			event.Target = target
+		}
+	}
+	return copy
+}
+
+func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario, buildIdentity harnessBuildIdentity) error {
+	if _, err := sink.WriteJSON("harness-build.json", buildIdentity); err != nil {
 		return err
 	}
-	if _, err := sink.WriteJSON("resolved-scenario.json", scenario); err != nil {
+	if _, err := sink.WriteJSON("resolved-scenario.json", evidenceSafeResolvedScenario(scenario)); err != nil {
 		return err
 	}
 	if scenario.ProviderProfile != nil {
@@ -590,7 +793,7 @@ func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario)
 }
 
 func currentHarnessBuildIdentity() harnessBuildIdentity {
-	identity := harnessBuildIdentity{}
+	identity := harnessBuildIdentity{ExecutableSHA256: currentExecutableSHA256()}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return identity
@@ -612,6 +815,44 @@ func currentHarnessBuildIdentity() harnessBuildIdentity {
 	return identity
 }
 
+func requiresImmutableBuildProvenance(scenario spec.ResolvedScenario) bool {
+	return scenario.ProcedureInference != nil
+}
+
+func validHarnessBuildIdentity(identity harnessBuildIdentity) bool {
+	if len(identity.ExecutableSHA256) != sha256.Size*2 {
+		return false
+	}
+	if _, err := hex.DecodeString(identity.ExecutableSHA256); err != nil {
+		return false
+	}
+	revision := strings.TrimSpace(identity.VCS["vcs.revision"])
+	if len(revision) != 40 {
+		return false
+	}
+	if _, err := hex.DecodeString(revision); err != nil {
+		return false
+	}
+	return identity.VCS["vcs"] == "git" && identity.VCS["vcs.modified"] == "false"
+}
+
+func currentExecutableSHA256() string {
+	path, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
 func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder *runRecorder, resources provision.ScenarioResources, assertions map[string]any, live bool) error {
 	if recorder == nil {
 		return nil
@@ -628,9 +869,13 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 			failedReads++
 		}
 	}
+	expectedCounts, err := aggregateExpectedGraphCounts(expectedByActor)
+	if err != nil {
+		return err
+	}
 	report := finalOracleReport{
 		AcknowledgedTransactions: len(acknowledged),
-		ExpectedCounts:           oracle.ExpectedCounts(acknowledged),
+		ExpectedCounts:           expectedCounts,
 		ExpectedCountsByActor:    expectedByActor,
 		ReadChecks:               len(readChecks),
 		FailedReads:              failedReads,
@@ -901,6 +1146,26 @@ func cloneGraphCountsMap(in map[string]graphCounts) map[string]graphCounts {
 	return out
 }
 
+func aggregateExpectedGraphCounts(expectedByActor map[string]graphCounts) (oracle.Counts, error) {
+	var total graphCounts
+	for _, expected := range expectedByActor {
+		var err error
+		total, err = checkedAddGraphCounts(total, expected)
+		if err != nil {
+			return oracle.Counts{}, err
+		}
+	}
+	return oracle.Counts{Nodes: total.Nodes, Edges: total.Edges}, nil
+}
+
+func checkedAddGraphCounts(current, delta graphCounts) (graphCounts, error) {
+	maximumInt := int(^uint(0) >> 1)
+	if current.Nodes < 0 || current.Edges < 0 || delta.Nodes < 0 || delta.Edges < 0 || delta.Nodes > maximumInt-current.Nodes || delta.Edges > maximumInt-current.Edges {
+		return graphCounts{}, errors.New("expected graph counts overflow")
+	}
+	return graphCounts{Nodes: current.Nodes + delta.Nodes, Edges: current.Edges + delta.Edges}, nil
+}
+
 func countTransactionOps(tx oracle.Transaction) graphCounts {
 	var counts graphCounts
 	for _, op := range tx.Operations {
@@ -935,7 +1200,7 @@ func finalize(ctx context.Context, st store.Store, sink *artifacts.Sink, result 
 			return fmt.Errorf("write result artifact: %w", err)
 		}
 		artifactPaths = append(artifactPaths, path)
-		summary := report.RunSummary{RunID: result.RunID, ScenarioName: result.ScenarioName, Status: string(result.Status), StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, DryRun: result.DryRun, Artifacts: append([]string(nil), artifactPaths...)}
+		summary := report.RunSummary{RunID: result.RunID, ScenarioName: result.ScenarioName, Status: string(result.Status), StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, DryRun: result.DryRun, Artifacts: append([]string(nil), artifactPaths...), FailureCategory: result.FailureCategory}
 		for _, phase := range result.Phases {
 			actualDuration := time.Duration(0)
 			if !phase.StartedAt.IsZero() && !phase.FinishedAt.IsZero() {
@@ -1120,15 +1385,18 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 	switch event.Type {
 	case "graph-transaction-acknowledged":
 		r.mu.Lock()
-		r.acknowledged = append(r.acknowledged, event.Transaction)
 		if r.expectedByActor == nil {
 			r.expectedByActor = map[string]graphCounts{}
 		}
 		counts := countTransactionOps(event.Transaction)
 		current := r.expectedByActor[event.ActorID]
-		current.Nodes += counts.Nodes
-		current.Edges += counts.Edges
-		r.expectedByActor[event.ActorID] = current
+		updated, err := checkedAddGraphCounts(current, counts)
+		if err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		r.acknowledged = append(r.acknowledged, event.Transaction)
+		r.expectedByActor[event.ActorID] = updated
 		r.mu.Unlock()
 		_, _ = r.sink.AppendJSONL("actors/acknowledged-commits.jsonl", event.Transaction)
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName})
@@ -1166,6 +1434,42 @@ func (r *runRecorder) RecordRuntimeEvent(ctx context.Context, record events.Reco
 	if record.Type == "event-started" && (record.EventType == "pod-restart" || record.EventType == "rolling-restart") {
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "pod_restarts", 1, map[string]any{"phase": record.PhaseName, "eventType": record.EventType})
 	}
+	if err := r.recordRuntimeExpectedGraphCounts(record); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *runRecorder) recordRuntimeExpectedGraphCounts(record events.Record) error {
+	if record.Type != "event-completed" || record.EventType != "system-backup-fixture" {
+		return nil
+	}
+	if dryRun, _ := record.Payload["dryRun"].(bool); dryRun {
+		return nil
+	}
+	actorID, _ := record.Target["actorId"].(string)
+	actorID = strings.TrimSpace(actorID)
+	if actorID == "" {
+		actorID, _ = record.Target["sourceActorId"].(string)
+		actorID = strings.TrimSpace(actorID)
+	}
+	fixture, ok := record.Payload["systemBackup"].(events.SystemBackupOperationResult)
+	repeat, _ := record.Payload["repeat"].(int)
+	maximumInt := int64(^uint(0) >> 1)
+	if strings.TrimSpace(actorID) == "" || !ok || fixture.FixtureNodes <= 0 || fixture.FixtureEdges < 0 || repeat < 1 || fixture.FixtureNodes > maximumInt/int64(repeat) || fixture.FixtureEdges > maximumInt/int64(repeat) {
+		return errors.New("system-backup fixture expected graph counts are unavailable")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.expectedByActor == nil {
+		r.expectedByActor = map[string]graphCounts{}
+	}
+	current := r.expectedByActor[actorID]
+	updated, err := checkedAddGraphCounts(current, graphCounts{Nodes: int(fixture.FixtureNodes) * repeat, Edges: int(fixture.FixtureEdges) * repeat})
+	if err != nil {
+		return err
+	}
+	r.expectedByActor[actorID] = updated
 	return nil
 }
 
@@ -1213,6 +1517,22 @@ func appendMetric(ctx context.Context, st store.Store, sink *artifacts.Sink, run
 		return st.AppendMetric(ctx, store.RunMetric{RunID: runID, Name: name, Value: value, Labels: labelJSON})
 	}
 	return nil
+}
+
+func runBoundedCleanupAttempts(maxAttempts int, timeout time.Duration, cleanup func(context.Context) error) (int, error) {
+	if maxAttempts < 1 {
+		return 0, errors.New("cleanup attempts must be positive")
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		lastErr = cleanup(attemptCtx)
+		cancel()
+		if lastErr == nil {
+			return attempt, nil
+		}
+	}
+	return maxAttempts, lastErr
 }
 
 func appendEvent(ctx context.Context, st store.Store, sink *artifacts.Sink, runID string, event artifacts.Event) error {
