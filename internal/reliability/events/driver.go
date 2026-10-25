@@ -17,6 +17,8 @@ type DriverRuntime struct {
 	Environment                   env.Environment
 	Scenario                      spec.ResolvedScenario
 	Resources                     *provision.ScenarioResources
+	EndpointRecovery              env.EndpointRecovery
+	endpointProbe                 func(context.Context, *provision.ScenarioResources, string) (int, error)
 	userBackups                   map[string]UserBackupOperationResult
 	systemBackups                 map[string]SystemBackupOperationResult
 	procedureInferenceCheckpoints map[string]procedureInferenceCheckpoint
@@ -32,6 +34,10 @@ func NewDriverRuntimeWithResources(driver env.EnvironmentDriver, environment env
 
 func NewDriverRuntimeWithScenario(driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, resources *provision.ScenarioResources) *DriverRuntime {
 	return &DriverRuntime{Driver: driver, Environment: environment, Scenario: scenario, Resources: resources, userBackups: map[string]UserBackupOperationResult{}, systemBackups: map[string]SystemBackupOperationResult{}, procedureInferenceCheckpoints: map[string]procedureInferenceCheckpoint{}}
+}
+
+func (r *DriverRuntime) SetEndpointRecovery(recovery env.EndpointRecovery) {
+	r.EndpointRecovery = recovery
 }
 
 func (r *DriverRuntime) CleanupSensitiveHostArtifacts() error {
@@ -111,7 +117,7 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (map[string]any, error) {
 	switch event.Type {
 	case "pod-stop", "pod-restart", "pod-delete", "node-stop", "node-restart":
-		return nil, r.Driver.RestartNode(ctx, r.Environment, env.NodeRef{Name: nodeName(event.Target), Ordinal: nodeOrdinal(event.Target)})
+		return r.restartNodeAndRecoverEndpoint(ctx, event.Target)
 	case "rolling-restart":
 		return nil, r.Driver.RollingRestart(ctx, r.Environment)
 	case "statefulset-image-upgrade":

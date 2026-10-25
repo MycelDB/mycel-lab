@@ -424,17 +424,18 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	needsActorEndpoints := len(resources.Assignments) > 0
 	portForwardEnvironment := environment.Driver == "k3d"
+	var portForwardSession *env.ConsolePortForwardSession
 	needsProvisioningEndpoint := portForwardEnvironment && len(endpointAddrs) > 0
 	if (opts.ConsoleEndpoints || needsActorEndpoints || needsProvisioningEndpoint) && !opts.DryRun {
 		if _, err := sink.WriteJSON("environment/console-endpoints.json", endpoints); err != nil {
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if portForwardEnvironment {
-			session, err := env.StartConsolePortForwards(ctx, environment, endpoints)
+			portForwardSession, err = env.StartConsolePortForwards(ctx, environment, endpoints)
 			if err != nil {
 				return failAfterEnvironmentCreate(RunFailed, err)
 			}
-			defer session.Stop(context.Background())
+			defer portForwardSession.Stop(context.Background())
 		}
 		if opts.ConsoleEndpoints {
 			writeConsoleEndpoints(opts.ProgressWriter, endpoints)
@@ -461,6 +462,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
 		eventRuntime = defaultEventRuntime(opts, driver, environment, scenario, &resources)
+	}
+	if endpointAware, ok := eventRuntime.(interface{ SetEndpointRecovery(env.EndpointRecovery) }); ok && portForwardSession != nil {
+		endpointAware.SetEndpointRecovery(portForwardSession)
 	}
 	if cleaner, ok := eventRuntime.(interface{ CleanupSensitiveHostArtifacts() error }); ok {
 		sensitiveCleanup = cleaner.CleanupSensitiveHostArtifacts
