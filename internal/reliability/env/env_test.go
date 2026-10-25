@@ -255,13 +255,14 @@ func (r *deletionRunner) Run(_ context.Context, name string, args ...string) (ex
 }
 
 type composeCaptureRunner struct {
-	commands              []string
-	imageOutput           string
-	imageError            error
-	inspectOutput         string
-	inspectIdentityOutput string
-	diagnosticOutput      string
-	diagnosticError       error
+	commands                      []string
+	imageOutput                   string
+	imageError                    error
+	inspectOutput                 string
+	inspectIdentityOutput         string
+	inspectPlatformIdentityOutput string
+	diagnosticOutput              string
+	diagnosticError               error
 }
 
 func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
@@ -269,6 +270,9 @@ func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...strin
 	r.commands = append(r.commands, cmd)
 	if strings.Contains(cmd, " image inspect ") {
 		if strings.Contains(cmd, `"repoDigests"`) {
+			if strings.Contains(cmd, " --platform linux/arm64 ") && r.inspectPlatformIdentityOutput != "" {
+				return executil.Result{Command: cmd, Stdout: r.inspectPlatformIdentityOutput}, nil
+			}
 			return executil.Result{Command: cmd, Stdout: r.inspectIdentityOutput}, nil
 		}
 		return executil.Result{Command: cmd, Stdout: r.inspectOutput}, nil
@@ -310,7 +314,7 @@ func TestRunningImageSourceEvidenceBindsProvenanceToEquivalentRuntimeDigest(t *t
 			t.Fatalf("runtimeID=%q evidence=%+v", runtimeID, evidence)
 		}
 	}
-	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "docker image inspect "+configDigest) || strings.Count(commands, "image inspect mutable:configured") != 2 {
+	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "docker image inspect "+configDigest) || strings.Count(commands, "image inspect mutable:configured") != 2 || !strings.Contains(commands, "image inspect --platform linux/arm64 "+configDigest) {
 		t.Fatalf("configured identity was not captured atomically before immutable provenance inspection: %s", commands)
 	}
 	mismatchDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -325,6 +329,26 @@ func TestRunningImageSourceEvidenceBindsProvenanceToEquivalentRuntimeDigest(t *t
 	heterogeneous := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker://"+configDigest+"\ncontainerd://"+manifestDigest+"\n", nil)
 	if heterogeneous.ID != "" || len(heterogeneous.RunningImageIDs) != 2 || heterogeneous.Provenance.CaptureStatus != "unavailable" {
 		t.Fatalf("heterogeneous evidence accepted: %+v", heterogeneous)
+	}
+}
+
+func TestRunningImageSourceEvidenceBindsK3DPlatformManifestFromLocalOCIIndex(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const platformManifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	runner := &composeCaptureRunner{
+		inspectIdentityOutput:         `{"id":"` + indexDigest + `","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+		inspectPlatformIdentityOutput: `{"id":"` + platformManifestDigest + `","repoDigests":[]}`,
+		inspectOutput:                 `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+	}
+	evidence := runningImageSourceEvidence(context.Background(), runner, "local/mycel:head", "containerd://"+platformManifestDigest+"\n", nil)
+	if evidence.ConfiguredImageID != indexDigest || len(evidence.ConfiguredDigests) != 2 || evidence.ID != platformManifestDigest || !runningImageMatchesConfigured(evidence) || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") {
+		t.Fatalf("platform runtime manifest was not bound to configured OCI index: %+v", evidence)
+	}
+	commands := strings.Join(runner.commands, "\n")
+	if !strings.Contains(commands, "docker image inspect --platform linux/arm64 "+indexDigest) {
+		t.Fatalf("platform identity was not inspected: %s", commands)
 	}
 }
 

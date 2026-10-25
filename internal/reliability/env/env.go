@@ -1343,23 +1343,41 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 	configuredDigests := map[string]bool{}
 	if evidence.ImageOverride != "" {
 		const identityFormat = `{"id":{{json .Id}},"repoDigests":{{json .RepoDigests}}}`
-		if configured, err := runner.Run(ctx, "docker", "image", "inspect", evidence.ImageOverride, "--format", identityFormat); err == nil {
+		captureConfiguredIdentity := func(args ...string) {
+			configured, err := runner.Run(ctx, "docker", args...)
+			if err != nil {
+				return
+			}
 			var identity struct {
 				ID          string   `json:"id"`
 				RepoDigests []string `json:"repoDigests"`
 			}
-			if json.Unmarshal([]byte(strings.TrimSpace(configured.Stdout)), &identity) == nil {
-				evidence.ConfiguredImageID = canonicalImageDigest(identity.ID)
-				if evidence.ConfiguredImageID != "" {
-					configuredDigests[evidence.ConfiguredImageID] = true
-				}
-				for _, value := range identity.RepoDigests {
-					if digest := canonicalImageDigest(value); digest != "" {
-						configuredDigests[digest] = true
-					}
+			if json.Unmarshal([]byte(strings.TrimSpace(configured.Stdout)), &identity) != nil {
+				return
+			}
+			configuredID := canonicalImageDigest(identity.ID)
+			if evidence.ConfiguredImageID == "" {
+				evidence.ConfiguredImageID = configuredID
+			}
+			if configuredID != "" {
+				configuredDigests[configuredID] = true
+			}
+			for _, value := range identity.RepoDigests {
+				if digest := canonicalImageDigest(value); digest != "" {
+					configuredDigests[digest] = true
 				}
 			}
 		}
+		captureConfiguredIdentity("image", "inspect", evidence.ImageOverride, "--format", identityFormat)
+		// Docker's containerd image store reports an OCI index for an unqualified
+		// local tag, while k3d/containerd reports the selected platform manifest.
+		// Resolve the platform descriptor from the already captured immutable
+		// index, not the mutable tag, and bind both exact digests.
+		platformSource := evidence.ConfiguredImageID
+		if platformSource == "" {
+			platformSource = evidence.ImageOverride
+		}
+		captureConfiguredIdentity("image", "inspect", "--platform", "linux/arm64", platformSource, "--format", identityFormat)
 	}
 	for digest := range configuredDigests {
 		evidence.ConfiguredDigests = append(evidence.ConfiguredDigests, digest)
