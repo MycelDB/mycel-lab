@@ -568,6 +568,23 @@ func TestConfiguredImageConfigDigestPipelineContract(t *testing.T) {
 			}
 		})
 	}
+	t.Run("blocking producer is cancelled", func(t *testing.T) {
+		binDir := t.TempDir()
+		dockerPath := filepath.Join(binDir, "docker")
+		if err := os.WriteFile(dockerPath, []byte("#!/bin/sh\nsleep 60\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		if got := configuredImageConfigDigest(ctx, executil.LocalRunner{}, indexDigest, manifestDigest, "linux/arm64", 10*1024*1024); got != "" {
+			t.Fatalf("blocking producer returned digest %q", got)
+		}
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("blocking image pipeline exceeded cancellation bound: %s", elapsed)
+		}
+	})
 }
 
 func TestCanonicalImagePlatformIsAllowlisted(t *testing.T) {
