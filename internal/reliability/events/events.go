@@ -82,7 +82,7 @@ func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec,
 		}
 	}
 	if recorder != nil {
-		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event)})
+		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"dryRun": dryRun}})
 	}
 	return nil
 }

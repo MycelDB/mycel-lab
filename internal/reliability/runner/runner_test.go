@@ -25,6 +25,35 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
 
+func TestRunRecorderRegistersSystemBackupFixtureExpectedCounts(t *testing.T) {
+	recorder := &runRecorder{}
+	record := events.Record{Type: "event-completed", EventType: "system-backup-fixture", Target: map[string]any{"actorId": "backup-writer"}, Payload: map[string]any{"dryRun": false, "repeat": 1, "systemBackup": events.SystemBackupOperationResult{FixtureNodes: 3, FixtureEdges: 1}}}
+	if err := recorder.recordRuntimeExpectedGraphCounts(record); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.expectedByActor["backup-writer"]; got != (graphCounts{Nodes: 3, Edges: 1}) {
+		t.Fatalf("expected counts=%+v", got)
+	}
+	record.Payload["repeat"] = 2
+	if err := recorder.recordRuntimeExpectedGraphCounts(record); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.expectedByActor["backup-writer"]; got != (graphCounts{Nodes: 9, Edges: 3}) {
+		t.Fatalf("repeated expected counts=%+v", got)
+	}
+	if got := aggregateExpectedGraphCounts(recorder.expectedByActor); got.Nodes != 9 || got.Edges != 3 {
+		t.Fatalf("aggregate expected counts=%+v", got)
+	}
+	record.Payload["systemBackup"] = events.SystemBackupOperationResult{}
+	if err := recorder.recordRuntimeExpectedGraphCounts(record); err == nil {
+		t.Fatal("missing fixture counts accepted")
+	}
+	record.Payload = map[string]any{"dryRun": true, "repeat": 1}
+	if err := recorder.recordRuntimeExpectedGraphCounts(record); err != nil {
+		t.Fatalf("dry-run fixture planning rejected: %v", err)
+	}
+}
+
 type capturingRunStore struct {
 	*store.MemoryStore
 	run    store.Run

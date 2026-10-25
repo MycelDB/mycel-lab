@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -114,6 +115,18 @@ func TestClusterRestoreVerifyRejectsFixtureCountMismatch(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "counts do not match") {
 		t.Fatalf("error=%v, want exact backed-up fixture count rejection", err)
+	}
+}
+
+func TestSystemBackupFixtureCheckpointDoesNotMarshalIdentities(t *testing.T) {
+	result := SystemBackupOperationResult{Operation: "system-backup-fixture", FixtureNodes: 3, FixtureEdges: 1, fixture: &userBackupFixtureResult{nodeIDs: []string{"secret-node"}, edgeID: "secret-edge", edgeFrom: "secret-from", edgeTo: "secret-to"}}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, `"fixtureNodes":3`) || !strings.Contains(text, `"fixtureEdges":1`) || strings.Contains(text, "secret-") {
+		t.Fatalf("unsafe or incomplete fixture evidence: %s", text)
 	}
 }
 

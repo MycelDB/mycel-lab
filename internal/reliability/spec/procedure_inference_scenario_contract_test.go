@@ -104,8 +104,8 @@ func TestProcedureInferenceBackupRestoreScenarioRecoveryFences(t *testing.T) {
 		t.Fatalf("final provider and cleanup bounds are incomplete: %+v", final.Events[8:])
 	}
 	finalAssertions, _ := scenario.Assertions["final"].(map[string]any)
-	if finalAssertions["requireNoAcknowledgedGraphTransactionLoss"] == true {
-		t.Fatal("generic actor-count oracle must not replace exact system-backup fixture verification")
+	if finalAssertions["requireConvergedCounts"] != true || finalAssertions["requireNoAcknowledgedGraphTransactionLoss"] == true {
+		t.Fatalf("final assertions=%+v, want registered fixture convergence without generic transaction-loss claim", finalAssertions)
 	}
 }
 

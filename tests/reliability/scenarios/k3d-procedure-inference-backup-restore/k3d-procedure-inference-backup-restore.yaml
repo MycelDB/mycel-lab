@@ -133,6 +133,7 @@ assertions:
   final:
     requireHealthyCluster: true
     requireSharedClusterIdentity: true
+    requireConvergedCounts: true
 artifacts:
   collectScenarioSpec: true
   collectKubernetesState: true

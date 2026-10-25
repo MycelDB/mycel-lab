@@ -104,7 +104,7 @@ func executeSystemBackupEvent(ctx context.Context, driver env.EnvironmentDriver,
 	switch eventType {
 	case "system-backup-fixture":
 		fixture, _, _, err := executeUserBackupFixture(ctx, driver, environment, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}, resources, target)
-		result.fixture = &fixture
+		result.FixtureNodes, result.FixtureEdges, result.fixture = int64(fixture.NodesCreated), int64(fixture.EdgesCreated), &fixture
 		return result, err
 	case "cluster-backup-create":
 		result.fixture = state[systemBackupKey(target)].fixture

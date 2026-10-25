@@ -871,7 +871,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 	}
 	report := finalOracleReport{
 		AcknowledgedTransactions: len(acknowledged),
-		ExpectedCounts:           oracle.ExpectedCounts(acknowledged),
+		ExpectedCounts:           aggregateExpectedGraphCounts(expectedByActor),
 		ExpectedCountsByActor:    expectedByActor,
 		ReadChecks:               len(readChecks),
 		FailedReads:              failedReads,
@@ -1142,6 +1142,15 @@ func cloneGraphCountsMap(in map[string]graphCounts) map[string]graphCounts {
 	return out
 }
 
+func aggregateExpectedGraphCounts(expectedByActor map[string]graphCounts) oracle.Counts {
+	var counts oracle.Counts
+	for _, expected := range expectedByActor {
+		counts.Nodes += expected.Nodes
+		counts.Edges += expected.Edges
+	}
+	return counts
+}
+
 func countTransactionOps(tx oracle.Transaction) graphCounts {
 	var counts graphCounts
 	for _, op := range tx.Operations {
@@ -1407,6 +1416,35 @@ func (r *runRecorder) RecordRuntimeEvent(ctx context.Context, record events.Reco
 	if record.Type == "event-started" && (record.EventType == "pod-restart" || record.EventType == "rolling-restart") {
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "pod_restarts", 1, map[string]any{"phase": record.PhaseName, "eventType": record.EventType})
 	}
+	if err := r.recordRuntimeExpectedGraphCounts(record); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *runRecorder) recordRuntimeExpectedGraphCounts(record events.Record) error {
+	if record.Type != "event-completed" || record.EventType != "system-backup-fixture" {
+		return nil
+	}
+	if dryRun, _ := record.Payload["dryRun"].(bool); dryRun {
+		return nil
+	}
+	actorID, _ := record.Target["actorId"].(string)
+	fixture, ok := record.Payload["systemBackup"].(events.SystemBackupOperationResult)
+	repeat, _ := record.Payload["repeat"].(int)
+	maximumInt := int64(^uint(0) >> 1)
+	if strings.TrimSpace(actorID) == "" || !ok || fixture.FixtureNodes <= 0 || fixture.FixtureEdges < 0 || repeat < 1 || fixture.FixtureNodes > maximumInt/int64(repeat) || fixture.FixtureEdges > maximumInt/int64(repeat) {
+		return errors.New("system-backup fixture expected graph counts are unavailable")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.expectedByActor == nil {
+		r.expectedByActor = map[string]graphCounts{}
+	}
+	current := r.expectedByActor[actorID]
+	current.Nodes += int(fixture.FixtureNodes) * repeat
+	current.Edges += int(fixture.FixtureEdges) * repeat
+	r.expectedByActor[actorID] = current
 	return nil
 }
 

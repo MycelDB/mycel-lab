@@ -81,7 +81,7 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 	if err := validateEvent(event); err != nil {
 		return r.recordFailure(ctx, recorder, phase, event, nil, err)
 	}
-	completionPayload := map[string]any{"runtime": r.Environment.Driver}
+	completionPayload := map[string]any{"runtime": r.Environment.Driver, "dryRun": dryRun}
 	repeat := event.Repeat
 	if repeat <= 0 {
 		repeat = 1
