@@ -214,6 +214,43 @@ func TestK3DDriverCaptureStatePersistsClosedImageResolutionEvidenceBeforeRejecti
 	}
 }
 
+func TestK3DDriverCaptureStatePersistsEmulatorImageEvidenceBeforeRejection(t *testing.T) {
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const runtimeDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	runner := &composeCaptureRunner{
+		inspectIdentityOutput:  `{"id":"` + indexDigest + `","os":"linux","architecture":"arm64","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+		inspectPlatformOutputs: map[string]string{"linux/arm64": `{"id":"` + runtimeDigest + `","repoDigests":[]}`},
+		inspectOutput:          `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+		k3dDaemonImageIDs:      "containerd://" + runtimeDigest + "\ncontainerd://" + runtimeDigest + "\ncontainerd://" + runtimeDigest + "\n",
+		k3dPodNames:            "myceld-0\nmyceld-1\nmyceld-2\n",
+		k3dEmulatorImageError:  errors.New("secret emulator image command failure"),
+	}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test", Metadata: map[string]string{
+		"imageOverride":          "local/mycel:head",
+		"nodeCount":              "3",
+		"providerEmulator":       "true",
+		"providerEmulatorImage":  "local/mycel-provider-emulator:head",
+		"requireImageProvenance": "true",
+	}}
+	err = (K3DDriver{Confirmed: true, Runner: runner}).CaptureState(context.Background(), environment, sink)
+	if err == nil || err.Error() != "provider emulator running image provenance is incomplete or ambiguous" {
+		t.Fatalf("CaptureState() error=%v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(sink.Root(), "provider", "emulator-image.json"))
+	if readErr != nil {
+		t.Fatalf("read emulator image evidence: %v", readErr)
+	}
+	if !bytes.Contains(data, []byte(`"resolutionStatus": "image-id-unavailable"`)) || !bytes.Contains(data, []byte(`"expectedInstances": 1`)) || bytes.Contains(data, []byte("secret emulator image command failure")) {
+		t.Fatalf("unsafe or incomplete emulator image evidence: %s", data)
+	}
+}
+
 func TestK3DDriverWaitPVCsChecksEveryOrdinalPVC(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
@@ -335,16 +372,31 @@ type composeCaptureRunner struct {
 	diagnosticError               error
 	k3dDaemonImageIDs             string
 	k3dDaemonImageError           error
+	k3dPodNames                   string
+	k3dEmulatorImageIDs           string
+	k3dEmulatorImageError         error
+	inspectPlatformOutputs        map[string]string
 }
 
 func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, "get pods -l app=mycel-provider-emulator") && strings.Contains(cmd, "imageID") {
+		return executil.Result{Command: cmd, Stdout: r.k3dEmulatorImageIDs}, r.k3dEmulatorImageError
+	}
 	if strings.Contains(cmd, "get pods -l app=myceld") && strings.Contains(cmd, "imageID") {
 		return executil.Result{Command: cmd, Stdout: r.k3dDaemonImageIDs}, r.k3dDaemonImageError
 	}
+	if strings.Contains(cmd, "get pods -l app=myceld") && r.k3dPodNames != "" {
+		return executil.Result{Command: cmd, Stdout: r.k3dPodNames}, nil
+	}
 	if strings.Contains(cmd, " image inspect ") {
 		if strings.Contains(cmd, `"repoDigests"`) {
+			for platform, output := range r.inspectPlatformOutputs {
+				if strings.Contains(cmd, " --platform "+platform+" ") {
+					return executil.Result{Command: cmd, Stdout: output}, nil
+				}
+			}
 			if strings.Contains(cmd, " --platform linux/arm64 ") && r.inspectPlatformIdentityOutput != "" {
 				return executil.Result{Command: cmd, Stdout: r.inspectPlatformIdentityOutput}, nil
 			}
@@ -427,19 +479,29 @@ func TestRunningImageSourceEvidenceBindsK3DPlatformManifestFromLocalOCIIndex(t *
 	const revision = "0123456789abcdef0123456789abcdef01234567"
 	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
 	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	const platformManifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	runner := &composeCaptureRunner{
-		inspectIdentityOutput:         `{"id":"` + indexDigest + `","os":"linux","architecture":"arm64","repoDigests":["local/mycel@` + indexDigest + `"]}`,
-		inspectPlatformIdentityOutput: `{"id":"` + platformManifestDigest + `","repoDigests":[]}`,
-		inspectOutput:                 `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
-	}
-	evidence := runningImageSourceEvidence(context.Background(), runner, "local/mycel:head", "containerd://"+platformManifestDigest+"\n", nil)
-	if evidence.ConfiguredImageID != indexDigest || len(evidence.ConfiguredDigests) != 2 || evidence.ID != platformManifestDigest || !runningImageMatchesConfigured(evidence) || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") {
-		t.Fatalf("platform runtime manifest was not bound to configured OCI index: %+v", evidence)
-	}
-	commands := strings.Join(runner.commands, "\n")
-	if !strings.Contains(commands, "docker image inspect --platform linux/arm64 "+indexDigest) {
-		t.Fatalf("platform identity was not inspected: %s", commands)
+	for _, test := range []struct {
+		architecture           string
+		platformManifestDigest string
+	}{
+		{architecture: "arm64", platformManifestDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		{architecture: "amd64", platformManifestDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+	} {
+		t.Run(test.architecture, func(t *testing.T) {
+			platform := "linux/" + test.architecture
+			runner := &composeCaptureRunner{
+				inspectIdentityOutput:  `{"id":"` + indexDigest + `","os":"linux","architecture":"` + test.architecture + `","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+				inspectPlatformOutputs: map[string]string{platform: `{"id":"` + test.platformManifestDigest + `","repoDigests":[]}`},
+				inspectOutput:          `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+			}
+			evidence := runningImageSourceEvidence(context.Background(), runner, "local/mycel:head", "containerd://"+test.platformManifestDigest+"\n", nil)
+			if evidence.ConfiguredImageID != indexDigest || evidence.Platform != platform || len(evidence.ConfiguredDigests) != 2 || evidence.ID != test.platformManifestDigest || !runningImageMatchesConfigured(evidence) || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") {
+				t.Fatalf("platform runtime manifest was not bound to configured OCI index: %+v", evidence)
+			}
+			commands := strings.Join(runner.commands, "\n")
+			if !strings.Contains(commands, "docker image inspect --platform "+platform+" "+indexDigest) {
+				t.Fatalf("platform identity was not inspected: %s", commands)
+			}
+		})
 	}
 }
 
