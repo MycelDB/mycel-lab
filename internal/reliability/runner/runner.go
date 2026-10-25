@@ -83,23 +83,24 @@ type Result struct {
 }
 
 type Options struct {
-	DryRun                   bool
-	ArtifactRoot             string
-	Store                    store.Store
-	ScenarioVersion          int
-	ConfirmDestructive       bool
-	KeepEnvironmentOnFailure bool
-	ConsoleEndpoints         bool
-	ConsolePortBase          int
-	EnvironmentOverride      *spec.EnvironmentSpec
-	ImageOverride            string
-	ProviderProfileOverride  string
-	ProviderManifest         provider.CapabilityManifest
-	ProfileDirs              []string
-	ProgressWriter           io.Writer
-	EnvironmentDriver        env.EnvironmentDriver
-	EventRuntime             events.Runtime
-	ActorFactory             actors.Factory
+	DryRun                       bool
+	ArtifactRoot                 string
+	Store                        store.Store
+	ScenarioVersion              int
+	ConfirmDestructive           bool
+	KeepEnvironmentOnFailure     bool
+	ConsoleEndpoints             bool
+	ConsolePortBase              int
+	EnvironmentOverride          *spec.EnvironmentSpec
+	ImageOverride                string
+	ProviderProfileOverride      string
+	ProviderManifest             provider.CapabilityManifest
+	ProfileDirs                  []string
+	ProgressWriter               io.Writer
+	EnvironmentDriver            env.EnvironmentDriver
+	EventRuntime                 events.Runtime
+	ActorFactory                 actors.Factory
+	harnessBuildIdentityOverride *harnessBuildIdentity
 }
 
 type SuiteResult struct {
@@ -223,6 +224,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	applyComposeImageOverride(&effectiveEnvironment, imageOverride)
 	scenario.Environment = effectiveEnvironment
 	buildIdentity := currentHarnessBuildIdentity()
+	if opts.harnessBuildIdentityOverride != nil {
+		buildIdentity = *opts.harnessBuildIdentityOverride
+	}
 	if err := writeInitialArtifacts(sink, scenario, buildIdentity); err != nil {
 		return finish(RunFailed, err)
 	}
@@ -260,10 +264,13 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if createErr != nil && strings.TrimSpace(environment.Name) == "" {
 		return finish(RunFailed, createErr)
 	}
+	if environment.Metadata == nil {
+		environment.Metadata = map[string]string{}
+	}
+	if scenario.ProcedureInference != nil && environment.Metadata["providerEmulator"] == "true" {
+		environment.Metadata["requireNonemptyProviderEmulatorObservations"] = "true"
+	}
 	if requiresImmutableBuildProvenance(scenario) {
-		if environment.Metadata == nil {
-			environment.Metadata = map[string]string{}
-		}
 		environment.Metadata["requireImageProvenance"] = strconv.FormatBool(!opts.DryRun)
 	}
 	cleanupEnvironment := true
@@ -552,12 +559,13 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if budgetErr := recorder.budgetError(); budgetErr != nil {
 		return failAfterEnvironmentCreate(RunFailed, budgetErr)
 	}
-	if !opts.DryRun && environment.Driver != "dry-run" && environment.Metadata["providerEmulator"] == "true" {
+	if !opts.DryRun && environment.Metadata["providerEmulator"] == "true" {
 		inspector, ok := driver.(env.ProviderEmulatorInspector)
 		if !ok {
 			return failAfterEnvironmentCreate(RunFailed, errors.New("provider emulator observation capture is unsupported"))
 		}
-		if err := captureFinalProviderEmulatorObservations(ctx, sink, inspector, environment, scenario.ProcedureInference != nil); err != nil {
+		requireNonempty := environment.Metadata["requireNonemptyProviderEmulatorObservations"] == "true"
+		if err := captureFinalProviderEmulatorObservations(ctx, sink, inspector, environment, requireNonempty); err != nil {
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 	}

@@ -334,20 +334,20 @@ func TestRunScenarioRoutesImageOverrideThroughK3DClusterImageOnly(t *testing.T) 
 }
 
 func TestRunScenarioPersistsFinalProviderEmulatorObservations(t *testing.T) {
-	scenario := resolveFixtureScenario(t, "example.yaml")
-	scenario.Environment.Driver = "compose"
-	scenario.Environment.Options = map[string]any{"composeFile": "compose.yml"}
-	scenario.ActorGroups = nil
-	scenario.Phases = nil
+	scenario := resolveFixtureScenario(t, "compose-procedure-inference-control-emulator/compose-procedure-inference-control-emulator.yaml")
 	scenario.Assertions = nil
+	scenario.Phases = []spec.PhaseSpec{{Name: "first"}, {Name: "second"}}
 	observations := providerObservationJSONL(t, 2)
-	driver := &recordingDriver{omitEndpoints: true, providerEmulator: true, providerObservations: observations}
-	result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver})
+	driver := &recordingDriver{environmentDriver: "dry-run", providerEmulator: true, providerObservations: observations}
+	result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver, EventRuntime: orderingEventRuntime{driver: driver}, harnessBuildIdentityOverride: cleanTestHarnessBuildIdentity()})
 	if err != nil {
 		t.Fatalf("RunScenario() error=%v", err)
 	}
 	if driver.providerObservationCalls != 1 {
 		t.Fatalf("final provider observation captures=%d, want 1", driver.providerObservationCalls)
+	}
+	if got, want := strings.Join(driver.order, ","), "phase:first,phase:second,capture,delete"; got != want {
+		t.Fatalf("production ordering=%q, want %q", got, want)
 	}
 	raw, err := os.ReadFile(filepath.Join(result.ArtifactRoot, "provider", "emulator-observations.jsonl"))
 	if err != nil {
@@ -356,6 +356,62 @@ func TestRunScenarioPersistsFinalProviderEmulatorObservations(t *testing.T) {
 	decoded, err := emulator.DecodeObservationEvidence(string(raw))
 	if err != nil || len(decoded) != 2 {
 		t.Fatalf("persisted final observations count=%d err=%v raw=%q", len(decoded), err, raw)
+	}
+}
+
+func TestRunScenarioFinalProviderObservationFailuresRemainClosedAndCleanUp(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		captureErr error
+		prohibited string
+	}{
+		{name: "empty"},
+		{name: "malformed", output: `{"sequence":1,"unexpected":"unsafe-provider-evidence"}`, prohibited: "unsafe-provider-evidence"},
+		{name: "capture-error", captureErr: errors.New("raw provider failure"), prohibited: "raw provider failure"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := resolveFixtureScenario(t, "compose-procedure-inference-control-emulator/compose-procedure-inference-control-emulator.yaml")
+			scenario.Phases = []spec.PhaseSpec{{Name: "only"}}
+			scenario.Assertions = nil
+			driver := &recordingDriver{environmentDriver: "dry-run", providerEmulator: true, providerObservations: test.output, providerObservationErr: test.captureErr}
+			result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver, EventRuntime: orderingEventRuntime{driver: driver}, harnessBuildIdentityOverride: cleanTestHarnessBuildIdentity()})
+			if err == nil || result.Status != RunFailed {
+				t.Fatalf("RunScenario() status=%s error=%v, want failed", result.Status, err)
+			}
+			if strings.Contains(err.Error(), test.prohibited) && test.prohibited != "" {
+				t.Fatalf("returned error leaked raw evidence %q: %v", test.prohibited, err)
+			}
+			if !driver.deleted || !driver.verifiedDeleted {
+				t.Fatalf("failure cleanup incomplete: deleted=%t verified=%t", driver.deleted, driver.verifiedDeleted)
+			}
+			if got, want := strings.Join(driver.order, ","), "phase:only,capture,delete"; got != want {
+				t.Fatalf("failure ordering=%q, want %q", got, want)
+			}
+			cleanupRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "post-run-cleanup.json"))
+			if readErr != nil || !bytes.Contains(cleanupRaw, []byte(`"completed": true`)) {
+				t.Fatalf("cleanup evidence incomplete: err=%v raw=%s", readErr, cleanupRaw)
+			}
+			if test.prohibited != "" {
+				walkErr := filepath.WalkDir(result.ArtifactRoot, func(path string, entry os.DirEntry, walkErr error) error {
+					if walkErr != nil || entry.IsDir() {
+						return walkErr
+					}
+					raw, readErr := os.ReadFile(path)
+					if readErr != nil {
+						return readErr
+					}
+					if bytes.Contains(raw, []byte(test.prohibited)) {
+						t.Fatalf("artifact %s leaked %q", path, test.prohibited)
+					}
+					return nil
+				})
+				if walkErr != nil {
+					t.Fatal(walkErr)
+				}
+			}
+		})
 	}
 }
 
@@ -378,6 +434,15 @@ func TestCaptureFinalProviderEmulatorObservationsRequiresNonemptyValidEvidence(t
 	}
 }
 
+func cleanTestHarnessBuildIdentity() *harnessBuildIdentity {
+	return &harnessBuildIdentity{
+		ExecutableSHA256: strings.Repeat("a", 64),
+		VCS: map[string]string{
+			"vcs": "git", "vcs.revision": strings.Repeat("b", 40), "vcs.modified": "false",
+		},
+	}
+}
+
 func providerObservationJSONL(t *testing.T, count int) string {
 	t.Helper()
 	var lines strings.Builder
@@ -394,6 +459,15 @@ func providerObservationJSONL(t *testing.T, count int) string {
 		lines.WriteByte('\n')
 	}
 	return lines.String()
+}
+
+type orderingEventRuntime struct {
+	driver *recordingDriver
+}
+
+func (runtime orderingEventRuntime) ExecutePhaseEvents(_ context.Context, phase spec.PhaseSpec, _ bool, _ events.Recorder) error {
+	runtime.driver.order = append(runtime.driver.order, "phase:"+phase.Name)
+	return nil
 }
 
 type providerObservationInspector struct {
@@ -927,9 +1001,12 @@ type recordingDriver struct {
 	waitErr                  error
 	captured                 int
 	omitEndpoints            bool
+	environmentDriver        string
 	providerEmulator         bool
 	providerObservations     string
+	providerObservationErr   error
 	providerObservationCalls int
+	order                    []string
 	createdScenario          spec.ResolvedScenario
 	preflightEnvironmentSpec spec.EnvironmentSpec
 	createdEnvironmentSpec   spec.EnvironmentSpec
@@ -951,7 +1028,11 @@ func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenar
 	if d.providerEmulator {
 		metadata["providerEmulator"] = "true"
 	}
-	return env.Environment{Name: scenario.Metadata.Name, Driver: "test", Namespace: "test", Metadata: metadata}, nil
+	driverName := d.environmentDriver
+	if driverName == "" {
+		driverName = "test"
+	}
+	return env.Environment{Name: scenario.Metadata.Name, Driver: driverName, Namespace: "test", Metadata: metadata}, nil
 }
 func (d *recordingDriver) WaitReady(context.Context, env.Environment) error { return d.waitErr }
 func (d *recordingDriver) Nodes(context.Context, env.Environment) ([]env.Node, error) {
@@ -971,6 +1052,7 @@ func (d *recordingDriver) RestartNode(context.Context, env.Environment, env.Node
 }
 func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error { return nil }
 func (d *recordingDriver) Delete(context.Context, env.Environment) error {
+	d.order = append(d.order, "delete")
 	d.deleteCalls++
 	if d.deleteCalls <= d.deleteFailures {
 		return errors.New("unsafe delete detail")
@@ -991,6 +1073,7 @@ func (d *recordingDriver) CaptureState(_ context.Context, environment env.Enviro
 	return err
 }
 func (d *recordingDriver) ProviderEmulatorObservations(context.Context, env.Environment) (env.ExecResult, error) {
+	d.order = append(d.order, "capture")
 	d.providerObservationCalls++
-	return env.ExecResult{Stdout: d.providerObservations}, nil
+	return env.ExecResult{Stdout: d.providerObservations}, d.providerObservationErr
 }
