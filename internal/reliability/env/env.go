@@ -1264,22 +1264,25 @@ func (d ComposeDriver) CopyToNode(ctx context.Context, environment Environment, 
 }
 
 type composeImageEvidence struct {
-	Service              string                `json:"service,omitempty"`
-	ImageOverride        string                `json:"imageOverride,omitempty"`
-	ConfiguredImageID    string                `json:"configuredImageId,omitempty"`
-	ConfiguredDigests    []string              `json:"configuredDigests,omitempty"`
-	RunningConfigDigests []string              `json:"runningConfigDigests,omitempty"`
-	ScriptSHA256         string                `json:"scriptSHA256,omitempty"`
-	ID                   string                `json:"id"`
-	RunningImageIDs      []string              `json:"runningImageIds,omitempty"`
-	ContainerName        string                `json:"containerName,omitempty"`
-	Repository           string                `json:"repository,omitempty"`
-	Tag                  string                `json:"tag,omitempty"`
-	Platform             string                `json:"platform,omitempty"`
-	ExpectedInstances    int                   `json:"expectedInstances,omitempty"`
-	ObservedInstances    int                   `json:"observedInstances,omitempty"`
-	ResolutionStatus     string                `json:"resolutionStatus,omitempty"`
-	Provenance           imageSourceProvenance `json:"provenance"`
+	Service                          string                `json:"service,omitempty"`
+	ImageOverride                    string                `json:"imageOverride,omitempty"`
+	ConfiguredImageID                string                `json:"configuredImageId,omitempty"`
+	ConfiguredDigests                []string              `json:"configuredDigests,omitempty"`
+	ConfiguredPlatformManifestDigest string                `json:"configuredPlatformManifestDigest,omitempty"`
+	ConfiguredConfigDigest           string                `json:"configuredConfigDigest,omitempty"`
+	ConfiguredPlatformSizeBytes      int64                 `json:"configuredPlatformSizeBytes,omitempty"`
+	RunningConfigDigests             []string              `json:"runningConfigDigests,omitempty"`
+	ScriptSHA256                     string                `json:"scriptSHA256,omitempty"`
+	ID                               string                `json:"id"`
+	RunningImageIDs                  []string              `json:"runningImageIds,omitempty"`
+	ContainerName                    string                `json:"containerName,omitempty"`
+	Repository                       string                `json:"repository,omitempty"`
+	Tag                              string                `json:"tag,omitempty"`
+	Platform                         string                `json:"platform,omitempty"`
+	ExpectedInstances                int                   `json:"expectedInstances,omitempty"`
+	ObservedInstances                int                   `json:"observedInstances,omitempty"`
+	ResolutionStatus                 string                `json:"resolutionStatus,omitempty"`
+	Provenance                       imageSourceProvenance `json:"provenance"`
 }
 
 type imageSourceProvenance struct {
@@ -1361,20 +1364,25 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 	evidence := composeImageEvidence{ImageOverride: strings.TrimSpace(imageOverride), Provenance: imageSourceProvenance{CaptureStatus: "unavailable"}}
 	configuredDigests := map[string]bool{}
 	if evidence.ImageOverride != "" {
-		const identityFormat = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"repoDigests":{{json .RepoDigests}}}`
-		captureConfiguredIdentity := func(args ...string) string {
+		const identityFormat = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"size":{{json .Size}},"repoDigests":{{json .RepoDigests}}}`
+		type configuredIdentity struct {
+			digest    string
+			sizeBytes int64
+		}
+		captureConfiguredIdentity := func(args ...string) configuredIdentity {
 			configured, err := runner.Run(ctx, "docker", args...)
 			if err != nil {
-				return ""
+				return configuredIdentity{}
 			}
 			var identity struct {
 				ID           string   `json:"id"`
 				OS           string   `json:"os"`
 				Architecture string   `json:"architecture"`
+				Size         int64    `json:"size"`
 				RepoDigests  []string `json:"repoDigests"`
 			}
 			if json.Unmarshal([]byte(strings.TrimSpace(configured.Stdout)), &identity) != nil {
-				return ""
+				return configuredIdentity{}
 			}
 			configuredID := canonicalImageDigest(identity.ID)
 			if evidence.ConfiguredImageID == "" {
@@ -1389,7 +1397,7 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 					configuredDigests[digest] = true
 				}
 			}
-			return configuredID
+			return configuredIdentity{digest: configuredID, sizeBytes: identity.Size}
 		}
 		captureConfiguredIdentity("image", "inspect", evidence.ImageOverride, "--format", identityFormat)
 		// Docker's containerd image store reports an OCI index for an unqualified
@@ -1397,8 +1405,11 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 		// Resolve the platform descriptor from the already captured immutable
 		// index, not the mutable tag, and bind both exact digests.
 		if evidence.ConfiguredImageID != "" && evidence.Platform != "" {
-			platformManifestDigest := captureConfiguredIdentity("image", "inspect", "--platform", evidence.Platform, evidence.ConfiguredImageID, "--format", identityFormat)
-			if configDigest := configuredImageConfigDigest(ctx, runner, evidence.ConfiguredImageID, platformManifestDigest); configDigest != "" {
+			platformIdentity := captureConfiguredIdentity("image", "inspect", "--platform", evidence.Platform, evidence.ConfiguredImageID, "--format", identityFormat)
+			evidence.ConfiguredPlatformManifestDigest = platformIdentity.digest
+			evidence.ConfiguredPlatformSizeBytes = platformIdentity.sizeBytes
+			if configDigest := configuredImageConfigDigest(ctx, runner, evidence.ConfiguredImageID, platformIdentity.digest, evidence.Platform, platformIdentity.sizeBytes); configDigest != "" {
+				evidence.ConfiguredConfigDigest = configDigest
 				configuredDigests[configDigest] = true
 			}
 		}
@@ -1435,16 +1446,20 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 	return evidence
 }
 
-func configuredImageConfigDigest(ctx context.Context, runner executil.Runner, immutableImageDigest, platformManifestDigest string) string {
+func configuredImageConfigDigest(ctx context.Context, runner executil.Runner, immutableImageDigest, platformManifestDigest, platform string, platformSizeBytes int64) string {
 	immutableImageDigest = canonicalImageDigest(immutableImageDigest)
 	platformManifestDigest = canonicalImageDigest(platformManifestDigest)
-	if immutableImageDigest == "" || platformManifestDigest == "" {
+	platform = canonicalImagePlatform(strings.TrimSpace(strings.SplitN(platform, "/", 2)[0]), strings.TrimSpace(strings.TrimPrefix(platform, "linux/")))
+	const maxPlatformImageBytes = int64(512 * 1024 * 1024)
+	if immutableImageDigest == "" || platformManifestDigest == "" || platform == "" || platformSizeBytes <= 0 || platformSizeBytes > maxPlatformImageBytes {
 		return ""
 	}
 	const maxManifestBytes = 1024 * 1024
 	const script = `set -o pipefail
-	docker image save "$1" | tar -xOf - "blobs/sha256/${2#sha256:}" | head -c 1048577`
-	result, err := runner.Run(ctx, "bash", "-c", script, "mycel-lab-image-config", immutableImageDigest, platformManifestDigest)
+	docker image save --platform "$3" "$1" 2>/dev/null | tar -xOf - "blobs/sha256/${2#sha256:}" 2>/dev/null | head -c 1048577`
+	inspectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	result, err := runner.Run(inspectCtx, "bash", "-c", script, "mycel-lab-image-config", immutableImageDigest, platformManifestDigest, platform)
 	if err != nil || len(result.Stdout) == 0 || len(result.Stdout) > maxManifestBytes {
 		return ""
 	}

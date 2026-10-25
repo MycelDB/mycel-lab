@@ -1,6 +1,7 @@
 package env
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -211,6 +212,41 @@ func TestK3DDriverCaptureStatePersistsClosedImageResolutionEvidenceBeforeRejecti
 				t.Fatalf("unsafe or incomplete image evidence: %s", data)
 			}
 		})
+	}
+}
+
+func TestK3DDriverCaptureStatePersistsConfiguredImageGraphBeforeMismatchRejection(t *testing.T) {
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const configDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	const otherRuntimeDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	runner := &composeCaptureRunner{
+		inspectIdentityOutput:         `{"id":"` + indexDigest + `","os":"linux","architecture":"arm64","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+		inspectPlatformOutputs:        map[string]string{"linux/arm64": `{"id":"` + manifestDigest + `","size":12345,"repoDigests":[]}`},
+		inspectPlatformManifestOutput: `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + configDigest + `"}}`,
+		k3dDaemonImageIDs:             "containerd://" + otherRuntimeDigest + "\ncontainerd://" + otherRuntimeDigest + "\ncontainerd://" + otherRuntimeDigest + "\n",
+	}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test", Metadata: map[string]string{
+		"imageOverride":          "local/mycel:head",
+		"nodeCount":              "3",
+		"requireImageProvenance": "true",
+	}}
+	err = (K3DDriver{Confirmed: true, Runner: runner}).CaptureState(context.Background(), environment, sink)
+	if err == nil || err.Error() != "daemon running image provenance is incomplete or heterogeneous" {
+		t.Fatalf("CaptureState() error=%v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(sink.Root(), "environment", "daemon-image.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, want := range []string{`"configuredPlatformManifestDigest": "` + manifestDigest + `"`, `"configuredConfigDigest": "` + configDigest + `"`, `"configuredPlatformSizeBytes": 12345`, `"resolutionStatus": "configured-runtime-mismatch"`} {
+		if !bytes.Contains(data, []byte(want)) {
+			t.Fatalf("configured image graph evidence missing %s: %s", want, data)
+		}
 	}
 }
 
@@ -450,11 +486,85 @@ func TestConfiguredImageConfigDigestIsBoundedAndFailClosed(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &composeCaptureRunner{inspectPlatformManifestOutput: test.output, inspectPlatformManifestError: test.err}
-			if got := configuredImageConfigDigest(context.Background(), runner, indexDigest, manifestDigest); got != test.want {
+			if got := configuredImageConfigDigest(context.Background(), runner, indexDigest, manifestDigest, "linux/arm64", 1024); got != test.want {
 				t.Fatalf("configuredImageConfigDigest()=%q want %q", got, test.want)
 			}
 			if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "head -c 1048577") || !strings.Contains(commands, indexDigest) || !strings.Contains(commands, manifestDigest) {
 				t.Fatalf("config inspection was not immutable and bounded: %s", commands)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name, platform string
+		size           int64
+	}{
+		{name: "missing size", platform: "linux/arm64"},
+		{name: "oversized platform", platform: "linux/arm64", size: 512*1024*1024 + 1},
+		{name: "unsupported platform", platform: "linux/arm64/v8", size: 1024},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &composeCaptureRunner{inspectPlatformManifestOutput: `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + configDigest + `"}}`}
+			if got := configuredImageConfigDigest(context.Background(), runner, indexDigest, manifestDigest, test.platform, test.size); got != "" || len(runner.commands) != 0 {
+				t.Fatalf("unbounded config inspection was attempted: got=%q commands=%v", got, runner.commands)
+			}
+		})
+	}
+}
+
+func TestConfiguredImageConfigDigestPipelineContract(t *testing.T) {
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const configDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	blobPath := "blobs/sha256/" + strings.TrimPrefix(manifestDigest, "sha256:")
+	writeArchive := func(t *testing.T, member string, content []byte) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "image.tar")
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer := tar.NewWriter(file)
+		if err := writer.WriteHeader(&tar.Header{Name: member, Mode: 0o600, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(content); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	validManifest := []byte(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + configDigest + `"}}`)
+	for _, test := range []struct {
+		name       string
+		member     string
+		content    []byte
+		producerRC string
+		want       string
+	}{
+		{name: "selected child config", member: blobPath, content: validManifest, want: configDigest},
+		{name: "missing selected child", member: "blobs/sha256/" + strings.Repeat("d", 64), content: validManifest},
+		{name: "producer failure", member: blobPath, content: validManifest, producerRC: "7"},
+		{name: "manifest exceeds limit", member: blobPath, content: bytes.Repeat([]byte("x"), 1024*1024+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			archive := writeArchive(t, test.member, test.content)
+			binDir := t.TempDir()
+			dockerPath := filepath.Join(binDir, "docker")
+			script := "#!/bin/sh\ncat \"$FAKE_DOCKER_ARCHIVE\"\nexit \"${FAKE_DOCKER_EXIT:-0}\"\n"
+			if err := os.WriteFile(dockerPath, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FAKE_DOCKER_ARCHIVE", archive)
+			t.Setenv("FAKE_DOCKER_EXIT", test.producerRC)
+			got := configuredImageConfigDigest(context.Background(), executil.LocalRunner{}, indexDigest, manifestDigest, "linux/arm64", 10*1024*1024)
+			if got != test.want {
+				t.Fatalf("configuredImageConfigDigest()=%q want %q", got, test.want)
 			}
 		})
 	}
@@ -525,12 +635,12 @@ func TestRunningImageSourceEvidenceBindsK3DPlatformManifestFromLocalOCIIndex(t *
 			platform := "linux/" + test.architecture
 			runner := &composeCaptureRunner{
 				inspectIdentityOutput:         `{"id":"` + indexDigest + `","os":"linux","architecture":"` + test.architecture + `","repoDigests":["local/mycel@` + indexDigest + `"]}`,
-				inspectPlatformOutputs:        map[string]string{platform: `{"id":"` + test.platformManifestDigest + `","repoDigests":[]}`},
+				inspectPlatformOutputs:        map[string]string{platform: `{"id":"` + test.platformManifestDigest + `","size":12345,"repoDigests":[]}`},
 				inspectPlatformManifestOutput: `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + test.configDigest + `"}}`,
 				inspectOutput:                 `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
 			}
 			evidence := runningImageSourceEvidence(context.Background(), runner, "local/mycel:head", "containerd://"+test.configDigest+"\n", nil)
-			if evidence.ConfiguredImageID != indexDigest || evidence.Platform != platform || len(evidence.ConfiguredDigests) != 3 || evidence.ID != test.configDigest || !runningImageMatchesConfigured(evidence) || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") {
+			if evidence.ConfiguredImageID != indexDigest || evidence.Platform != platform || len(evidence.ConfiguredDigests) != 3 || evidence.ConfiguredPlatformManifestDigest != test.platformManifestDigest || evidence.ConfiguredConfigDigest != test.configDigest || evidence.ConfiguredPlatformSizeBytes != 12345 || evidence.ID != test.configDigest || !runningImageMatchesConfigured(evidence) || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") {
 				t.Fatalf("platform runtime manifest was not bound to configured OCI index: %+v", evidence)
 			}
 			commands := strings.Join(runner.commands, "\n")
