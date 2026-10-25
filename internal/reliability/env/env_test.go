@@ -164,6 +164,56 @@ func TestK3DDriverCaptureStateWritesArtifacts(t *testing.T) {
 	}
 }
 
+func TestK3DDriverCaptureStatePersistsClosedImageResolutionEvidenceBeforeRejection(t *testing.T) {
+	const runtimeDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	tests := []struct {
+		name       string
+		runner     *composeCaptureRunner
+		wantStatus string
+	}{
+		{
+			name: "configured runtime mismatch",
+			runner: &composeCaptureRunner{
+				inspectIdentityOutput: `{}`,
+				k3dDaemonImageIDs:     "containerd://" + runtimeDigest + "\ncontainerd://" + runtimeDigest + "\ncontainerd://" + runtimeDigest + "\n",
+			},
+			wantStatus: "configured-runtime-mismatch",
+		},
+		{
+			name: "image ID unavailable",
+			runner: &composeCaptureRunner{
+				inspectIdentityOutput: `{}`,
+				k3dDaemonImageError:   errors.New("secret image command failure"),
+			},
+			wantStatus: "image-id-unavailable",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sink, err := artifacts.NewSink(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test", Metadata: map[string]string{
+				"imageOverride":          "local/mycel:head",
+				"nodeCount":              "3",
+				"requireImageProvenance": "true",
+			}}
+			err = (K3DDriver{Confirmed: true, Runner: test.runner}).CaptureState(context.Background(), environment, sink)
+			if err == nil || err.Error() != "daemon running image provenance is incomplete or heterogeneous" {
+				t.Fatalf("CaptureState() error=%v", err)
+			}
+			data, readErr := os.ReadFile(filepath.Join(sink.Root(), "environment", "daemon-image.json"))
+			if readErr != nil {
+				t.Fatalf("read daemon image evidence: %v", readErr)
+			}
+			if !bytes.Contains(data, []byte(`"resolutionStatus": "`+test.wantStatus+`"`)) || bytes.Contains(data, []byte("secret image command failure")) {
+				t.Fatalf("unsafe or incomplete image evidence: %s", data)
+			}
+		})
+	}
+}
+
 func TestK3DDriverWaitPVCsChecksEveryOrdinalPVC(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
@@ -217,6 +267,26 @@ type fakeRunner struct{ commands []string }
 
 type k3dListRunner struct{ output string }
 
+type k3dDeletionRunner struct {
+	commands      []string
+	clusterOutput string
+	remain        map[string]string
+}
+
+func (r *k3dDeletionRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	command := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, command)
+	if strings.Contains(command, "k3d cluster list") {
+		return executil.Result{Command: command, Stdout: r.clusterOutput}, nil
+	}
+	for key, output := range r.remain {
+		if strings.Contains(command, key) {
+			return executil.Result{Command: command, Stdout: output}, nil
+		}
+	}
+	return executil.Result{Command: command}, nil
+}
+
 type k3dDiagnosticRunner struct {
 	podNames  string
 	logOutput string
@@ -263,11 +333,16 @@ type composeCaptureRunner struct {
 	inspectPlatformIdentityOutput string
 	diagnosticOutput              string
 	diagnosticError               error
+	k3dDaemonImageIDs             string
+	k3dDaemonImageError           error
 }
 
 func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, "get pods -l app=myceld") && strings.Contains(cmd, "imageID") {
+		return executil.Result{Command: cmd, Stdout: r.k3dDaemonImageIDs}, r.k3dDaemonImageError
+	}
 	if strings.Contains(cmd, " image inspect ") {
 		if strings.Contains(cmd, `"repoDigests"`) {
 			if strings.Contains(cmd, " --platform linux/arm64 ") && r.inspectPlatformIdentityOutput != "" {
@@ -352,6 +427,23 @@ func TestRunningImageSourceEvidenceBindsK3DPlatformManifestFromLocalOCIIndex(t *
 	}
 }
 
+func TestRunningImageSourceEvidenceDoesNotResolvePlatformFromMutableTagAfterIdentityFailure(t *testing.T) {
+	const platformManifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	runner := &composeCaptureRunner{
+		inspectIdentityOutput:         `{}`,
+		inspectPlatformIdentityOutput: `{"id":"` + platformManifestDigest + `","repoDigests":[]}`,
+		inspectOutput:                 `{"org.opencontainers.image.revision":"0123456789abcdef0123456789abcdef01234567","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+	}
+	evidence := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "containerd://"+platformManifestDigest+"\n", nil)
+	if evidence.ConfiguredImageID != "" || runningImageMatchesConfigured(evidence) || evidence.Provenance.CaptureStatus != "unavailable" {
+		t.Fatalf("failed configured identity was recovered through mutable tag: %+v", evidence)
+	}
+	commands := strings.Join(runner.commands, "\n")
+	if strings.Contains(commands, "--platform") || len(runner.commands) != 1 {
+		t.Fatalf("mutable tag was reinspected after identity failure: %s", commands)
+	}
+}
+
 func TestK3DRuntimeConfigDigestsResolveManifestToConfig(t *testing.T) {
 	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	const configDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -417,15 +509,38 @@ func TestCaptureK3DDaemonDiagnosticsIsClosedBoundedAndFailClosed(t *testing.T) {
 	}
 }
 
-func TestK3DVerifyDeletedChecksClusterAbsence(t *testing.T) {
+func TestK3DVerifyDeletedChecksClusterAndDockerResourceAbsence(t *testing.T) {
 	environment := Environment{Name: "target-cluster"}
-	verification, err := (K3DDriver{Runner: k3dListRunner{output: `[{"name":"other-cluster"}]`}}).VerifyDeleted(context.Background(), environment)
-	if err != nil || !verification.Supported || !verification.Completed || verification.Clusters != 0 {
+	runner := &k3dDeletionRunner{clusterOutput: `[{"name":"other-cluster"}]`}
+	verification, err := (K3DDriver{Runner: runner}).VerifyDeleted(context.Background(), environment)
+	if err != nil || !verification.Supported || !verification.Completed || verification.Clusters != 0 || verification.Containers != 0 || verification.Networks != 0 || verification.Volumes != 0 {
 		t.Fatalf("verification=%+v err=%v", verification, err)
 	}
-	verification, err = (K3DDriver{Runner: k3dListRunner{output: `[{"name":"target-cluster"}]`}}).VerifyDeleted(context.Background(), environment)
-	if err == nil || verification.Completed || verification.Clusters != 1 {
-		t.Fatalf("verification=%+v err=%v", verification, err)
+	commands := strings.Join(runner.commands, "\n")
+	for _, expected := range []string{"docker ps -aq", "docker network ls -q", "docker volume ls -q"} {
+		if !strings.Contains(commands, expected) {
+			t.Fatalf("missing %q absence check: %s", expected, commands)
+		}
+	}
+
+	tests := []struct {
+		name          string
+		clusterOutput string
+		remain        map[string]string
+		count         func(DeletionVerification) int
+	}{
+		{name: "cluster", clusterOutput: `[{"name":"target-cluster"}]`, count: func(v DeletionVerification) int { return v.Clusters }},
+		{name: "container", clusterOutput: `[]`, remain: map[string]string{" ps ": "container-id\n"}, count: func(v DeletionVerification) int { return v.Containers }},
+		{name: "network", clusterOutput: `[]`, remain: map[string]string{" network ": "network-id\n"}, count: func(v DeletionVerification) int { return v.Networks }},
+		{name: "volume", clusterOutput: `[]`, remain: map[string]string{" volume ": "volume-id\n"}, count: func(v DeletionVerification) int { return v.Volumes }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verification, err := (K3DDriver{Runner: &k3dDeletionRunner{clusterOutput: test.clusterOutput, remain: test.remain}}).VerifyDeleted(context.Background(), environment)
+			if err == nil || verification.Completed || test.count(verification) != 1 {
+				t.Fatalf("verification=%+v err=%v", verification, err)
+			}
+		})
 	}
 }
 

@@ -612,6 +612,22 @@ func TestWaitReadyFailureProducesVerifiedCleanupEvidence(t *testing.T) {
 	assertCompletedReadinessCleanup(t, result, "unsafe readiness detail")
 }
 
+func TestWaitReadyFailureDoesNotClaimFailedStateCaptureSucceeded(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	driver := &recordingDriver{waitErr: errors.New("unsafe readiness detail"), captureErr: errors.New("secret capture detail")}
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver})
+	if err == nil {
+		t.Fatalf("result=%+v err=nil", result)
+	}
+	events, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "events.jsonl"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Contains(events, []byte(`"type":"environment-failure-state-capture-failed"`)) || bytes.Contains(events, []byte(`"type":"environment-failure-state-captured"`)) || bytes.Contains(events, []byte("secret capture detail")) {
+		t.Fatalf("unsafe or misleading capture event: %s", events)
+	}
+}
+
 func TestComposeWaitReadyFailureUsesRunnerCleanupBoundary(t *testing.T) {
 	composeFile := filepath.Join(t.TempDir(), "compose.yml")
 	if err := os.WriteFile(composeFile, []byte("services: {}\n"), 0o600); err != nil {
@@ -644,6 +660,17 @@ func assertCompletedReadinessCleanup(t *testing.T, result Result, forbidden stri
 	}
 	if !strings.Contains(string(cleanupRaw), `"completed": true`) || strings.Contains(string(cleanupRaw), forbidden) {
 		t.Fatalf("unexpected readiness cleanup evidence: %s", cleanupRaw)
+	}
+	resultRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "result.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	summaryRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "summary.md"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(resultRaw), `"failureCategory": "environment-failure"`) || !strings.Contains(string(summaryRaw), "Failure category: `environment-failure`") || strings.Contains(string(resultRaw), forbidden) || strings.Contains(string(summaryRaw), forbidden) {
+		t.Fatalf("missing or unsafe terminal failure category: result=%s summary=%s", resultRaw, summaryRaw)
 	}
 }
 
@@ -1004,6 +1031,7 @@ type recordingDriver struct {
 	verifiedDeleted          bool
 	unsupportedVerification  bool
 	waitErr                  error
+	captureErr               error
 	captured                 int
 	omitEndpoints            bool
 	environmentDriver        string
@@ -1074,6 +1102,9 @@ func (d *recordingDriver) VerifyDeleted(context.Context, env.Environment) (env.D
 }
 func (d *recordingDriver) CaptureState(_ context.Context, environment env.Environment, sink *artifacts.Sink) error {
 	d.captured++
+	if d.captureErr != nil {
+		return d.captureErr
+	}
 	_, err := sink.WriteJSON("environment/state.json", environment)
 	return err
 }

@@ -491,9 +491,25 @@ func (d K3DDriver) VerifyDeleted(ctx context.Context, environment Environment) (
 			verification.Clusters++
 		}
 	}
-	verification.Completed = verification.Clusters == 0
+	clusterName := strings.TrimSpace(environment.Name)
+	containerResult, err := d.runner().Run(ctx, "docker", "ps", "-aq", "--filter", "name=^k3d-"+clusterName+"-")
+	if err != nil {
+		return verification, errors.New("k3d container absence check failed")
+	}
+	verification.Containers = nonEmptyLineCount(containerResult.Stdout)
+	networkResult, err := d.runner().Run(ctx, "docker", "network", "ls", "-q", "--filter", "name=^k3d-"+clusterName+"$")
+	if err != nil {
+		return verification, errors.New("k3d network absence check failed")
+	}
+	verification.Networks = nonEmptyLineCount(networkResult.Stdout)
+	volumeResult, err := d.runner().Run(ctx, "docker", "volume", "ls", "-q", "--filter", "name=^k3d-"+clusterName+"-")
+	if err != nil {
+		return verification, errors.New("k3d volume absence check failed")
+	}
+	verification.Volumes = nonEmptyLineCount(volumeResult.Stdout)
+	verification.Completed = verification.Clusters == 0 && verification.Containers == 0 && verification.Networks == 0 && verification.Volumes == 0
 	if !verification.Completed {
-		return verification, errors.New("k3d cluster remains after deletion")
+		return verification, errors.New("k3d resources remain after deletion")
 	}
 	return verification, nil
 }
@@ -885,11 +901,14 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 	daemonImage := runningImageSourceEvidence(ctx, runner, environment.Metadata["imageOverride"], daemonImageIDs.Stdout, k3dRuntimeConfigDigests(ctx, runner, environment, daemonImageIDs.Stdout))
 	expectedDaemonImages, _ := strconv.Atoi(environment.Metadata["nodeCount"])
 	observedDaemonImages := nonEmptyLineCount(daemonImageIDs.Stdout)
-	if requireClosedEvidence && (daemonImageErr != nil || expectedDaemonImages < 1 || observedDaemonImages != expectedDaemonImages || len(daemonImage.RunningImageIDs) != 1 || !runningImageMatchesConfigured(daemonImage) || !validImageProvenance(daemonImage.Provenance, "https://github.com/MycelDB/mycel")) {
-		return errors.New("daemon running image provenance is incomplete or heterogeneous")
-	}
+	daemonImage.ExpectedInstances = expectedDaemonImages
+	daemonImage.ObservedInstances = observedDaemonImages
+	daemonImage.ResolutionStatus = runningImageResolutionStatus(daemonImageErr, expectedDaemonImages, observedDaemonImages, daemonImage, "https://github.com/MycelDB/mycel")
 	if _, err := sink.WriteJSON("environment/daemon-image.json", daemonImage); err != nil {
 		return err
+	}
+	if requireClosedEvidence && daemonImage.ResolutionStatus != "completed" {
+		return errors.New("daemon running image provenance is incomplete or heterogeneous")
 	}
 	captures := []struct {
 		name string
@@ -928,20 +947,17 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 	}
 	if environment.Metadata["providerEmulator"] == "true" {
 		imageID, imageErr := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "get", "pods", "-l", "app=mycel-provider-emulator", "-o", "jsonpath={range .items[*]}{.status.containerStatuses[?(@.name==\"emulator\")].imageID}{\"\\n\"}{end}")
-		if imageErr != nil {
-			return fmt.Errorf("capture provider emulator image ID: %w", imageErr)
-		}
-		if strings.TrimSpace(imageID.Stdout) == "" {
-			return errors.New("capture provider emulator image ID: empty image ID")
-		}
 		emulatorImage := runningImageSourceEvidence(ctx, runner, environment.Metadata["providerEmulatorImage"], imageID.Stdout, k3dRuntimeConfigDigests(ctx, runner, environment, imageID.Stdout))
 		emulatorImage.Service = "mycel-provider-emulator"
 		emulatorImage.ScriptSHA256 = environment.Metadata["providerEmulatorScriptSHA256"]
-		if requireClosedEvidence && (nonEmptyLineCount(imageID.Stdout) != 1 || len(emulatorImage.RunningImageIDs) != 1 || !runningImageMatchesConfigured(emulatorImage) || !validImageProvenance(emulatorImage.Provenance, "https://github.com/MycelDB/mycel-lab")) {
-			return errors.New("provider emulator running image provenance is incomplete or ambiguous")
-		}
+		emulatorImage.ExpectedInstances = 1
+		emulatorImage.ObservedInstances = nonEmptyLineCount(imageID.Stdout)
+		emulatorImage.ResolutionStatus = runningImageResolutionStatus(imageErr, 1, emulatorImage.ObservedInstances, emulatorImage, "https://github.com/MycelDB/mycel-lab")
 		if _, err := sink.WriteJSON("provider/emulator-image.json", emulatorImage); err != nil {
 			return err
+		}
+		if requireClosedEvidence && emulatorImage.ResolutionStatus != "completed" {
+			return errors.New("provider emulator running image provenance is incomplete or ambiguous")
 		}
 		observations, err := d.ProviderEmulatorObservations(ctx, environment)
 		if err != nil {
@@ -1260,6 +1276,9 @@ type composeImageEvidence struct {
 	Repository           string                `json:"repository,omitempty"`
 	Tag                  string                `json:"tag,omitempty"`
 	Platform             string                `json:"platform,omitempty"`
+	ExpectedInstances    int                   `json:"expectedInstances,omitempty"`
+	ObservedInstances    int                   `json:"observedInstances,omitempty"`
+	ResolutionStatus     string                `json:"resolutionStatus,omitempty"`
 	Provenance           imageSourceProvenance `json:"provenance"`
 }
 
@@ -1373,11 +1392,9 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 		// local tag, while k3d/containerd reports the selected platform manifest.
 		// Resolve the platform descriptor from the already captured immutable
 		// index, not the mutable tag, and bind both exact digests.
-		platformSource := evidence.ConfiguredImageID
-		if platformSource == "" {
-			platformSource = evidence.ImageOverride
+		if evidence.ConfiguredImageID != "" {
+			captureConfiguredIdentity("image", "inspect", "--platform", "linux/arm64", evidence.ConfiguredImageID, "--format", identityFormat)
 		}
-		captureConfiguredIdentity("image", "inspect", "--platform", "linux/arm64", platformSource, "--format", identityFormat)
 	}
 	for digest := range configuredDigests {
 		evidence.ConfiguredDigests = append(evidence.ConfiguredDigests, digest)
@@ -1454,6 +1471,23 @@ func k3dRuntimeConfigDigests(ctx context.Context, runner executil.Runner, enviro
 		}
 	}
 	return resolved
+}
+
+func runningImageResolutionStatus(commandErr error, expectedInstances, observedInstances int, evidence composeImageEvidence, expectedSource string) string {
+	switch {
+	case commandErr != nil:
+		return "image-id-unavailable"
+	case expectedInstances < 1 || observedInstances != expectedInstances:
+		return "instance-count-mismatch"
+	case len(evidence.RunningImageIDs) != 1:
+		return "runtime-identity-heterogeneous"
+	case !runningImageMatchesConfigured(evidence):
+		return "configured-runtime-mismatch"
+	case !validImageProvenance(evidence.Provenance, expectedSource):
+		return "provenance-incomplete"
+	default:
+		return "completed"
+	}
 }
 
 func validImageProvenance(provenance imageSourceProvenance, expectedSource string) bool {

@@ -71,15 +71,16 @@ type harnessBuildIdentity struct {
 }
 
 type Result struct {
-	RunID          string                   `json:"runId"`
-	ScenarioName   string                   `json:"scenarioName"`
-	Status         RunStatus                `json:"status"`
-	DryRun         bool                     `json:"dryRun"`
-	StartedAt      time.Time                `json:"startedAt"`
-	FinishedAt     time.Time                `json:"finishedAt"`
-	ArtifactRoot   string                   `json:"artifactRoot"`
-	Phases         []PhaseState             `json:"phases"`
-	ProviderBudget *provider.BudgetSnapshot `json:"providerBudget,omitempty"`
+	RunID           string                   `json:"runId"`
+	ScenarioName    string                   `json:"scenarioName"`
+	Status          RunStatus                `json:"status"`
+	DryRun          bool                     `json:"dryRun"`
+	StartedAt       time.Time                `json:"startedAt"`
+	FinishedAt      time.Time                `json:"finishedAt"`
+	ArtifactRoot    string                   `json:"artifactRoot"`
+	Phases          []PhaseState             `json:"phases"`
+	ProviderBudget  *provider.BudgetSnapshot `json:"providerBudget,omitempty"`
+	FailureCategory string                   `json:"failureCategory,omitempty"`
 }
 
 type Options struct {
@@ -367,10 +368,17 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return nil
 	}
 	failAfterEnvironmentCreate := func(status RunStatus, err error) (Result, error) {
+		result.FailureCategory = "environment-failure"
 		captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		_ = driver.CaptureState(captureCtx, environment, sink)
+		captureErr := driver.CaptureState(captureCtx, environment, sink)
 		cancel()
-		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("environment-failure-state-captured", "", "", map[string]any{"status": status, "errorCategory": "environment_failure"}))
+		captureEvent := "environment-failure-state-captured"
+		captureStatus := "completed"
+		if captureErr != nil {
+			captureEvent = "environment-failure-state-capture-failed"
+			captureStatus = "failed"
+		}
+		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow(captureEvent, "", "", map[string]any{"status": status, "errorCategory": "environment_failure", "captureStatus": captureStatus}))
 		if cleanupErr := cleanupAfterEnvironment(retainEnvironmentOnFailure); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 			status = RunFailed
@@ -1157,7 +1165,7 @@ func finalize(ctx context.Context, st store.Store, sink *artifacts.Sink, result 
 			return fmt.Errorf("write result artifact: %w", err)
 		}
 		artifactPaths = append(artifactPaths, path)
-		summary := report.RunSummary{RunID: result.RunID, ScenarioName: result.ScenarioName, Status: string(result.Status), StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, DryRun: result.DryRun, Artifacts: append([]string(nil), artifactPaths...)}
+		summary := report.RunSummary{RunID: result.RunID, ScenarioName: result.ScenarioName, Status: string(result.Status), StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, DryRun: result.DryRun, Artifacts: append([]string(nil), artifactPaths...), FailureCategory: result.FailureCategory}
 		for _, phase := range result.Phases {
 			actualDuration := time.Duration(0)
 			if !phase.StartedAt.IsZero() && !phase.FinishedAt.IsZero() {
