@@ -54,14 +54,16 @@ func TestRunRecorderRegistersSystemBackupFixtureExpectedCounts(t *testing.T) {
 	}
 }
 
-func TestRunRecorderRegistersSystemBackupFixtureSourceActorAlias(t *testing.T) {
-	recorder := &runRecorder{}
-	record := events.Record{Type: "event-completed", EventType: "system-backup-fixture", Target: map[string]any{"sourceActorId": "backup-writer"}, Payload: map[string]any{"repeat": 1, "systemBackup": events.SystemBackupOperationResult{FixtureNodes: 3, FixtureEdges: 1}}}
-	if err := recorder.recordRuntimeExpectedGraphCounts(record); err != nil {
-		t.Fatal(err)
-	}
-	if got := recorder.expectedByActor["backup-writer"]; got != (graphCounts{Nodes: 3, Edges: 1}) {
-		t.Fatalf("expected counts=%+v", got)
+func TestRunRecorderNormalizesSystemBackupFixtureActorAliases(t *testing.T) {
+	for _, target := range []map[string]any{{"actorId": " backup-writer "}, {"sourceActorId": " backup-writer "}} {
+		recorder := &runRecorder{}
+		record := events.Record{Type: "event-completed", EventType: "system-backup-fixture", Target: target, Payload: map[string]any{"repeat": 1, "systemBackup": events.SystemBackupOperationResult{FixtureNodes: 3, FixtureEdges: 1}}}
+		if err := recorder.recordRuntimeExpectedGraphCounts(record); err != nil {
+			t.Fatal(err)
+		}
+		if got := recorder.expectedByActor["backup-writer"]; got != (graphCounts{Nodes: 3, Edges: 1}) {
+			t.Fatalf("target=%+v expected counts=%+v", target, got)
+		}
 	}
 }
 

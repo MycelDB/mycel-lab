@@ -1448,8 +1448,10 @@ func (r *runRecorder) recordRuntimeExpectedGraphCounts(record events.Record) err
 		return nil
 	}
 	actorID, _ := record.Target["actorId"].(string)
-	if strings.TrimSpace(actorID) == "" {
+	actorID = strings.TrimSpace(actorID)
+	if actorID == "" {
 		actorID, _ = record.Target["sourceActorId"].(string)
+		actorID = strings.TrimSpace(actorID)
 	}
 	fixture, ok := record.Payload["systemBackup"].(events.SystemBackupOperationResult)
 	repeat, _ := record.Payload["repeat"].(int)
