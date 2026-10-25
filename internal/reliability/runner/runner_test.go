@@ -628,6 +628,26 @@ func TestWaitReadyFailureDoesNotClaimFailedStateCaptureSucceeded(t *testing.T) {
 	}
 }
 
+func TestPrimaryCaptureFailureIsNotRetriedOrOverwritten(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	driver := &recordingDriver{captureErr: errors.New("secret initial capture detail"), captureFailures: 1}
+	result, err := RunScenario(context.Background(), scenario, Options{DryRun: true, ArtifactRoot: t.TempDir(), EnvironmentDriver: driver})
+	if err == nil || driver.captured != 1 {
+		t.Fatalf("result=%+v err=%v captureCount=%d", result, err, driver.captured)
+	}
+	captureEvidence, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "capture-attempt.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	events, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "events.jsonl"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Contains(captureEvidence, []byte(`"attempt": 1`)) || bytes.Contains(captureEvidence, []byte(`"attempt": 2`)) || !bytes.Contains(events, []byte(`"type":"environment-failure-state-capture-failed"`)) || bytes.Contains(events, []byte(`"type":"environment-failure-state-captured"`)) || bytes.Contains(events, []byte("secret initial capture detail")) {
+		t.Fatalf("primary capture evidence was overwritten or misreported: capture=%s events=%s", captureEvidence, events)
+	}
+}
+
 func TestComposeWaitReadyFailureUsesRunnerCleanupBoundary(t *testing.T) {
 	composeFile := filepath.Join(t.TempDir(), "compose.yml")
 	if err := os.WriteFile(composeFile, []byte("services: {}\n"), 0o600); err != nil {
@@ -1032,6 +1052,7 @@ type recordingDriver struct {
 	unsupportedVerification  bool
 	waitErr                  error
 	captureErr               error
+	captureFailures          int
 	captured                 int
 	omitEndpoints            bool
 	environmentDriver        string
@@ -1102,7 +1123,10 @@ func (d *recordingDriver) VerifyDeleted(context.Context, env.Environment) (env.D
 }
 func (d *recordingDriver) CaptureState(_ context.Context, environment env.Environment, sink *artifacts.Sink) error {
 	d.captured++
-	if d.captureErr != nil {
+	if _, err := sink.WriteJSON("environment/capture-attempt.json", map[string]any{"attempt": d.captured}); err != nil {
+		return err
+	}
+	if d.captureErr != nil && (d.captureFailures == 0 || d.captured <= d.captureFailures) {
 		return d.captureErr
 	}
 	_, err := sink.WriteJSON("environment/state.json", environment)

@@ -367,11 +367,17 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		}
 		return nil
 	}
+	primaryCaptureFailed := false
 	failAfterEnvironmentCreate := func(status RunStatus, err error) (Result, error) {
 		result.FailureCategory = "environment-failure"
-		captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		captureErr := driver.CaptureState(captureCtx, environment, sink)
-		cancel()
+		var captureErr error
+		if primaryCaptureFailed {
+			captureErr = errors.New("primary environment state capture failed")
+		} else {
+			captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			captureErr = driver.CaptureState(captureCtx, environment, sink)
+			cancel()
+		}
 		captureEvent := "environment-failure-state-captured"
 		captureStatus := "completed"
 		if captureErr != nil {
@@ -403,6 +409,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	if err := driver.CaptureState(ctx, environment, sink); err != nil {
+		primaryCaptureFailed = true
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	endpoints := consoleEndpointsFromDriver(driverEndpoints)

@@ -492,7 +492,7 @@ func (d K3DDriver) VerifyDeleted(ctx context.Context, environment Environment) (
 		}
 	}
 	clusterName := strings.TrimSpace(environment.Name)
-	containerResult, err := d.runner().Run(ctx, "docker", "ps", "-aq", "--filter", "name=^k3d-"+clusterName+"-")
+	containerResult, err := d.runner().Run(ctx, "docker", "ps", "-aq", "--filter", "label=app=k3d", "--filter", "label=k3d.cluster="+clusterName)
 	if err != nil {
 		return verification, errors.New("k3d container absence check failed")
 	}
@@ -502,7 +502,7 @@ func (d K3DDriver) VerifyDeleted(ctx context.Context, environment Environment) (
 		return verification, errors.New("k3d network absence check failed")
 	}
 	verification.Networks = nonEmptyLineCount(networkResult.Stdout)
-	volumeResult, err := d.runner().Run(ctx, "docker", "volume", "ls", "-q", "--filter", "name=^k3d-"+clusterName+"-")
+	volumeResult, err := d.runner().Run(ctx, "docker", "volume", "ls", "-q", "--filter", "name=^k3d-"+clusterName+"-images$")
 	if err != nil {
 		return verification, errors.New("k3d volume absence check failed")
 	}

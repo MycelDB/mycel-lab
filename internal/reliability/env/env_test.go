@@ -533,7 +533,7 @@ func TestK3DVerifyDeletedChecksClusterAndDockerResourceAbsence(t *testing.T) {
 		t.Fatalf("verification=%+v err=%v", verification, err)
 	}
 	commands := strings.Join(runner.commands, "\n")
-	for _, expected := range []string{"docker ps -aq", "docker network ls -q", "docker volume ls -q"} {
+	for _, expected := range []string{"docker ps -aq --filter label=app=k3d --filter label=k3d.cluster=target-cluster", "docker network ls -q --filter 'name=^k3d-target-cluster$'", "docker volume ls -q --filter 'name=^k3d-target-cluster-images$'"} {
 		if !strings.Contains(commands, expected) {
 			t.Fatalf("missing %q absence check: %s", expected, commands)
 		}
