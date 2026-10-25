@@ -6,7 +6,7 @@ System backup/restore acceptance for procedure-inference ledgers and control sta
 
 ## What this test proves
 
-A backed-up terminal attempt, immutable event IDs/change watermarks, typed run reference, exact system-fixture identities/counts, and the completed disabled control-barrier identity survive restore. A post-backup attempt is absent after restore; a mutation remains excluded while restored-disabled, and explicit re-enable permits exactly one new attempt.
+A backed-up terminal attempt, immutable event IDs/change watermarks, typed run reference, exact system-fixture identities/counts, and the completed disabled control-barrier identity survive restore. A post-backup attempt is absent after restore; a mutation remains excluded while restored-disabled with zero emulator calls, re-enable itself creates no call, and the following mutation permits exactly one new attempt and provider call.
 
 ## Topology
 
@@ -23,7 +23,7 @@ graph LR
 
 ## Scenario phases
 
-Provision/configure, create one attempt, complete a disable barrier, and capture a system backup. Then enable and create a post-backup negative control, reset/restore fresh PVCs, compare exact backed-up identities/watermarks, prove disabled-work exclusion, re-enable for one new attempt, verify diagnostics, and remove the sensitive host backup directory.
+Provision/configure, create one attempt, complete a disable barrier, and capture a system backup. Then enable and create a post-backup negative control, reset/restore fresh PVCs, compare exact backed-up identities/watermarks, prove disabled-work exclusion and zero provider effects, re-enable, prove the enable transition itself remains at zero effects, create one new attempt and provider call, verify diagnostics, and remove the sensitive host backup directory.
 
 ## Actors
 

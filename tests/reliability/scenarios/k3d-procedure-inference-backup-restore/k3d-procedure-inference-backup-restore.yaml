@@ -108,8 +108,12 @@ phases:
         target: {nodeId: 00000000-0000-4000-8000-000000005203, text: bounded restored disabled fixture, timeout: 30s}
       - type: procedure-inference-await-terminal
         target: {timeout: 30s, interval: 500ms, stableFor: 3s, minimumAttempts: 1, maximumAttempts: 1, requireSucceeded: true, requireChanges: true, compareCheckpoint: backed-up-ledger}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 0, maximumRequests: 0, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent}
       - type: procedure-inference-control
         target: {action: enable, timeout: 30s}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 0, maximumRequests: 0, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent}
       - type: procedure-inference-node-create
         target: {nodeId: 00000000-0000-4000-8000-000000005204, text: bounded restored enabled fixture, timeout: 30s}
       - type: procedure-inference-await-terminal

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
@@ -262,6 +263,26 @@ func TestProcedureInferenceAwaitTimeoutReportsBoundedConvergenceCategory(t *test
 		if !bytes.Contains(failedEvent, []byte(required)) {
 			t.Fatalf("failed event %s does not contain %s", failedEvent, required)
 		}
+	}
+}
+
+func TestProcedureInferenceAwaitRejectsLateSuccessfulCommandBeforeNestedReads(t *testing.T) {
+	configured := &provision.ProcedureInferenceResources{SpaceID: "space-a", DomainID: "domain", ProcedureID: "procedure", BindingID: "binding", TargetActorID: "writer", AuditActorID: "auditor", IntelligenceProfileID: "profile", EndpointID: "endpoint", ModelID: "model", CapabilityID: "capability", CredentialGrantID: "grant"}
+	resources := &provision.ScenarioResources{ProcedureInference: configured, Assignments: []provision.ActorAssignment{{ActorID: "writer", PrincipalID: "writer-principal"}, {ActorID: "auditor", Username: "auditor", Password: "password", PrincipalID: "auditor-principal"}}}
+	attempt := procedureInferenceAttempt{ID: "attempt", RecordVersion: 1, SpaceID: configured.SpaceID, DomainID: configured.DomainID, ProcedureID: configured.ProcedureID, ProcedureVersion: 1, BindingID: configured.BindingID, BindingVersion: 1, InvocationID: "invocation", RunID: "run", RunAttemptNumber: 1, ProviderAttemptNumber: 1, SourceEventID: "source", EventOriginPrincipalID: "writer-principal", ActorPrincipalID: "automation", OwnerPrincipalID: "writer-principal", OnBehalfOfPrincipalID: "writer-principal", Operation: 2, ProfileID: "profile", EndpointID: "endpoint", ModelID: "model", CapabilityID: "capability", PolicyDecisionID: "policy", CredentialGrantID: "grant", AuthorizationRevision: 1, ConfigurationRevision: 1, State: procedureInferenceSucceeded, OutcomeCategory: "succeeded", TokenCountAuthority: "provider_reported", PublicationDisposition: "published"}
+	encoded, err := json.Marshal(procedureInferenceList{Attempts: []procedureInferenceAttempt{attempt}, SnapshotHighWaterSequence: 1, EarliestRetainedStateSequence: 1, SnapshotCursor: "cursor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	driver := &recordingDriver{execWithContext: func(context.Context, string) (env.ExecResult, error) {
+		calls++
+		time.Sleep(20 * time.Millisecond)
+		return env.ExecResult{Stdout: string(encoded)}, nil
+	}}
+	_, err = awaitProcedureInference(context.Background(), driver, env.Environment{}, resources, map[string]procedureInferenceCheckpoint{}, map[string]any{"timeout": "5ms", "interval": "1ms"})
+	if err == nil || !strings.Contains(err.Error(), "did not converge within 5ms") || calls != 1 {
+		t.Fatalf("calls=%d error=%v, want wall-deadline rejection before nested reads", calls, err)
 	}
 }
 

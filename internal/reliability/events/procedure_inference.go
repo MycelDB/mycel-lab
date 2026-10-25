@@ -363,11 +363,20 @@ func awaitProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 	maximum := intTarget(target, "maximumAttempts", 64)
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	wallDeadline := time.Now().UTC().Add(timeout)
+	deadlineExceeded := func() bool { return !time.Now().UTC().Before(wallDeadline) }
+	timeoutError := func() error { return fmt.Errorf("procedure inference attempts did not converge within %s", timeout) }
 	var stableSince time.Time
 	var previousChangeDigests map[uint64]string
 	for {
+		if deadlineExceeded() {
+			return result, timeoutError()
+		}
 		iterationStable := false
 		listRaw, commandErr := procedureInferenceCLIExec(waitCtx, driver, environment, auditor, []string{"automation", "inference-attempt", "list", "--space-id", configured.SpaceID, "--domain-id", configured.DomainID, "--procedure-id", configured.ProcedureID, "--page-size", "100"})
+		if deadlineExceeded() {
+			return result, timeoutError()
+		}
 		if commandErr != nil && result.ConvergenceCategory == "" {
 			result.ConvergenceCategory = "list_command_failed"
 		}
@@ -450,6 +459,9 @@ func awaitProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 					runReferencesProved := true
 					for _, attempt := range list.Attempts {
 						runRaw, err := procedureInferenceCLIExec(waitCtx, driver, environment, auditor, []string{"automation", "run", "get", attempt.RunID, "--space-id", configured.SpaceID, "--domain-id", configured.DomainID})
+						if deadlineExceeded() {
+							return result, timeoutError()
+						}
 						if err != nil {
 							return result, err
 						}
@@ -464,6 +476,9 @@ func awaitProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 					}
 					result.ConvergenceCategory = "change_feed_validation_pending"
 					changesRaw, err := procedureInferenceCLIExec(waitCtx, driver, environment, auditor, []string{"automation", "inference-attempt", "changes", "--space-id", configured.SpaceID, "--domain-id", configured.DomainID, "--procedure-id", configured.ProcedureID, "--page-size", "500"})
+					if deadlineExceeded() {
+						return result, timeoutError()
+					}
 					if err != nil {
 						return result, err
 					}
@@ -493,6 +508,9 @@ func awaitProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 						stableSince = time.Now()
 					}
 					continuationRaw, err := procedureInferenceCLIExec(waitCtx, driver, environment, auditor, []string{"automation", "inference-attempt", "changes", "--space-id", configured.SpaceID, "--domain-id", configured.DomainID, "--procedure-id", configured.ProcedureID, "--page-size", "100", "--after-cursor", list.SnapshotCursor})
+					if deadlineExceeded() {
+						return result, timeoutError()
+					}
 					if err != nil {
 						return result, err
 					}
@@ -532,10 +550,16 @@ func awaitProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 						if !lifecycleComplete {
 							return result, errors.New("procedure inference change history does not contain a complete lifecycle")
 						}
+						if deadlineExceeded() {
+							return result, timeoutError()
+						}
 						result.ConvergenceCategory = "converged"
 						return result, nil
 					}
 					if lifecycleComplete && stableEventIDs && time.Since(stableSince) >= stableFor {
+						if deadlineExceeded() {
+							return result, timeoutError()
+						}
 						result.ConvergenceCategory = "converged"
 						return result, nil
 					}
@@ -548,7 +572,7 @@ func awaitProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 			stableSince = time.Time{}
 		}
 		if err := sleepContext(waitCtx, interval); err != nil {
-			return result, fmt.Errorf("procedure inference attempts did not converge within %s", timeout)
+			return result, timeoutError()
 		}
 	}
 }

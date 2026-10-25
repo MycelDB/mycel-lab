@@ -80,7 +80,7 @@ func TestProcedureInferenceBackupRestoreScenarioRecoveryFences(t *testing.T) {
 		"capture-system-backup":                 "cluster-backup-create,cluster-backup-validate,procedure-inference-emulator-assert",
 		"create-post-backup-negative-control":   "procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert",
 		"restore-fresh-pvcs":                    "cluster-restore-apply,cluster-recovery-wait,procedure-inference-emulator-assert",
-		"verify-restored-ledger-and-watermarks": "cluster-restore-verify,procedure-inference-await-terminal,procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert,procedure-inference-capacity-diagnostics-assert,cluster-backup-cleanup",
+		"verify-restored-ledger-and-watermarks": "cluster-restore-verify,procedure-inference-await-terminal,procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert,procedure-inference-control,procedure-inference-emulator-assert,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert,procedure-inference-capacity-diagnostics-assert,cluster-backup-cleanup",
 	}
 	for phaseName, expected := range expectedSequences {
 		events := phases[phaseName].Events
@@ -100,8 +100,13 @@ func TestProcedureInferenceBackupRestoreScenarioRecoveryFences(t *testing.T) {
 	if final.Events[0].Target["expectedNodes"] != 3 || final.Events[0].Target["expectedEdges"] != 1 || final.Events[1].Target["compareCheckpoint"] != "backed-up-ledger" || final.Events[2].Target["compareCheckpoint"] != "disabled-barrier" {
 		t.Fatalf("restored identity checkpoints are incomplete: %+v", final.Events[:3])
 	}
-	if final.Events[8].Target["minimumRequests"] != 1 || final.Events[8].Target["maximumRequests"] != 1 || final.Events[10].Type != "cluster-backup-cleanup" {
-		t.Fatalf("final provider and cleanup bounds are incomplete: %+v", final.Events[8:])
+	for _, index := range []int{5, 7} {
+		if final.Events[index].Target["minimumRequests"] != 0 || final.Events[index].Target["maximumRequests"] != 0 {
+			t.Fatalf("provider exclusion assertion at index %d is incomplete: %+v", index, final.Events[index])
+		}
+	}
+	if final.Events[10].Target["minimumRequests"] != 1 || final.Events[10].Target["maximumRequests"] != 1 || final.Events[12].Type != "cluster-backup-cleanup" {
+		t.Fatalf("final provider and cleanup bounds are incomplete: %+v", final.Events[10:])
 	}
 	finalAssertions, _ := scenario.Assertions["final"].(map[string]any)
 	if finalAssertions["requireConvergedCounts"] != true || finalAssertions["requireNoAcknowledgedGraphTransactionLoss"] == true {
