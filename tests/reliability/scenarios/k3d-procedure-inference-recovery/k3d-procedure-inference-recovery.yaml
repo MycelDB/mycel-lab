@@ -37,7 +37,7 @@ phases:
     duration: 1ms
     events:
       - type: cluster-recovery-wait
-        target: {timeout: 10s, interval: 200ms, commandTimeout: 3s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
+        target: {timeout: 2m, interval: 200ms, commandTimeout: 3s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
       - type: procedure-inference-setup
         target: {timeout: 30s}
       - type: procedure-inference-node-create

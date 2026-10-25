@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -287,10 +288,55 @@ func TestClusterRecoveryRequiresConfiguredConsecutiveStablePolls(t *testing.T) {
 }
 
 func TestClusterRecoveryRejectsRegressingProgress(t *testing.T) {
-	result := ClusterRecoveryNodeResult{RaftGroupsReady: true, progress: map[string]clusterRaftProgress{"system": {CommitIndex: 9, AppliedIndex: 9, LastIndex: 9}}}
-	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: 10, AppliedIndex: 10, LastIndex: 10}})
+	result := ClusterRecoveryNodeResult{RaftGroupsReady: true, progress: map[string]clusterRaftProgress{"system": {CommitIndex: 9, AppliedIndex: 9}}}
+	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: 10, AppliedIndex: 10}})
 	if result.RaftGroupsReady || len(result.RegressingGroups) != 1 || result.RegressingGroups[0] != "system" || !strings.Contains(result.RaftGroupsError, "regressing") {
-		t.Fatalf("result=%+v, want progress regression rejection", result)
+		t.Fatalf("result=%+v, want committed progress regression rejection", result)
+	}
+}
+
+func TestClusterRecoveryRegressionEvidencePreservesUint64Exactly(t *testing.T) {
+	const high = uint64(9007199254740994)
+	result := ClusterRecoveryNodeResult{RaftGroupsReady: true, progress: map[string]clusterRaftProgress{"system": {CommitIndex: high - 1, AppliedIndex: high - 2}}}
+	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: high, AppliedIndex: high}})
+	want := []ClusterRecoveryProgressRegression{{GroupID: "system", ObservedCommitIndex: "9007199254740993", HighWaterCommitIndex: "9007199254740994", ObservedAppliedIndex: "9007199254740992", HighWaterAppliedIndex: "9007199254740994"}}
+	if !reflect.DeepEqual(result.ProgressRegressions, want) {
+		t.Fatalf("regressions=%+v, want exact decimal evidence %+v", result.ProgressRegressions, want)
+	}
+}
+
+func TestClusterRecoveryAllowsUncommittedLastIndexRegression(t *testing.T) {
+	result := ClusterRecoveryNodeResult{}
+	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy", CommitIndex: 10, AppliedIndex: 10, LastIndex: 9}}, []string{"system"}, true)
+	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: 10, AppliedIndex: 10}})
+	if !result.RaftGroupsReady || len(result.RegressingGroups) != 0 {
+		t.Fatalf("result=%+v, want uncommitted last-index replacement retained as diagnostics only", result)
+	}
+}
+
+func TestClusterRecoveryAllowsLastIndexReplacementAcrossPolls(t *testing.T) {
+	raftCalls := 0
+	driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
+		if strings.Contains(command, "cluster readiness check") {
+			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+		}
+		if strings.Contains(command, "cluster raft-groups") {
+			raftCalls++
+			lastIndex := 10
+			if raftCalls > 1 {
+				lastIndex = 9
+			}
+			return env.ExecResult{Stdout: fmt.Sprintf(`{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy","commit_index":10,"applied_index":10,"last_index":%d}]}`, lastIndex)}, nil
+		}
+		return env.ExecResult{Stdout: `{}`}, nil
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	result, err := executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{"ordinals": []any{0}, "timeout": "100ms", "interval": "1ms", "minimumStablePolls": 3, "requireZeroApplyLag": true, "requireConsistentProgress": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.Attempts != 3 || result.RejectedPolls != 0 {
+		t.Fatalf("result=%+v, want last-index replacement to remain diagnostic only", result)
 	}
 }
 
@@ -320,6 +366,9 @@ func TestClusterRecoveryProgressHighWaterCannotBeForgotten(t *testing.T) {
 		result, err := run(t, []int{10, 9}, "20ms")
 		if err == nil || result.Ready {
 			t.Fatalf("result=%+v error=%v, want retained high-water timeout", result, err)
+		}
+		if result.RejectedPolls == 0 || result.RejectionCounts.ProgressRollback == 0 || result.LastRejectedPoll == nil || result.LastRejectedPoll.Attempt > result.Attempts || len(result.LastRejectedPoll.Nodes) != 1 || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].Reasons, []string{"progress-rollback"}) || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].ProgressRegressions, []ClusterRecoveryProgressRegression{{GroupID: "system", ObservedCommitIndex: "9", HighWaterCommitIndex: "10", ObservedAppliedIndex: "9", HighWaterAppliedIndex: "10"}}) {
+			t.Fatalf("result=%+v, want bounded prior-poll rollback evidence", result)
 		}
 	})
 	t.Run("recovery to high water can stabilize", func(t *testing.T) {

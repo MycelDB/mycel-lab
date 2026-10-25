@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,42 +17,76 @@ import (
 )
 
 type ClusterRecoveryWaitResult struct {
-	Attempts                  int                         `json:"attempts"`
-	Timeout                   string                      `json:"timeout"`
-	Interval                  string                      `json:"interval"`
-	ExpectedGroups            int                         `json:"expectedGroups"`
-	CommandTimeout            string                      `json:"commandTimeout"`
-	MinimumStablePolls        int                         `json:"minimumStablePolls"`
-	StablePolls               int                         `json:"stablePolls"`
-	RequireZeroApplyLag       bool                        `json:"requireZeroApplyLag"`
-	RequireConsistentProgress bool                        `json:"requireConsistentProgress"`
-	Ready                     bool                        `json:"ready"`
-	Nodes                     []ClusterRecoveryNodeResult `json:"nodes"`
+	Attempts                  int                            `json:"attempts"`
+	Timeout                   string                         `json:"timeout"`
+	Interval                  string                         `json:"interval"`
+	ExpectedGroups            int                            `json:"expectedGroups"`
+	CommandTimeout            string                         `json:"commandTimeout"`
+	MinimumStablePolls        int                            `json:"minimumStablePolls"`
+	StablePolls               int                            `json:"stablePolls"`
+	RequireZeroApplyLag       bool                           `json:"requireZeroApplyLag"`
+	RequireConsistentProgress bool                           `json:"requireConsistentProgress"`
+	RejectedPolls             int                            `json:"rejectedPolls"`
+	RejectionCounts           ClusterRecoveryRejectionCounts `json:"rejectionCounts"`
+	LastRejectedPoll          *ClusterRecoveryRejectedPoll   `json:"lastRejectedPoll,omitempty"`
+	Ready                     bool                           `json:"ready"`
+	Nodes                     []ClusterRecoveryNodeResult    `json:"nodes"`
+}
+
+type ClusterRecoveryRejectionCounts struct {
+	Readiness        int `json:"readiness"`
+	RaftInspection   int `json:"raftInspection"`
+	Topology         int `json:"topology"`
+	Leadership       int `json:"leadership"`
+	Health           int `json:"health"`
+	ApplyLag         int `json:"applyLag"`
+	ProgressRollback int `json:"progressRollback"`
+}
+
+type ClusterRecoveryRejectedPoll struct {
+	Attempt           int                           `json:"attempt"`
+	StablePollsBefore int                           `json:"stablePollsBefore"`
+	Nodes             []ClusterRecoveryRejectedNode `json:"nodes"`
+}
+
+type ClusterRecoveryRejectedNode struct {
+	Ordinal             int                                 `json:"ordinal"`
+	Reasons             []string                            `json:"reasons"`
+	LaggingGroups       []string                            `json:"laggingGroups,omitempty"`
+	ProgressRegressions []ClusterRecoveryProgressRegression `json:"progressRegressions,omitempty"`
+}
+
+type ClusterRecoveryProgressRegression struct {
+	GroupID               string `json:"groupId"`
+	ObservedCommitIndex   string `json:"observedCommitIndex"`
+	HighWaterCommitIndex  string `json:"highWaterCommitIndex"`
+	ObservedAppliedIndex  string `json:"observedAppliedIndex"`
+	HighWaterAppliedIndex string `json:"highWaterAppliedIndex"`
 }
 
 type ClusterRecoveryNodeResult struct {
-	Ordinal             int      `json:"ordinal"`
-	ReadinessReady      bool     `json:"readinessReady"`
-	RaftGroupsReady     bool     `json:"raftGroupsReady"`
-	GroupCount          int      `json:"groupCount"`
-	MissingGroups       []string `json:"missingGroups,omitempty"`
-	DuplicateGroups     []string `json:"duplicateGroups,omitempty"`
-	UnexpectedGroups    []string `json:"unexpectedGroups,omitempty"`
-	GroupsWithoutLeader []string `json:"groupsWithoutLeader,omitempty"`
-	UnhealthyGroups     []string `json:"unhealthyGroups,omitempty"`
-	LaggingGroups       []string `json:"laggingGroups,omitempty"`
-	RegressingGroups    []string `json:"regressingGroups,omitempty"`
-	ReadinessStdout     string   `json:"readinessStdout,omitempty"`
-	ReadinessError      string   `json:"readinessError,omitempty"`
-	RaftGroupsStdout    string   `json:"raftGroupsStdout,omitempty"`
-	RaftGroupsError     string   `json:"raftGroupsError,omitempty"`
+	Ordinal             int                                 `json:"ordinal"`
+	ReadinessReady      bool                                `json:"readinessReady"`
+	RaftGroupsReady     bool                                `json:"raftGroupsReady"`
+	GroupCount          int                                 `json:"groupCount"`
+	MissingGroups       []string                            `json:"missingGroups,omitempty"`
+	DuplicateGroups     []string                            `json:"duplicateGroups,omitempty"`
+	UnexpectedGroups    []string                            `json:"unexpectedGroups,omitempty"`
+	GroupsWithoutLeader []string                            `json:"groupsWithoutLeader,omitempty"`
+	UnhealthyGroups     []string                            `json:"unhealthyGroups,omitempty"`
+	LaggingGroups       []string                            `json:"laggingGroups,omitempty"`
+	RegressingGroups    []string                            `json:"regressingGroups,omitempty"`
+	ProgressRegressions []ClusterRecoveryProgressRegression `json:"progressRegressions,omitempty"`
+	ReadinessStdout     string                              `json:"readinessStdout,omitempty"`
+	ReadinessError      string                              `json:"readinessError,omitempty"`
+	RaftGroupsStdout    string                              `json:"raftGroupsStdout,omitempty"`
+	RaftGroupsError     string                              `json:"raftGroupsError,omitempty"`
 	progress            map[string]clusterRaftProgress
 }
 
 type clusterRaftProgress struct {
 	CommitIndex  uint64
 	AppliedIndex uint64
-	LastIndex    uint64
 }
 
 type clusterRaftGroup struct {
@@ -152,6 +187,7 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 				return result, nil
 			}
 		} else {
+			recordClusterRecoveryRejection(&result)
 			result.StablePolls = 0
 		}
 		if waitCtx.Err() != nil {
@@ -233,7 +269,7 @@ func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clust
 		if !strings.EqualFold(strings.TrimSpace(group.Health), "healthy") {
 			result.UnhealthyGroups = append(result.UnhealthyGroups, groupID+":"+group.Health)
 		}
-		result.progress[groupID] = clusterRaftProgress{CommitIndex: group.CommitIndex, AppliedIndex: group.AppliedIndex, LastIndex: group.LastIndex}
+		result.progress[groupID] = clusterRaftProgress{CommitIndex: group.CommitIndex, AppliedIndex: group.AppliedIndex}
 		if requireZeroApplyLag && group.CommitIndex != group.AppliedIndex {
 			result.LaggingGroups = append(result.LaggingGroups, fmt.Sprintf("%s:%d", groupID, absoluteDifference(group.CommitIndex, group.AppliedIndex)))
 		}
@@ -293,7 +329,7 @@ func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clust
 }
 
 func enforceClusterProgressConsistency(result *ClusterRecoveryNodeResult, previous map[string]clusterRaftProgress) {
-	if len(previous) == 0 || len(result.progress) == 0 {
+	if !result.RaftGroupsReady || len(previous) == 0 || len(result.progress) == 0 {
 		return
 	}
 	for groupID, current := range result.progress {
@@ -301,14 +337,24 @@ func enforceClusterProgressConsistency(result *ClusterRecoveryNodeResult, previo
 		if !ok {
 			continue
 		}
-		if current.CommitIndex < prior.CommitIndex || current.AppliedIndex < prior.AppliedIndex || current.LastIndex < prior.LastIndex {
+		if current.CommitIndex < prior.CommitIndex || current.AppliedIndex < prior.AppliedIndex {
 			result.RegressingGroups = append(result.RegressingGroups, groupID)
+			result.ProgressRegressions = append(result.ProgressRegressions, ClusterRecoveryProgressRegression{
+				GroupID:               groupID,
+				ObservedCommitIndex:   strconv.FormatUint(current.CommitIndex, 10),
+				HighWaterCommitIndex:  strconv.FormatUint(prior.CommitIndex, 10),
+				ObservedAppliedIndex:  strconv.FormatUint(current.AppliedIndex, 10),
+				HighWaterAppliedIndex: strconv.FormatUint(prior.AppliedIndex, 10),
+			})
 		}
 	}
 	if len(result.RegressingGroups) == 0 {
 		return
 	}
 	sort.Strings(result.RegressingGroups)
+	sort.Slice(result.ProgressRegressions, func(i, j int) bool {
+		return result.ProgressRegressions[i].GroupID < result.ProgressRegressions[j].GroupID
+	})
 	result.RaftGroupsReady = false
 	reason := "groups with regressing progress: " + strings.Join(result.RegressingGroups, ", ")
 	if result.RaftGroupsError == "" {
@@ -316,6 +362,61 @@ func enforceClusterProgressConsistency(result *ClusterRecoveryNodeResult, previo
 	} else {
 		result.RaftGroupsError += "; " + reason
 	}
+}
+
+func recordClusterRecoveryRejection(result *ClusterRecoveryWaitResult) {
+	result.RejectedPolls++
+	rejected := &ClusterRecoveryRejectedPoll{Attempt: result.Attempts, StablePollsBefore: result.StablePolls}
+	for _, node := range result.Nodes {
+		summary := ClusterRecoveryRejectedNode{Ordinal: node.Ordinal}
+		addReason := func(reason string, count *int) {
+			summary.Reasons = append(summary.Reasons, reason)
+			(*count)++
+		}
+		if !node.ReadinessReady {
+			addReason("readiness", &result.RejectionCounts.Readiness)
+		}
+		if node.RaftGroupsError != "" && node.GroupCount == 0 {
+			addReason("raft-inspection", &result.RejectionCounts.RaftInspection)
+		}
+		if len(node.MissingGroups) > 0 || len(node.DuplicateGroups) > 0 || len(node.UnexpectedGroups) > 0 {
+			addReason("topology", &result.RejectionCounts.Topology)
+		}
+		if len(node.GroupsWithoutLeader) > 0 {
+			addReason("leadership", &result.RejectionCounts.Leadership)
+		}
+		if len(node.UnhealthyGroups) > 0 {
+			addReason("health", &result.RejectionCounts.Health)
+		}
+		if len(node.LaggingGroups) > 0 {
+			addReason("apply-lag", &result.RejectionCounts.ApplyLag)
+			summary.LaggingGroups = boundedRecoveryGroups(node.LaggingGroups)
+		}
+		if len(node.ProgressRegressions) > 0 {
+			addReason("progress-rollback", &result.RejectionCounts.ProgressRollback)
+			summary.ProgressRegressions = boundedProgressRegressions(node.ProgressRegressions)
+		}
+		if len(summary.Reasons) > 0 {
+			rejected.Nodes = append(rejected.Nodes, summary)
+		}
+	}
+	result.LastRejectedPoll = rejected
+}
+
+func boundedRecoveryGroups(groups []string) []string {
+	const maximumGroups = 64
+	if len(groups) > maximumGroups {
+		groups = groups[:maximumGroups]
+	}
+	return append([]string(nil), groups...)
+}
+
+func boundedProgressRegressions(regressions []ClusterRecoveryProgressRegression) []ClusterRecoveryProgressRegression {
+	const maximumGroups = 64
+	if len(regressions) > maximumGroups {
+		regressions = regressions[:maximumGroups]
+	}
+	return append([]ClusterRecoveryProgressRegression(nil), regressions...)
 }
 
 func mergeClusterProgressHighWater(highWater, observed map[string]clusterRaftProgress) map[string]clusterRaftProgress {
@@ -332,9 +433,6 @@ func mergeClusterProgressHighWater(highWater, observed map[string]clusterRaftPro
 		}
 		if current.AppliedIndex > prior.AppliedIndex {
 			prior.AppliedIndex = current.AppliedIndex
-		}
-		if current.LastIndex > prior.LastIndex {
-			prior.LastIndex = current.LastIndex
 		}
 		highWater[groupID] = prior
 	}
