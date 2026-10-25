@@ -246,7 +246,7 @@ func TestClusterRecoveryRequiresExactRaftGroupIdentities(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := ClusterRecoveryNodeResult{}
-			evaluateClusterRaftGroups(&result, tc.groups, expected, false)
+			evaluateClusterRaftGroups(&result, tc.groups, expected, false, false)
 			if result.RaftGroupsReady || result.RaftGroupsError == "" || !tc.check(result) {
 				t.Fatalf("result=%+v, want exact identity failure", result)
 			}
@@ -256,9 +256,35 @@ func TestClusterRecoveryRequiresExactRaftGroupIdentities(t *testing.T) {
 
 func TestClusterRecoveryRejectsApplyLagWhenZeroLagRequired(t *testing.T) {
 	result := ClusterRecoveryNodeResult{}
-	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy", CommitIndex: 10, AppliedIndex: 9, LastIndex: 10}}, []string{"system"}, true)
+	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy", CommitIndex: recoveryUint64(10), AppliedIndex: recoveryUint64(9), LastIndex: 10}}, []string{"system"}, true, true)
 	if result.RaftGroupsReady || len(result.LaggingGroups) != 1 || result.LaggingGroups[0] != "system:1" || !strings.Contains(result.RaftGroupsError, "apply lag") {
 		t.Fatalf("result=%+v, want zero-lag rejection", result)
+	}
+}
+
+func recoveryUint64(value uint64) *uint64 {
+	return &value
+}
+
+func TestClusterRecoveryRejectsMissingCommittedProgressEvidence(t *testing.T) {
+	result := ClusterRecoveryNodeResult{}
+	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy"}}, []string{"system"}, true, true)
+	if result.RaftGroupsReady || !reflect.DeepEqual(result.MissingProgressGroups, []string{"system"}) || !strings.Contains(result.RaftGroupsError, "missing committed progress") {
+		t.Fatalf("result=%+v, want missing progress rejection", result)
+	}
+}
+
+func TestClusterRecoveryFenceRejectsHealthyGroupsWithoutProgressFields(t *testing.T) {
+	driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
+		if strings.Contains(command, "cluster readiness check") {
+			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+		}
+		return env.ExecResult{Stdout: `{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy"}]}`}, nil
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	result, err := executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{"ordinals": []any{0}, "timeout": "10ms", "interval": "1ms", "minimumStablePolls": 1, "requireZeroApplyLag": true, "requireConsistentProgress": true})
+	if err == nil || result.Ready || result.RejectionCounts.ProgressMissing == 0 || result.LastRejectedPoll == nil || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].Reasons, []string{"progress-missing"}) {
+		t.Fatalf("result=%+v error=%v, want fail-closed missing progress fence", result, err)
 	}
 }
 
@@ -307,7 +333,7 @@ func TestClusterRecoveryRegressionEvidencePreservesUint64Exactly(t *testing.T) {
 
 func TestClusterRecoveryAllowsUncommittedLastIndexRegression(t *testing.T) {
 	result := ClusterRecoveryNodeResult{}
-	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy", CommitIndex: 10, AppliedIndex: 10, LastIndex: 9}}, []string{"system"}, true)
+	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy", CommitIndex: recoveryUint64(10), AppliedIndex: recoveryUint64(10), LastIndex: 9}}, []string{"system"}, true, true)
 	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: 10, AppliedIndex: 10}})
 	if !result.RaftGroupsReady || len(result.RegressingGroups) != 0 {
 		t.Fatalf("result=%+v, want uncommitted last-index replacement retained as diagnostics only", result)
@@ -427,7 +453,7 @@ func TestClusterRecoveryTimeoutCancelsBlockedInspection(t *testing.T) {
 
 func TestClusterRecoveryRejectionEvidenceDistinguishesEmptyTopology(t *testing.T) {
 	node := ClusterRecoveryNodeResult{ReadinessReady: true}
-	evaluateClusterRaftGroups(&node, nil, []string{"system"}, true)
+	evaluateClusterRaftGroups(&node, nil, []string{"system"}, true, true)
 	result := ClusterRecoveryWaitResult{Attempts: 1, Nodes: []ClusterRecoveryNodeResult{node}}
 	recordClusterRecoveryRejection(&result)
 	if result.RejectionCounts.RaftInspection != 0 || result.RejectionCounts.Topology != 1 || result.LastRejectedPoll == nil || result.LastRejectedPoll.RejectedNodeCount != 1 || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].Reasons, []string{"topology"}) {

@@ -6,7 +6,7 @@ System backup/restore acceptance for procedure-inference ledgers and control sta
 
 ## What this test proves
 
-A backed-up terminal attempt, immutable event IDs/change watermarks, typed run reference, and a completed disabled control state survive restore. A post-backup attempt is absent after restore; a mutation remains excluded while restored-disabled, and explicit re-enable permits exactly one new attempt.
+A backed-up terminal attempt, immutable event IDs/change watermarks, typed run reference, exact system-fixture identities/counts, and the completed disabled control-barrier identity survive restore. A post-backup attempt is absent after restore; a mutation remains excluded while restored-disabled, and explicit re-enable permits exactly one new attempt.
 
 ## Topology
 
@@ -35,7 +35,7 @@ All provider, poll, backup, restore, health, and attempt budgets are finite. The
 
 ## Evidence and artifacts
 
-Sanitized attempt/change/run assertions, in-memory cross-boundary checkpoints, system-backup metadata, restore output, emulator digest/category observations, image provenance, backup-host cleanup proof, and redaction output. This does not claim that principal-scoped user exports contain system inference ledgers.
+Sanitized attempt/change/run assertions, in-memory ledger and control-barrier checkpoints, exact restored system-fixture counts/identities, system-backup metadata, restore output, emulator digest/category observations, image provenance, backup-host cleanup proof, and redaction output. This does not claim that principal-scoped user exports contain system inference ledgers.
 
 ## Common failure modes
 

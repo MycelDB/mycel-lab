@@ -69,7 +69,7 @@ func ValidateProcedureInferenceEventTarget(eventType string, target map[string]a
 			"timeout": {}, "interval": {}, "stableFor": {}, "minimumAttempts": {}, "maximumAttempts": {}, "requireSucceeded": {}, "requireChanges": {}, "checkpoint": {}, "compareCheckpoint": {},
 		},
 		"procedure-inference-control": {
-			"action": {}, "timeout": {},
+			"action": {}, "timeout": {}, "checkpoint": {}, "compareCheckpoint": {},
 		},
 		"procedure-inference-capacity-diagnostics-assert": {
 			"timeout": {}, "tail": {}, "requirePressure": {},
@@ -130,6 +130,19 @@ func ValidateProcedureInferenceEventTarget(eventType string, target map[string]a
 		action := strings.TrimSpace(fmt.Sprint(target["action"]))
 		if action != "enable" && action != "disable" {
 			return fmt.Errorf("%s target.action must be enable or disable", eventType)
+		}
+		for _, key := range []string{"checkpoint", "compareCheckpoint"} {
+			if raw, exists := target[key]; exists {
+				value, ok := raw.(string)
+				if !ok || !validCheckpointName(value) {
+					return fmt.Errorf("%s target.%s must be a safe checkpoint name", eventType, key)
+				}
+			}
+		}
+		if _, checkpoint := target["checkpoint"]; checkpoint {
+			if _, compare := target["compareCheckpoint"]; compare {
+				return fmt.Errorf("%s target cannot set checkpoint and compareCheckpoint together", eventType)
+			}
 		}
 	case "procedure-inference-emulator-assert":
 		minimum, ok := optionalNonnegativeInteger(target["minimumRequests"], 0)

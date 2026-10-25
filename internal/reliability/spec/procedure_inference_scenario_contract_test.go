@@ -76,18 +76,36 @@ func TestProcedureInferenceBackupRestoreScenarioRecoveryFences(t *testing.T) {
 	if recovery["timeout"] != "2m" || recovery["minimumStablePolls"] != 3 || recovery["requireZeroApplyLag"] != true || recovery["requireConsistentProgress"] != true {
 		t.Fatalf("post-restore recovery fence=%+v", recovery)
 	}
-	final := phases["verify-restored-ledger-and-watermarks"]
-	emulatorIndex, diagnosticsIndex := -1, -1
-	for index, event := range final.Events {
-		switch event.Type {
-		case "procedure-inference-emulator-assert":
-			emulatorIndex = index
-		case "procedure-inference-capacity-diagnostics-assert":
-			diagnosticsIndex = index
+	expectedSequences := map[string]string{
+		"capture-system-backup":                 "cluster-backup-create,cluster-backup-validate,procedure-inference-emulator-assert",
+		"create-post-backup-negative-control":   "procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert",
+		"restore-fresh-pvcs":                    "cluster-restore-apply,cluster-recovery-wait,procedure-inference-emulator-assert",
+		"verify-restored-ledger-and-watermarks": "cluster-restore-verify,procedure-inference-await-terminal,procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert,procedure-inference-capacity-diagnostics-assert,cluster-backup-cleanup",
+	}
+	for phaseName, expected := range expectedSequences {
+		events := phases[phaseName].Events
+		types := make([]string, 0, len(events))
+		for _, event := range events {
+			types = append(types, event.Type)
+		}
+		if observed := strings.Join(types, ","); observed != expected {
+			t.Fatalf("phase %s events=%s, want %s", phaseName, observed, expected)
 		}
 	}
-	if emulatorIndex < 0 || diagnosticsIndex < 0 || emulatorIndex > diagnosticsIndex {
-		t.Fatalf("final emulator index=%d diagnostics index=%d, want formal provider assertion first", emulatorIndex, diagnosticsIndex)
+	establish := phases["establish-backed-up-attempt"]
+	if establish.Events[6].Target["checkpoint"] != "disabled-barrier" {
+		t.Fatalf("disable barrier checkpoint=%v", establish.Events[6].Target)
+	}
+	final := phases["verify-restored-ledger-and-watermarks"]
+	if final.Events[0].Target["expectedNodes"] != 3 || final.Events[0].Target["expectedEdges"] != 1 || final.Events[1].Target["compareCheckpoint"] != "backed-up-ledger" || final.Events[2].Target["compareCheckpoint"] != "disabled-barrier" {
+		t.Fatalf("restored identity checkpoints are incomplete: %+v", final.Events[:3])
+	}
+	if final.Events[8].Target["minimumRequests"] != 1 || final.Events[8].Target["maximumRequests"] != 1 || final.Events[10].Type != "cluster-backup-cleanup" {
+		t.Fatalf("final provider and cleanup bounds are incomplete: %+v", final.Events[8:])
+	}
+	finalAssertions, _ := scenario.Assertions["final"].(map[string]any)
+	if finalAssertions["requireNoAcknowledgedGraphTransactionLoss"] == true {
+		t.Fatal("generic actor-count oracle must not replace exact system-backup fixture verification")
 	}
 }
 
@@ -102,6 +120,8 @@ func TestProcedureInferenceEventTargetsFailClosed(t *testing.T) {
 		{name: "invalid stable duration", event: "procedure-inference-await-terminal", target: map[string]any{"stableFor": "0s"}, contains: "positive duration"},
 		{name: "unbounded attempts", event: "procedure-inference-await-terminal", target: map[string]any{"minimumAttempts": 1, "maximumAttempts": 257}, contains: "256"},
 		{name: "unknown control", event: "procedure-inference-control", target: map[string]any{"action": "revoke-all"}, contains: "enable or disable"},
+		{name: "unsafe control checkpoint", event: "procedure-inference-control", target: map[string]any{"action": "disable", "checkpoint": "../unsafe"}, contains: "safe checkpoint"},
+		{name: "conflicting control checkpoints", event: "procedure-inference-control", target: map[string]any{"action": "disable", "checkpoint": "before", "compareCheckpoint": "after"}, contains: "cannot set"},
 		{name: "emulator string boolean", event: "procedure-inference-emulator-assert", target: validEmulatorTarget(map[string]any{"requireSingleItem": "maybe"}), contains: "must be boolean"},
 		{name: "emulator invalid outcome count", event: "procedure-inference-emulator-assert", target: validEmulatorTarget(map[string]any{"minimumOutcomes": map[string]any{"success": "nope"}}), contains: "bounded nonnegative integers"},
 		{name: "emulator blank model", event: "procedure-inference-emulator-assert", target: validEmulatorTarget(map[string]any{"expectedModels": []any{""}}), contains: "nonempty string list"},

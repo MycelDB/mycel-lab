@@ -40,6 +40,7 @@ type ClusterRecoveryRejectionCounts struct {
 	Leadership       int `json:"leadership"`
 	Health           int `json:"health"`
 	ApplyLag         int `json:"applyLag"`
+	ProgressMissing  int `json:"progressMissing"`
 	ProgressRollback int `json:"progressRollback"`
 }
 
@@ -67,24 +68,25 @@ type ClusterRecoveryProgressRegression struct {
 }
 
 type ClusterRecoveryNodeResult struct {
-	Ordinal              int                                 `json:"ordinal"`
-	ReadinessReady       bool                                `json:"readinessReady"`
-	RaftGroupsReady      bool                                `json:"raftGroupsReady"`
-	GroupCount           int                                 `json:"groupCount"`
-	MissingGroups        []string                            `json:"missingGroups,omitempty"`
-	DuplicateGroups      []string                            `json:"duplicateGroups,omitempty"`
-	UnexpectedGroups     []string                            `json:"unexpectedGroups,omitempty"`
-	GroupsWithoutLeader  []string                            `json:"groupsWithoutLeader,omitempty"`
-	UnhealthyGroups      []string                            `json:"unhealthyGroups,omitempty"`
-	LaggingGroups        []string                            `json:"laggingGroups,omitempty"`
-	RegressingGroups     []string                            `json:"regressingGroups,omitempty"`
-	ProgressRegressions  []ClusterRecoveryProgressRegression `json:"progressRegressions,omitempty"`
-	ReadinessStdout      string                              `json:"readinessStdout,omitempty"`
-	ReadinessError       string                              `json:"readinessError,omitempty"`
-	RaftGroupsStdout     string                              `json:"raftGroupsStdout,omitempty"`
-	RaftGroupsError      string                              `json:"raftGroupsError,omitempty"`
-	progress             map[string]clusterRaftProgress
-	raftInspectionFailed bool
+	Ordinal               int                                 `json:"ordinal"`
+	ReadinessReady        bool                                `json:"readinessReady"`
+	RaftGroupsReady       bool                                `json:"raftGroupsReady"`
+	GroupCount            int                                 `json:"groupCount"`
+	MissingGroups         []string                            `json:"missingGroups,omitempty"`
+	DuplicateGroups       []string                            `json:"duplicateGroups,omitempty"`
+	UnexpectedGroups      []string                            `json:"unexpectedGroups,omitempty"`
+	GroupsWithoutLeader   []string                            `json:"groupsWithoutLeader,omitempty"`
+	UnhealthyGroups       []string                            `json:"unhealthyGroups,omitempty"`
+	LaggingGroups         []string                            `json:"laggingGroups,omitempty"`
+	MissingProgressGroups []string                            `json:"missingProgressGroups,omitempty"`
+	RegressingGroups      []string                            `json:"regressingGroups,omitempty"`
+	ProgressRegressions   []ClusterRecoveryProgressRegression `json:"progressRegressions,omitempty"`
+	ReadinessStdout       string                              `json:"readinessStdout,omitempty"`
+	ReadinessError        string                              `json:"readinessError,omitempty"`
+	RaftGroupsStdout      string                              `json:"raftGroupsStdout,omitempty"`
+	RaftGroupsError       string                              `json:"raftGroupsError,omitempty"`
+	progress              map[string]clusterRaftProgress
+	raftInspectionFailed  bool
 }
 
 type clusterRaftProgress struct {
@@ -93,12 +95,12 @@ type clusterRaftProgress struct {
 }
 
 type clusterRaftGroup struct {
-	GroupID      string `json:"group_id"`
-	LeaderNodeID uint64 `json:"leader_node_id"`
-	Health       string `json:"health"`
-	CommitIndex  uint64 `json:"commit_index"`
-	AppliedIndex uint64 `json:"applied_index"`
-	LastIndex    uint64 `json:"last_index"`
+	GroupID      string  `json:"group_id"`
+	LeaderNodeID uint64  `json:"leader_node_id"`
+	Health       string  `json:"health"`
+	CommitIndex  *uint64 `json:"commit_index"`
+	AppliedIndex *uint64 `json:"applied_index"`
+	LastIndex    uint64  `json:"last_index"`
 }
 
 type clusterRaftGroupsResponse struct {
@@ -253,11 +255,11 @@ func inspectClusterRecoveryNode(ctx context.Context, driver env.EnvironmentDrive
 		result.raftInspectionFailed = true
 		return result
 	}
-	evaluateClusterRaftGroups(&result, response.Groups, expectedGroupIDs, boolTarget(target, "requireZeroApplyLag", false))
+	evaluateClusterRaftGroups(&result, response.Groups, expectedGroupIDs, boolTarget(target, "requireZeroApplyLag", false), boolTarget(target, "requireConsistentProgress", false))
 	return result
 }
 
-func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clusterRaftGroup, expectedGroupIDs []string, requireZeroApplyLag bool) {
+func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clusterRaftGroup, expectedGroupIDs []string, requireZeroApplyLag, requireConsistentProgress bool) {
 	result.GroupCount = len(groups)
 	result.progress = make(map[string]clusterRaftProgress, len(groups))
 	expected := make(map[string]struct{}, len(expectedGroupIDs))
@@ -274,9 +276,15 @@ func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clust
 		if !strings.EqualFold(strings.TrimSpace(group.Health), "healthy") {
 			result.UnhealthyGroups = append(result.UnhealthyGroups, groupID+":"+group.Health)
 		}
-		result.progress[groupID] = clusterRaftProgress{CommitIndex: group.CommitIndex, AppliedIndex: group.AppliedIndex}
-		if requireZeroApplyLag && group.CommitIndex != group.AppliedIndex {
-			result.LaggingGroups = append(result.LaggingGroups, fmt.Sprintf("%s:%d", groupID, absoluteDifference(group.CommitIndex, group.AppliedIndex)))
+		if group.CommitIndex == nil || group.AppliedIndex == nil {
+			if requireZeroApplyLag || requireConsistentProgress {
+				result.MissingProgressGroups = append(result.MissingProgressGroups, groupID)
+			}
+			continue
+		}
+		result.progress[groupID] = clusterRaftProgress{CommitIndex: *group.CommitIndex, AppliedIndex: *group.AppliedIndex}
+		if requireZeroApplyLag && *group.CommitIndex != *group.AppliedIndex {
+			result.LaggingGroups = append(result.LaggingGroups, fmt.Sprintf("%s:%d", groupID, absoluteDifference(*group.CommitIndex, *group.AppliedIndex)))
 		}
 	}
 	for _, groupID := range expectedGroupIDs {
@@ -304,7 +312,8 @@ func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clust
 	sort.Strings(result.GroupsWithoutLeader)
 	sort.Strings(result.UnhealthyGroups)
 	sort.Strings(result.LaggingGroups)
-	result.RaftGroupsReady = result.GroupCount == len(expectedGroupIDs) && len(result.MissingGroups) == 0 && len(result.DuplicateGroups) == 0 && len(result.UnexpectedGroups) == 0 && len(result.GroupsWithoutLeader) == 0 && len(result.UnhealthyGroups) == 0 && len(result.LaggingGroups) == 0
+	sort.Strings(result.MissingProgressGroups)
+	result.RaftGroupsReady = result.GroupCount == len(expectedGroupIDs) && len(result.MissingGroups) == 0 && len(result.DuplicateGroups) == 0 && len(result.UnexpectedGroups) == 0 && len(result.GroupsWithoutLeader) == 0 && len(result.UnhealthyGroups) == 0 && len(result.LaggingGroups) == 0 && len(result.MissingProgressGroups) == 0
 	if result.RaftGroupsReady {
 		return
 	}
@@ -329,6 +338,9 @@ func evaluateClusterRaftGroups(result *ClusterRecoveryNodeResult, groups []clust
 	}
 	if len(result.LaggingGroups) > 0 {
 		reasons = append(reasons, "groups with apply lag: "+strings.Join(result.LaggingGroups, ", "))
+	}
+	if len(result.MissingProgressGroups) > 0 {
+		reasons = append(reasons, "groups missing committed progress: "+strings.Join(result.MissingProgressGroups, ", "))
 	}
 	result.RaftGroupsError = strings.Join(reasons, "; ")
 }
@@ -400,6 +412,9 @@ func recordClusterRecoveryRejection(result *ClusterRecoveryWaitResult) {
 			if !topologyRejected {
 				summary.LaggingGroups = boundedRecoveryGroups(node.LaggingGroups)
 			}
+		}
+		if len(node.MissingProgressGroups) > 0 {
+			addReason("progress-missing", &result.RejectionCounts.ProgressMissing)
 		}
 		if len(node.ProgressRegressions) > 0 {
 			addReason("progress-rollback", &result.RejectionCounts.ProgressRollback)

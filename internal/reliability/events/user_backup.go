@@ -48,6 +48,10 @@ type userBackupFixtureResult struct {
 	NodesCreated  int    `json:"nodesCreated"`
 	EdgesCreated  int    `json:"edgesCreated"`
 	BlobsCreated  int    `json:"blobsCreated"`
+	nodeIDs       []string
+	edgeID        string
+	edgeFrom      string
+	edgeTo        string
 }
 
 type userBackupVerifyResult struct {
@@ -174,7 +178,12 @@ func executeUserBackupFixture(ctx context.Context, driver env.EnvironmentDriver,
 	if err != nil {
 		return userBackupFixtureResult{}, actorID, assignment.Username, err
 	}
-	if _, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: append(base, "graph", "edge", "create", "--transaction-id", txID, "--from", nodeA, "--to", nodeB, "--kind", "NT2_RESTORES", "--props-json", `{"fixture":"nt2"}`)}); err != nil {
+	edgeOut, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: append(base, "graph", "edge", "create", "--transaction-id", txID, "--from", nodeA, "--to", nodeB, "--kind", "NT2_RESTORES", "--props-json", `{"fixture":"nt2"}`)})
+	if err != nil {
+		return userBackupFixtureResult{}, actorID, assignment.Username, err
+	}
+	edgeID, err := jsonStringField(edgeOut.Stdout, "edge_id", "edgeId")
+	if err != nil {
 		return userBackupFixtureResult{}, actorID, assignment.Username, err
 	}
 	blobPath := "/tmp/mycel-lab-nt2-blob-fixture.txt"
@@ -182,14 +191,19 @@ func executeUserBackupFixture(ctx context.Context, driver env.EnvironmentDriver,
 	if _, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: []string{"sh", "-ec", "printf %s " + shellQuote(payload) + " > " + shellQuote(blobPath)}}); err != nil {
 		return userBackupFixtureResult{}, actorID, assignment.Username, err
 	}
-	if _, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: append(base, "graph", "blob-node", "create", blobPath, "--transaction-id", txID, "--mime-type", "text/plain", "--props-json", fmt.Sprintf(`{"tags":["%s"],"fixture":"blob"}`, fixtureLabel), "--payload-json", `{"text":"nt2 blob fixture"}`)}); err != nil {
+	blobOut, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: append(base, "graph", "blob-node", "create", blobPath, "--transaction-id", txID, "--mime-type", "text/plain", "--props-json", fmt.Sprintf(`{"tags":["%s"],"fixture":"blob"}`, fixtureLabel), "--payload-json", `{"text":"nt2 blob fixture"}`)})
+	if err != nil {
+		return userBackupFixtureResult{}, actorID, assignment.Username, err
+	}
+	blobNodeID, err := jsonNestedStringField(blobOut.Stdout, "node", "node_id", "nodeId")
+	if err != nil {
 		return userBackupFixtureResult{}, actorID, assignment.Username, err
 	}
 	if _, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: append(base, "transaction", "commit", txID)}); err != nil {
 		return userBackupFixtureResult{}, actorID, assignment.Username, err
 	}
 	_, _ = driver.Exec(ctx, environment, node, env.ExecRequest{Command: append(base, "session", "close", sessionID)})
-	return userBackupFixtureResult{SessionID: sessionID, TransactionID: txID, NodesCreated: 3, EdgesCreated: 1, BlobsCreated: 1}, actorID, assignment.Username, nil
+	return userBackupFixtureResult{SessionID: sessionID, TransactionID: txID, NodesCreated: 3, EdgesCreated: 1, BlobsCreated: 1, nodeIDs: []string{nodeA, nodeB, blobNodeID}, edgeID: edgeID, edgeFrom: nodeA, edgeTo: nodeB}, actorID, assignment.Username, nil
 }
 
 func executeUserBackupVerify(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, target map[string]any, state map[string]UserBackupOperationResult) (userBackupVerifyResult, error) {
@@ -358,6 +372,18 @@ func jsonStringField(raw string, names ...string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("JSON output missing %s", strings.Join(names, "/"))
+}
+
+func jsonNestedStringField(raw, object string, names ...string) (string, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return "", fmt.Errorf("decode JSON output: %w", err)
+	}
+	nested := doc[object]
+	if len(nested) == 0 {
+		return "", fmt.Errorf("JSON output missing %s", object)
+	}
+	return jsonStringField(string(nested), names...)
 }
 
 func findAssignment(resources *provision.ScenarioResources, actorID string) (provision.ActorAssignment, bool) {

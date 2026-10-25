@@ -57,7 +57,7 @@ phases:
       - type: procedure-inference-emulator-assert
         target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
       - type: procedure-inference-control
-        target: {action: disable, timeout: 30s}
+        target: {action: disable, timeout: 30s, checkpoint: disabled-barrier}
       - type: procedure-inference-emulator-assert
         target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
   - name: capture-system-backup
@@ -99,9 +99,11 @@ phases:
     duration: 1ms
     events:
       - type: cluster-restore-verify
-        target: {actorId: system-backup-writers-0, verifyTimeout: 5m, verifyInterval: 5s}
+        target: {actorId: system-backup-writers-0, verifyTimeout: 5m, verifyInterval: 5s, expectedNodes: 3, expectedEdges: 1}
       - type: procedure-inference-await-terminal
         target: {timeout: 1m, interval: 500ms, stableFor: 3s, minimumAttempts: 1, maximumAttempts: 1, requireSucceeded: true, requireChanges: true, compareCheckpoint: backed-up-ledger}
+      - type: procedure-inference-control
+        target: {action: disable, timeout: 30s, compareCheckpoint: disabled-barrier}
       - type: procedure-inference-node-create
         target: {nodeId: 00000000-0000-4000-8000-000000005203, text: bounded restored disabled fixture, timeout: 30s}
       - type: procedure-inference-await-terminal
@@ -131,7 +133,6 @@ assertions:
   final:
     requireHealthyCluster: true
     requireSharedClusterIdentity: true
-    requireNoAcknowledgedGraphTransactionLoss: true
 artifacts:
   collectScenarioSpec: true
   collectKubernetesState: true

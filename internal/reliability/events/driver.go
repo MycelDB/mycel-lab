@@ -172,7 +172,7 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 			snapshots = r.managedEndpointSnapshots()
 		}
 		result, err := executeSystemBackupEvent(ctx, r.Driver, r.Environment, r.Scenario, r.Resources, event.Type, event.Target, r.systemBackups)
-		if event.Type == "cluster-backup-create" || event.Type == "cluster-restore-apply" {
+		if event.Type == "system-backup-fixture" || event.Type == "cluster-backup-create" || event.Type == "cluster-restore-apply" {
 			r.systemBackups[systemBackupKey(event.Target)] = result
 		}
 		payload := map[string]any{"systemBackup": result}

@@ -663,6 +663,47 @@ func TestProcedureControlBarrierRequiresExactAttribution(t *testing.T) {
 	}
 }
 
+func TestProcedureControlCheckpointSurvivesIdempotentComparison(t *testing.T) {
+	completionRevision := uint64(42)
+	driver := &recordingDriver{execResult: func(string) (env.ExecResult, error) {
+		return env.ExecResult{Stdout: fmt.Sprintf(`{"procedure_json":"{}","control":{"space_id":"space","domain_id":"domain","procedure_id":"procedure","procedure_version":1,"target_status":2,"control_epoch":7,"controlling_principal_id":"auditor","affected_partitions":[0,1],"acknowledged_partitions":[0,1],"completed":true,"completion_revision":%d}}`, completionRevision)}, nil
+	}}
+	resources := &provision.ScenarioResources{ProcedureInference: &provision.ProcedureInferenceResources{SpaceID: "space", DomainID: "domain", ProcedureID: "procedure", BindingID: "binding", AuditActorID: "auditor-0"}, Assignments: []provision.ActorAssignment{{ActorID: "auditor-0", PrincipalID: "auditor", Username: "audit", Password: "password"}}}
+	checkpoints := map[string]procedureInferenceCheckpoint{}
+	if _, err := controlProcedureInference(context.Background(), driver, env.Environment{Name: "test"}, resources, checkpoints, map[string]any{"action": "disable", "checkpoint": "disabled"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := controlProcedureInference(context.Background(), driver, env.Environment{Name: "test"}, resources, checkpoints, map[string]any{"action": "disable", "compareCheckpoint": "disabled"})
+	if err != nil || !result.ControlCheckpointProved || result.ControlCompletionRevision != 42 {
+		t.Fatalf("result=%+v error=%v, want exact idempotent barrier comparison", result, err)
+	}
+	completionRevision++
+	if _, err := controlProcedureInference(context.Background(), driver, env.Environment{Name: "test"}, resources, checkpoints, map[string]any{"action": "disable", "compareCheckpoint": "disabled"}); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("error=%v, want changed restored barrier rejection", err)
+	}
+}
+
+func TestProcedureControlCheckpointRequiresExactBarrierIdentity(t *testing.T) {
+	expected := procedureControlCheckpoint{Action: "disable", SpaceID: "space", DomainID: "domain", ProcedureID: "procedure", ProcedureVersion: 1, TargetStatus: 2, ControlEpoch: 7, ControllingPrincipalID: "auditor", AffectedPartitions: []uint32{0, 1}, AcknowledgedPartitions: []uint32{0, 1}, Completed: true, CompletionRevision: 42}
+	if !sameProcedureControlCheckpoint(expected, expected) {
+		t.Fatal("exact barrier checkpoint rejected")
+	}
+	mutations := []func(*procedureControlCheckpoint){
+		func(value *procedureControlCheckpoint) { value.Action = "enable" },
+		func(value *procedureControlCheckpoint) { value.ControlEpoch++ },
+		func(value *procedureControlCheckpoint) { value.CompletionRevision++ },
+		func(value *procedureControlCheckpoint) { value.ControllingPrincipalID = "other" },
+		func(value *procedureControlCheckpoint) { value.AcknowledgedPartitions = []uint32{0} },
+	}
+	for _, mutate := range mutations {
+		observed := expected
+		mutate(&observed)
+		if sameProcedureControlCheckpoint(expected, observed) {
+			t.Fatalf("changed barrier checkpoint accepted: %+v", observed)
+		}
+	}
+}
+
 func TestProcedureInferenceRunReferenceValidation(t *testing.T) {
 	configured := &provision.ProcedureInferenceResources{DomainID: "domain", ProcedureID: "procedure", BindingID: "binding", IntelligenceProfileID: "profile", EndpointID: "endpoint", ModelID: "model", CapabilityID: "capability"}
 	attempt := procedureInferenceAttempt{ID: "attempt", RunID: "run", InvocationID: "invocation"}

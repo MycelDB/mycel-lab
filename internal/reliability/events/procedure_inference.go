@@ -61,6 +61,8 @@ type ProcedureInferenceResult struct {
 	SanitizedEvidenceProved        bool     `json:"sanitizedEvidenceProved,omitempty"`
 	ControlAction                  string   `json:"controlAction,omitempty"`
 	ControlEpoch                   uint64   `json:"controlEpoch,omitempty"`
+	ControlCompletionRevision      uint64   `json:"controlCompletionRevision,omitempty"`
+	ControlCheckpointProved        bool     `json:"controlCheckpointProved,omitempty"`
 	AffectedPartitions             []uint32 `json:"affectedPartitions,omitempty"`
 	AcknowledgedPartitions         []uint32 `json:"acknowledgedPartitions,omitempty"`
 	ControlCompleted               bool     `json:"controlCompleted,omitempty"`
@@ -81,6 +83,22 @@ type procedureInferenceCheckpoint struct {
 	ChangeHighWaterSequence       uint64
 	EarliestRetainedSequence      uint64
 	EarliestRetainedStateSequence uint64
+	Control                       *procedureControlCheckpoint
+}
+
+type procedureControlCheckpoint struct {
+	Action                 string
+	SpaceID                string
+	DomainID               string
+	ProcedureID            string
+	ProcedureVersion       int32
+	TargetStatus           int32
+	ControlEpoch           uint64
+	ControllingPrincipalID string
+	AffectedPartitions     []uint32
+	AcknowledgedPartitions []uint32
+	Completed              bool
+	CompletionRevision     uint64
 }
 
 type procedureInferenceAttempt struct {
@@ -242,7 +260,7 @@ func executeProcedureInferenceEvent(ctx context.Context, driver env.EnvironmentD
 	case "procedure-inference-await-terminal":
 		return awaitProcedureInference(ctx, driver, environment, resources, checkpoints, target)
 	case "procedure-inference-control":
-		return controlProcedureInference(ctx, driver, environment, resources, target)
+		return controlProcedureInference(ctx, driver, environment, resources, checkpoints, target)
 	case "procedure-inference-capacity-diagnostics-assert":
 		return assertProcedureInferenceCapacityDiagnostics(ctx, environment, resources, target)
 	default:
@@ -535,7 +553,7 @@ func awaitProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 	}
 }
 
-func controlProcedureInference(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, target map[string]any) (ProcedureInferenceResult, error) {
+func controlProcedureInference(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, checkpoints map[string]procedureInferenceCheckpoint, target map[string]any) (ProcedureInferenceResult, error) {
 	configured := resources.ProcedureInference
 	result := ProcedureInferenceResult{Operation: "procedure-inference-control", ProcedureID: configured.ProcedureID, BindingID: configured.BindingID, ControlAction: stringTarget(target, "action")}
 	operationCtx, cancel := procedureInferenceTimeout(ctx, target, 30*time.Second)
@@ -558,8 +576,53 @@ func controlProcedureInference(ctx context.Context, driver env.EnvironmentDriver
 	if err != nil {
 		return result, err
 	}
-	result.ControlEpoch, result.AffectedPartitions, result.AcknowledgedPartitions, result.ControlCompleted = control.ControlEpoch, affected, acknowledged, true
+	result.ControlEpoch, result.ControlCompletionRevision, result.AffectedPartitions, result.AcknowledgedPartitions, result.ControlCompleted = control.ControlEpoch, control.CompletionRevision, affected, acknowledged, true
+	observed := procedureControlCheckpoint{
+		Action: result.ControlAction, SpaceID: control.SpaceID, DomainID: control.DomainID, ProcedureID: control.ProcedureID,
+		ProcedureVersion: control.ProcedureVersion, TargetStatus: control.TargetStatus, ControlEpoch: control.ControlEpoch,
+		ControllingPrincipalID: control.ControllingPrincipalID, AffectedPartitions: affected, AcknowledgedPartitions: acknowledged,
+		Completed: control.Completed, CompletionRevision: control.CompletionRevision,
+	}
+	if name := stringTarget(target, "checkpoint"); name != "" {
+		if checkpoints == nil {
+			return result, errors.New("procedure inference control checkpoints are unavailable")
+		}
+		checkpoint := checkpoints[name]
+		checkpoint.Control = &observed
+		checkpoints[name] = checkpoint
+	}
+	if name := stringTarget(target, "compareCheckpoint"); name != "" {
+		checkpoint, ok := checkpoints[name]
+		if !ok || checkpoint.Control == nil {
+			return result, fmt.Errorf("procedure inference control checkpoint %q was not recorded", name)
+		}
+		if !sameProcedureControlCheckpoint(*checkpoint.Control, observed) {
+			return result, errors.New("restored procedure control barrier does not match checkpoint")
+		}
+		result.ControlCheckpointProved = true
+	}
 	return result, nil
+}
+
+func sameProcedureControlCheckpoint(expected, observed procedureControlCheckpoint) bool {
+	return expected.Action == observed.Action && expected.SpaceID == observed.SpaceID && expected.DomainID == observed.DomainID &&
+		expected.ProcedureID == observed.ProcedureID && expected.ProcedureVersion == observed.ProcedureVersion &&
+		expected.TargetStatus == observed.TargetStatus && expected.ControlEpoch == observed.ControlEpoch &&
+		expected.ControllingPrincipalID == observed.ControllingPrincipalID && expected.Completed == observed.Completed &&
+		expected.CompletionRevision == observed.CompletionRevision && uint32SlicesEqual(expected.AffectedPartitions, observed.AffectedPartitions) &&
+		uint32SlicesEqual(expected.AcknowledgedPartitions, observed.AcknowledgedPartitions)
+}
+
+func uint32SlicesEqual(left, right []uint32) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateProcedureControlBarrier(control procedureControlBarrier, action string, configured *provision.ProcedureInferenceResources, auditor provision.ActorAssignment) ([]uint32, []uint32, error) {
