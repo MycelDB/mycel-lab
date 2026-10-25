@@ -69,6 +69,19 @@ func (r *DriverRuntime) managedEndpointSnapshots() []env.EndpointForwardSnapshot
 	return r.EndpointRecovery.SnapshotEndpoints()
 }
 
+func (r *DriverRuntime) recoverNodeFromSnapshots(ctx context.Context, snapshots []env.EndpointForwardSnapshot, nodeName string) (endpointRecoveryResult, bool, error) {
+	for _, snapshot := range snapshots {
+		if snapshot.NodeName != nodeName {
+			continue
+		}
+		recoveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		result, err := r.recoverEndpoint(recoveryCtx, snapshot)
+		return result, true, err
+	}
+	return endpointRecoveryResult{}, false, nil
+}
+
 func (r *DriverRuntime) recoverEndpoints(ctx context.Context, snapshots []env.EndpointForwardSnapshot) ([]endpointRecoveryResult, error) {
 	recoveryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()

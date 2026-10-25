@@ -167,17 +167,48 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 		}
 		return map[string]any{"userBackup": result}, err
 	case "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "cluster-backup-cleanup":
+		var snapshots []env.EndpointForwardSnapshot
+		if event.Type == "cluster-restore-apply" {
+			snapshots = r.managedEndpointSnapshots()
+		}
 		result, err := executeSystemBackupEvent(ctx, r.Driver, r.Environment, r.Scenario, r.Resources, event.Type, event.Target, r.systemBackups)
 		if event.Type == "cluster-backup-create" || event.Type == "cluster-restore-apply" {
 			r.systemBackups[systemBackupKey(event.Target)] = result
 		}
-		return map[string]any{"systemBackup": result}, err
+		payload := map[string]any{"systemBackup": result}
+		if err != nil || len(snapshots) == 0 {
+			return payload, err
+		}
+		recoveries, recoveryErr := r.recoverEndpoints(ctx, snapshots)
+		payload["endpointRecoveries"] = recoveries
+		return payload, recoveryErr
 	case "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined":
+		var snapshots []env.EndpointForwardSnapshot
+		if event.Type == "raft-pvc-replace-node" {
+			snapshots = r.managedEndpointSnapshots()
+		}
 		result, err := executeRaftRejoinEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Type, event.Target)
-		return map[string]any{"raftSnapshot": result}, err
+		payload := map[string]any{"raftSnapshot": result}
+		if err != nil || len(snapshots) == 0 || event.Type != "raft-pvc-replace-node" {
+			return payload, err
+		}
+		recovery, managed, recoveryErr := r.recoverNodeFromSnapshots(ctx, snapshots, fmt.Sprintf("myceld-%d", result.Ordinal))
+		if managed {
+			payload["endpointRecovery"] = recovery
+		}
+		return payload, recoveryErr
 	case "identity-duplicate-principal-replay":
+		snapshots := r.managedEndpointSnapshots()
 		result, err := executeIdentityReplayEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Target)
-		return map[string]any{"identityReplay": result}, err
+		payload := map[string]any{"identityReplay": result}
+		if err != nil || len(snapshots) == 0 {
+			return payload, err
+		}
+		recovery, managed, recoveryErr := r.recoverNodeFromSnapshots(ctx, snapshots, fmt.Sprintf("myceld-%d", result.RestartOrdinal))
+		if managed {
+			payload["endpointRecovery"] = recovery
+		}
+		return payload, recoveryErr
 	default:
 		return nil, fmt.Errorf("unsupported event type %q", event.Type)
 	}
