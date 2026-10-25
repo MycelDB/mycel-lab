@@ -14,6 +14,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/actors"
 	"github.com/MycelDB/mycel-lab/internal/reliability/artifacts"
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
+	"github.com/MycelDB/mycel-lab/internal/reliability/emulator"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/events"
 	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
@@ -330,6 +331,78 @@ func TestRunScenarioRoutesImageOverrideThroughK3DClusterImageOnly(t *testing.T) 
 	if _, leaked := driver.createdScenario.Environment.Options["imageOverride"]; leaked {
 		t.Fatalf("K3D scenario received Compose-only imageOverride: %+v", driver.createdScenario.Environment.Options)
 	}
+}
+
+func TestRunScenarioPersistsFinalProviderEmulatorObservations(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	scenario.Environment.Driver = "compose"
+	scenario.Environment.Options = map[string]any{"composeFile": "compose.yml"}
+	scenario.ActorGroups = nil
+	scenario.Phases = nil
+	scenario.Assertions = nil
+	observations := providerObservationJSONL(t, 2)
+	driver := &recordingDriver{omitEndpoints: true, providerEmulator: true, providerObservations: observations}
+	result, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver})
+	if err != nil {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	if driver.providerObservationCalls != 1 {
+		t.Fatalf("final provider observation captures=%d, want 1", driver.providerObservationCalls)
+	}
+	raw, err := os.ReadFile(filepath.Join(result.ArtifactRoot, "provider", "emulator-observations.jsonl"))
+	if err != nil {
+		t.Fatalf("read final observations: %v", err)
+	}
+	decoded, err := emulator.DecodeObservationEvidence(string(raw))
+	if err != nil || len(decoded) != 2 {
+		t.Fatalf("persisted final observations count=%d err=%v raw=%q", len(decoded), err, raw)
+	}
+}
+
+func TestCaptureFinalProviderEmulatorObservationsRequiresNonemptyValidEvidence(t *testing.T) {
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspector := &providerObservationInspector{}
+	if err := captureFinalProviderEmulatorObservations(context.Background(), sink, inspector, env.Environment{}, true); err == nil || !strings.Contains(err.Error(), "persist final provider emulator observations failed") {
+		t.Fatalf("empty final observations error=%v", err)
+	}
+	inspector.output = `{"sequence":1,"unexpected":"unsafe"}`
+	if err := captureFinalProviderEmulatorObservations(context.Background(), sink, inspector, env.Environment{}, true); err == nil || !strings.Contains(err.Error(), "persist final provider emulator observations failed") {
+		t.Fatalf("unsafe final observations error=%v", err)
+	}
+	inspector.err = errors.New("raw provider failure")
+	if err := captureFinalProviderEmulatorObservations(context.Background(), sink, inspector, env.Environment{}, true); err == nil || err.Error() != "capture final provider emulator observations failed" || strings.Contains(err.Error(), "raw provider") {
+		t.Fatalf("capture error was not closed: %v", err)
+	}
+}
+
+func providerObservationJSONL(t *testing.T, count int) string {
+	t.Helper()
+	var lines strings.Builder
+	for index := 0; index < count; index++ {
+		observation := emulator.Observation{
+			Method: "POST", Path: "/v1/chat/completions", ContentLength: 42, Capability: "generation", Model: "procedure-generation-v1",
+			Sequence: index + 1, Attempt: index + 1, BatchItemCount: 1, BodySHA256: strings.Repeat("a", 64), InputSHA256: strings.Repeat("b", 64), Outcome: "success", Status: 200,
+		}
+		raw, err := json.Marshal(observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines.Write(raw)
+		lines.WriteByte('\n')
+	}
+	return lines.String()
+}
+
+type providerObservationInspector struct {
+	output string
+	err    error
+}
+
+func (d *providerObservationInspector) ProviderEmulatorObservations(context.Context, env.Environment) (env.ExecResult, error) {
+	return env.ExecResult{Stdout: d.output}, d.err
 }
 
 func TestRunScenarioRoutesImageOverrideThroughComposeCreate(t *testing.T) {
@@ -854,6 +927,9 @@ type recordingDriver struct {
 	waitErr                  error
 	captured                 int
 	omitEndpoints            bool
+	providerEmulator         bool
+	providerObservations     string
+	providerObservationCalls int
 	createdScenario          spec.ResolvedScenario
 	preflightEnvironmentSpec spec.EnvironmentSpec
 	createdEnvironmentSpec   spec.EnvironmentSpec
@@ -871,7 +947,11 @@ func (d *recordingDriver) Preflight(_ context.Context, environmentSpec spec.Envi
 func (d *recordingDriver) Create(_ context.Context, scenario spec.ResolvedScenario, environmentSpec spec.EnvironmentSpec) (env.Environment, error) {
 	d.createdScenario = scenario
 	d.createdEnvironmentSpec = environmentSpec
-	return env.Environment{Name: scenario.Metadata.Name, Driver: "test", Namespace: "test", Metadata: map[string]string{"nodeCount": "1"}}, nil
+	metadata := map[string]string{"nodeCount": "1"}
+	if d.providerEmulator {
+		metadata["providerEmulator"] = "true"
+	}
+	return env.Environment{Name: scenario.Metadata.Name, Driver: "test", Namespace: "test", Metadata: metadata}, nil
 }
 func (d *recordingDriver) WaitReady(context.Context, env.Environment) error { return d.waitErr }
 func (d *recordingDriver) Nodes(context.Context, env.Environment) ([]env.Node, error) {
@@ -909,4 +989,8 @@ func (d *recordingDriver) CaptureState(_ context.Context, environment env.Enviro
 	d.captured++
 	_, err := sink.WriteJSON("environment/state.json", environment)
 	return err
+}
+func (d *recordingDriver) ProviderEmulatorObservations(context.Context, env.Environment) (env.ExecResult, error) {
+	d.providerObservationCalls++
+	return env.ExecResult{Stdout: d.providerObservations}, nil
 }

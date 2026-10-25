@@ -552,6 +552,15 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if budgetErr := recorder.budgetError(); budgetErr != nil {
 		return failAfterEnvironmentCreate(RunFailed, budgetErr)
 	}
+	if !opts.DryRun && environment.Driver != "dry-run" && environment.Metadata["providerEmulator"] == "true" {
+		inspector, ok := driver.(env.ProviderEmulatorInspector)
+		if !ok {
+			return failAfterEnvironmentCreate(RunFailed, errors.New("provider emulator observation capture is unsupported"))
+		}
+		if err := captureFinalProviderEmulatorObservations(ctx, sink, inspector, environment, scenario.ProcedureInference != nil); err != nil {
+			return failAfterEnvironmentCreate(RunFailed, err)
+		}
+	}
 	if err := runFinalClusterAssertions(ctx, sink, scenario, driver, environment, nodes, !provisionDryRun); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
@@ -568,6 +577,17 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return finish(RunFailed, err)
 	}
 	return finish(RunPassed, nil)
+}
+
+func captureFinalProviderEmulatorObservations(ctx context.Context, sink *artifacts.Sink, inspector env.ProviderEmulatorInspector, environment env.Environment, requireNonempty bool) error {
+	observations, err := inspector.ProviderEmulatorObservations(ctx, environment)
+	if err != nil {
+		return errors.New("capture final provider emulator observations failed")
+	}
+	if err := env.PersistProviderEmulatorObservations(sink, observations.Stdout, requireNonempty); err != nil {
+		return errors.New("persist final provider emulator observations failed")
+	}
+	return nil
 }
 
 func markLastPassedPhaseFailed(phases []PhaseState) {
