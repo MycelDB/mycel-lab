@@ -1361,15 +1361,17 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 	evidence := composeImageEvidence{ImageOverride: strings.TrimSpace(imageOverride), Provenance: imageSourceProvenance{CaptureStatus: "unavailable"}}
 	configuredDigests := map[string]bool{}
 	if evidence.ImageOverride != "" {
-		const identityFormat = `{"id":{{json .Id}},"repoDigests":{{json .RepoDigests}}}`
+		const identityFormat = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"repoDigests":{{json .RepoDigests}}}`
 		captureConfiguredIdentity := func(args ...string) {
 			configured, err := runner.Run(ctx, "docker", args...)
 			if err != nil {
 				return
 			}
 			var identity struct {
-				ID          string   `json:"id"`
-				RepoDigests []string `json:"repoDigests"`
+				ID           string   `json:"id"`
+				OS           string   `json:"os"`
+				Architecture string   `json:"architecture"`
+				RepoDigests  []string `json:"repoDigests"`
 			}
 			if json.Unmarshal([]byte(strings.TrimSpace(configured.Stdout)), &identity) != nil {
 				return
@@ -1377,6 +1379,7 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 			configuredID := canonicalImageDigest(identity.ID)
 			if evidence.ConfiguredImageID == "" {
 				evidence.ConfiguredImageID = configuredID
+				evidence.Platform = canonicalImagePlatform(identity.OS, identity.Architecture)
 			}
 			if configuredID != "" {
 				configuredDigests[configuredID] = true
@@ -1392,8 +1395,8 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 		// local tag, while k3d/containerd reports the selected platform manifest.
 		// Resolve the platform descriptor from the already captured immutable
 		// index, not the mutable tag, and bind both exact digests.
-		if evidence.ConfiguredImageID != "" {
-			captureConfiguredIdentity("image", "inspect", "--platform", "linux/arm64", evidence.ConfiguredImageID, "--format", identityFormat)
+		if evidence.ConfiguredImageID != "" && evidence.Platform != "" {
+			captureConfiguredIdentity("image", "inspect", "--platform", evidence.Platform, evidence.ConfiguredImageID, "--format", identityFormat)
 		}
 	}
 	for digest := range configuredDigests {
@@ -1426,6 +1429,20 @@ func runningImageSourceEvidence(ctx context.Context, runner executil.Runner, ima
 	// repository digest has been proven equivalent to the runtime identity.
 	evidence.Provenance = captureImageProvenance(ctx, runner, evidence.ConfiguredImageID)
 	return evidence
+}
+
+func canonicalImagePlatform(osName, architecture string) string {
+	osName = strings.ToLower(strings.TrimSpace(osName))
+	architecture = strings.ToLower(strings.TrimSpace(architecture))
+	if osName != "linux" {
+		return ""
+	}
+	switch architecture {
+	case "amd64", "arm64", "ppc64le", "s390x", "riscv64":
+		return osName + "/" + architecture
+	default:
+		return ""
+	}
 }
 
 func canonicalImageDigest(value string) string {

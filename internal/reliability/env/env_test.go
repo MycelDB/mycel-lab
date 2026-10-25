@@ -374,13 +374,29 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (execut
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
 }
 
+func TestCanonicalImagePlatformIsAllowlisted(t *testing.T) {
+	for _, test := range []struct {
+		os, architecture, want string
+	}{
+		{os: "linux", architecture: "arm64", want: "linux/arm64"},
+		{os: "LINUX", architecture: "AMD64", want: "linux/amd64"},
+		{os: "windows", architecture: "amd64"},
+		{os: "linux", architecture: "arm64/v8"},
+		{os: "linux", architecture: "unsafe value"},
+	} {
+		if got := canonicalImagePlatform(test.os, test.architecture); got != test.want {
+			t.Fatalf("canonicalImagePlatform(%q, %q)=%q want %q", test.os, test.architecture, got, test.want)
+		}
+	}
+}
+
 func TestRunningImageSourceEvidenceBindsProvenanceToEquivalentRuntimeDigest(t *testing.T) {
 	const revision = "0123456789abcdef0123456789abcdef01234567"
 	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
 	const configDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	runner := &composeCaptureRunner{
-		inspectIdentityOutput: `{"id":"` + configDigest + `","repoDigests":["registry.example/mycel@` + manifestDigest + `"]}`,
+		inspectIdentityOutput: `{"id":"` + configDigest + `","os":"linux","architecture":"arm64","repoDigests":["registry.example/mycel@` + manifestDigest + `"]}`,
 		inspectOutput:         `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
 	}
 	for _, runtimeID := range []string{"docker-pullable://registry.example/mycel@" + manifestDigest, "containerd://" + configDigest} {
@@ -413,7 +429,7 @@ func TestRunningImageSourceEvidenceBindsK3DPlatformManifestFromLocalOCIIndex(t *
 	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const platformManifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	runner := &composeCaptureRunner{
-		inspectIdentityOutput:         `{"id":"` + indexDigest + `","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+		inspectIdentityOutput:         `{"id":"` + indexDigest + `","os":"linux","architecture":"arm64","repoDigests":["local/mycel@` + indexDigest + `"]}`,
 		inspectPlatformIdentityOutput: `{"id":"` + platformManifestDigest + `","repoDigests":[]}`,
 		inspectOutput:                 `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
 	}
