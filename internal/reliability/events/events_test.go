@@ -425,6 +425,27 @@ func TestClusterRecoveryTimeoutCancelsBlockedInspection(t *testing.T) {
 	}
 }
 
+func TestClusterRecoveryRejectionEvidenceDistinguishesEmptyTopology(t *testing.T) {
+	node := ClusterRecoveryNodeResult{ReadinessReady: true}
+	evaluateClusterRaftGroups(&node, nil, []string{"system"}, true)
+	result := ClusterRecoveryWaitResult{Attempts: 1, Nodes: []ClusterRecoveryNodeResult{node}}
+	recordClusterRecoveryRejection(&result)
+	if result.RejectionCounts.RaftInspection != 0 || result.RejectionCounts.Topology != 1 || result.LastRejectedPoll == nil || result.LastRejectedPoll.RejectedNodeCount != 1 || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].Reasons, []string{"topology"}) {
+		t.Fatalf("result=%+v, want decoded empty topology attributed only to topology", result)
+	}
+}
+
+func TestClusterRecoveryLastRejectedPollBoundsNodeSummaries(t *testing.T) {
+	result := ClusterRecoveryWaitResult{Attempts: 1, Nodes: make([]ClusterRecoveryNodeResult, 40)}
+	for ordinal := range result.Nodes {
+		result.Nodes[ordinal].Ordinal = ordinal
+	}
+	recordClusterRecoveryRejection(&result)
+	if result.RejectionCounts.Readiness != 40 || result.LastRejectedPoll == nil || result.LastRejectedPoll.RejectedNodeCount != 40 || len(result.LastRejectedPoll.Nodes) != 32 || !result.LastRejectedPoll.NodesTruncated {
+		t.Fatalf("result=%+v, want all counters and 32 bounded node summaries", result)
+	}
+}
+
 func TestClusterRecoveryCannotSucceedAfterDeadline(t *testing.T) {
 	driver := &recordingDriver{execWithContext: func(ctx context.Context, command string) (env.ExecResult, error) {
 		if strings.Contains(command, "cluster readiness check") {

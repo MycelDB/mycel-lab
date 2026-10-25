@@ -46,6 +46,8 @@ type ClusterRecoveryRejectionCounts struct {
 type ClusterRecoveryRejectedPoll struct {
 	Attempt           int                           `json:"attempt"`
 	StablePollsBefore int                           `json:"stablePollsBefore"`
+	RejectedNodeCount int                           `json:"rejectedNodeCount"`
+	NodesTruncated    bool                          `json:"nodesTruncated"`
 	Nodes             []ClusterRecoveryRejectedNode `json:"nodes"`
 }
 
@@ -65,23 +67,24 @@ type ClusterRecoveryProgressRegression struct {
 }
 
 type ClusterRecoveryNodeResult struct {
-	Ordinal             int                                 `json:"ordinal"`
-	ReadinessReady      bool                                `json:"readinessReady"`
-	RaftGroupsReady     bool                                `json:"raftGroupsReady"`
-	GroupCount          int                                 `json:"groupCount"`
-	MissingGroups       []string                            `json:"missingGroups,omitempty"`
-	DuplicateGroups     []string                            `json:"duplicateGroups,omitempty"`
-	UnexpectedGroups    []string                            `json:"unexpectedGroups,omitempty"`
-	GroupsWithoutLeader []string                            `json:"groupsWithoutLeader,omitempty"`
-	UnhealthyGroups     []string                            `json:"unhealthyGroups,omitempty"`
-	LaggingGroups       []string                            `json:"laggingGroups,omitempty"`
-	RegressingGroups    []string                            `json:"regressingGroups,omitempty"`
-	ProgressRegressions []ClusterRecoveryProgressRegression `json:"progressRegressions,omitempty"`
-	ReadinessStdout     string                              `json:"readinessStdout,omitempty"`
-	ReadinessError      string                              `json:"readinessError,omitempty"`
-	RaftGroupsStdout    string                              `json:"raftGroupsStdout,omitempty"`
-	RaftGroupsError     string                              `json:"raftGroupsError,omitempty"`
-	progress            map[string]clusterRaftProgress
+	Ordinal              int                                 `json:"ordinal"`
+	ReadinessReady       bool                                `json:"readinessReady"`
+	RaftGroupsReady      bool                                `json:"raftGroupsReady"`
+	GroupCount           int                                 `json:"groupCount"`
+	MissingGroups        []string                            `json:"missingGroups,omitempty"`
+	DuplicateGroups      []string                            `json:"duplicateGroups,omitempty"`
+	UnexpectedGroups     []string                            `json:"unexpectedGroups,omitempty"`
+	GroupsWithoutLeader  []string                            `json:"groupsWithoutLeader,omitempty"`
+	UnhealthyGroups      []string                            `json:"unhealthyGroups,omitempty"`
+	LaggingGroups        []string                            `json:"laggingGroups,omitempty"`
+	RegressingGroups     []string                            `json:"regressingGroups,omitempty"`
+	ProgressRegressions  []ClusterRecoveryProgressRegression `json:"progressRegressions,omitempty"`
+	ReadinessStdout      string                              `json:"readinessStdout,omitempty"`
+	ReadinessError       string                              `json:"readinessError,omitempty"`
+	RaftGroupsStdout     string                              `json:"raftGroupsStdout,omitempty"`
+	RaftGroupsError      string                              `json:"raftGroupsError,omitempty"`
+	progress             map[string]clusterRaftProgress
+	raftInspectionFailed bool
 }
 
 type clusterRaftProgress struct {
@@ -241,11 +244,13 @@ func inspectClusterRecoveryNode(ctx context.Context, driver env.EnvironmentDrive
 	result.RaftGroupsStdout = bounded(raftGroups.Stdout, 16384)
 	if raftErr != nil {
 		result.RaftGroupsError = bounded(strings.TrimSpace(raftGroups.Stderr+"\n"+raftErr.Error()), 4096)
+		result.raftInspectionFailed = true
 		return result
 	}
 	var response clusterRaftGroupsResponse
 	if err := json.Unmarshal([]byte(raftGroups.Stdout), &response); err != nil {
 		result.RaftGroupsError = "decode raft groups: " + err.Error()
+		result.raftInspectionFailed = true
 		return result
 	}
 	evaluateClusterRaftGroups(&result, response.Groups, expectedGroupIDs, boolTarget(target, "requireZeroApplyLag", false))
@@ -365,6 +370,7 @@ func enforceClusterProgressConsistency(result *ClusterRecoveryNodeResult, previo
 }
 
 func recordClusterRecoveryRejection(result *ClusterRecoveryWaitResult) {
+	const maximumRejectedNodes = 32
 	result.RejectedPolls++
 	rejected := &ClusterRecoveryRejectedPoll{Attempt: result.Attempts, StablePollsBefore: result.StablePolls}
 	for _, node := range result.Nodes {
@@ -376,10 +382,11 @@ func recordClusterRecoveryRejection(result *ClusterRecoveryWaitResult) {
 		if !node.ReadinessReady {
 			addReason("readiness", &result.RejectionCounts.Readiness)
 		}
-		if node.RaftGroupsError != "" && node.GroupCount == 0 {
+		if node.raftInspectionFailed {
 			addReason("raft-inspection", &result.RejectionCounts.RaftInspection)
 		}
-		if len(node.MissingGroups) > 0 || len(node.DuplicateGroups) > 0 || len(node.UnexpectedGroups) > 0 {
+		topologyRejected := len(node.MissingGroups) > 0 || len(node.DuplicateGroups) > 0 || len(node.UnexpectedGroups) > 0
+		if topologyRejected {
 			addReason("topology", &result.RejectionCounts.Topology)
 		}
 		if len(node.GroupsWithoutLeader) > 0 {
@@ -390,14 +397,21 @@ func recordClusterRecoveryRejection(result *ClusterRecoveryWaitResult) {
 		}
 		if len(node.LaggingGroups) > 0 {
 			addReason("apply-lag", &result.RejectionCounts.ApplyLag)
-			summary.LaggingGroups = boundedRecoveryGroups(node.LaggingGroups)
+			if !topologyRejected {
+				summary.LaggingGroups = boundedRecoveryGroups(node.LaggingGroups)
+			}
 		}
 		if len(node.ProgressRegressions) > 0 {
 			addReason("progress-rollback", &result.RejectionCounts.ProgressRollback)
 			summary.ProgressRegressions = boundedProgressRegressions(node.ProgressRegressions)
 		}
 		if len(summary.Reasons) > 0 {
-			rejected.Nodes = append(rejected.Nodes, summary)
+			rejected.RejectedNodeCount++
+			if len(rejected.Nodes) < maximumRejectedNodes {
+				rejected.Nodes = append(rejected.Nodes, summary)
+			} else {
+				rejected.NodesTruncated = true
+			}
 		}
 	}
 	result.LastRejectedPoll = rejected
