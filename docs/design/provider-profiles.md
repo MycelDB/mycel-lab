@@ -47,7 +47,7 @@ secretRef:
   env: OPENAI_API_KEY
 ```
 
-Deterministic and emulator profiles reject secret references. Live execution resolves referenced environment variables only after non-secret profile and enforcement validation. Dry-runs never read credential values. Resolved JSON, catalog records, events, metrics, errors, and artifacts never include resolved values.
+Deterministic and emulator profiles reject secret references. Live execution first calls the authenticated, space-scoped daemon capability RPC and verifies every semantic budget invariant; only then does it resolve referenced environment variables. The runtime redactor is extended before the credential is submitted to the daemon. Dry-runs never read credential values. Resolved JSON, catalog records, events, metrics, errors, and artifacts never include resolved values or the secret reference structure.
 
 ## Local protocol emulator scripts
 
@@ -65,14 +65,15 @@ Harness-owned limits are enforced by the concurrency-safe reservation ledger:
 Provider-owned limits are declared independently:
 
 - requests and concurrent requests;
-- retries per request;
-- aggregate input/output tokens;
-- optional estimated USD cost;
+- aggregate retry attempts and retries per request;
+- per-request and aggregate input tokens;
+- request and total provider deadlines;
+- versioned estimated USD cost in integer micros;
 - capability-specific batch size.
 
-A required limit resolves only when the responsible daemon/provider capability is advertised by trusted daemon/provider preflight. The bundled `openai-compatible-live` profile is an SGT1 contract fixture and intentionally cannot run until SGT1b adds that trusted discovery and enforcement path. Operators cannot assert enforcement with a CLI flag. A field is never labeled enforced merely because it exists. Advisory unavailable fields are recorded as `advisory`; required unavailable fields fail closed. SGT1b remains responsible for atomic daemon-side provider reservations and durable usage accounting.
+A required limit resolves only when the responsible capability is returned by authenticated daemon discovery. The bundled `openai-compatible-live` profile is the manually runnable SGT9 direct-embedding profile; it remains `pending_authenticated_discovery` during dry-run and becomes `enforced` only after the live daemon proves daemon-owned Raft-replicated durable scopes, pre-provider reservations, retry/concurrency/selected-batch-mode/token/timeout/versioned-cost limits, conservative ambiguity, immutable attempt events, overage exhaustion, and bounded pages. The live endpoint is parsed and restricted to the explicitly approved `https://api.openai.com/v1` route (HTTPS, no userinfo, query, or fragment) before any credential lookup. Operators cannot assert enforcement with a CLI flag. Advisory unavailable fields are recorded as `advisory`; required unavailable fields fail closed before credential resolution.
 
-Reservations are atomic. Each provider-profile run owns one ledger and total-deadline context. Scenario provisioning, each finite runtime event, and each actor graph operation reserve before work; later semantic admin/search operations must use the same gate as they are added. Exhaustion cancels scheduling, closes the ledger to new work, fails the run, and persists `provider/budget-final.json`. Its `accountingScope` is `harness-originated-reservations`: daemon-originated provider requests are counted authoritatively by validated emulator observations or daemon durable usage evidence, not by this harness ledger. Releasing a reservation reduces only in-flight concurrency; cumulative use is never refunded. Each operation context uses the earlier of request and total deadlines.
+Harness reservations remain atomic for orchestration. For semantic provider effects, the daemon creates an immutable route-pinned scope before an enabled budgeted rule is admitted, reserves before credential resolution and connector access, and appends a version-1 reservation plus at most one version-2 terminal event. The `semantic-provider-budget-reconcile` event reads a fixed high-water snapshot, rejects history gaps, checks event pairing, and reconciles bounded aggregate usage without retaining prompts, outputs, vectors, or provider request IDs. `provider/budget-final.json` continues to describe only `harness-originated-reservations`; daemon-originated calls are authoritative in the daemon scope evidence.
 
 ## Redaction and final gate
 

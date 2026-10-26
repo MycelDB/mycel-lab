@@ -144,6 +144,10 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 			"expectFreshRevisionFrom", "expectDeltaCatchupRevisionFrom", "captureGenerationAs", "captureRebuildEpochAs",
 			"captureFreshRevisionAs", "capturePinnedRevisionAs", "captureDeltaCatchupRevisionAs",
 		), nil
+	case "semantic-provider-budget-reconcile":
+		return map[string]semanticTargetField{
+			"minimumAttempts": nonNegativeInt, "requireTerminal": boolField,
+		}, nil
 	case "semantic-rebuild":
 		fields := map[string]semanticTargetField{
 			"backfillLimit":         optional(semanticInteger(1, 100000)),

@@ -9,13 +9,17 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+var daemonBudgetIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 
 const (
 	APIVersion              = "reliability.mycel.io/v1alpha1"
@@ -132,6 +136,8 @@ type Capability struct {
 	ConnectorType     string                  `yaml:"connectorType" json:"connectorType"`
 	EndpointKey       string                  `yaml:"endpointKey" json:"endpointKey"`
 	BaseURL           string                  `yaml:"baseURL,omitempty" json:"baseURL,omitempty"`
+	NetworkClass      string                  `yaml:"networkClass,omitempty" json:"networkClass,omitempty"`
+	PrivacyClass      string                  `yaml:"privacyClass,omitempty" json:"privacyClass,omitempty"`
 	ModelKey          string                  `yaml:"modelKey" json:"modelKey"`
 	ProviderModelName string                  `yaml:"providerModelName,omitempty" json:"providerModelName,omitempty"`
 	Dimensions        int                     `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
@@ -174,17 +180,26 @@ type Batching struct {
 }
 
 type Budget struct {
-	Enforcement             Enforcement `yaml:"enforcement" json:"enforcement"`
-	MaxOperations           int64       `yaml:"maxOperations,omitempty" json:"maxOperations,omitempty"`
-	MaxRequests             int64       `yaml:"maxRequests,omitempty" json:"maxRequests,omitempty"`
-	MaxConcurrentOperations int64       `yaml:"maxConcurrentOperations,omitempty" json:"maxConcurrentOperations,omitempty"`
-	MaxConcurrentRequests   int64       `yaml:"maxConcurrentRequests,omitempty" json:"maxConcurrentRequests,omitempty"`
-	MaxRetriesPerRequest    int64       `yaml:"maxRetriesPerRequest,omitempty" json:"maxRetriesPerRequest,omitempty"`
-	MaxInputTokens          int64       `yaml:"maxInputTokens,omitempty" json:"maxInputTokens,omitempty"`
-	MaxOutputTokens         int64       `yaml:"maxOutputTokens,omitempty" json:"maxOutputTokens,omitempty"`
-	MaxEstimatedCostUSD     float64     `yaml:"maxEstimatedCostUSD,omitempty" json:"maxEstimatedCostUSD,omitempty"`
-	RequestTimeout          Duration    `yaml:"requestTimeout" json:"requestTimeout"`
-	TotalTimeout            Duration    `yaml:"totalTimeout" json:"totalTimeout"`
+	Enforcement              Enforcement         `yaml:"enforcement" json:"enforcement"`
+	MaxOperations            int64               `yaml:"maxOperations,omitempty" json:"maxOperations,omitempty"`
+	MaxRequests              int64               `yaml:"maxRequests,omitempty" json:"maxRequests,omitempty"`
+	MaxConcurrentOperations  int64               `yaml:"maxConcurrentOperations,omitempty" json:"maxConcurrentOperations,omitempty"`
+	MaxConcurrentRequests    int64               `yaml:"maxConcurrentRequests,omitempty" json:"maxConcurrentRequests,omitempty"`
+	MaxRetriesPerRequest     int64               `yaml:"maxRetriesPerRequest,omitempty" json:"maxRetriesPerRequest,omitempty"`
+	MaxInputTokensPerRequest int64               `yaml:"maxInputTokensPerRequest,omitempty" json:"maxInputTokensPerRequest,omitempty"`
+	MaxInputTokens           int64               `yaml:"maxInputTokens,omitempty" json:"maxInputTokens,omitempty"`
+	MaxOutputTokens          int64               `yaml:"maxOutputTokens,omitempty" json:"maxOutputTokens,omitempty"`
+	MaxEstimatedCostUSD      float64             `yaml:"maxEstimatedCostUSD,omitempty" json:"maxEstimatedCostUSD,omitempty"`
+	Cost                     *ProviderCostBudget `yaml:"cost,omitempty" json:"cost,omitempty"`
+	RequestTimeout           Duration            `yaml:"requestTimeout" json:"requestTimeout"`
+	TotalTimeout             Duration            `yaml:"totalTimeout" json:"totalTimeout"`
+}
+
+type ProviderCostBudget struct {
+	Currency                    string `yaml:"currency" json:"currency"`
+	PriceDefinitionVersion      string `yaml:"priceDefinitionVersion" json:"priceDefinitionVersion"`
+	InputMicrosPerMillionTokens int64  `yaml:"inputMicrosPerMillionTokens" json:"inputMicrosPerMillionTokens"`
+	MaxEstimatedCostMicros      int64  `yaml:"maxEstimatedCostMicros" json:"maxEstimatedCostMicros"`
 }
 
 type ArtifactPolicy struct {
@@ -202,6 +217,8 @@ const (
 	EnforceProviderRequests            EnforcementCapability = "provider.requests"
 	EnforceProviderConcurrency         EnforcementCapability = "provider.concurrency"
 	EnforceProviderRetries             EnforcementCapability = "provider.retries"
+	EnforceProviderRequestTimeout      EnforcementCapability = "provider.request-timeout"
+	EnforceProviderTotalTimeout        EnforcementCapability = "provider.total-timeout"
 	EnforceProviderInputTokens         EnforcementCapability = "provider.input-tokens"
 	EnforceProviderOutputTokens        EnforcementCapability = "provider.output-tokens"
 	EnforceProviderEstimatedCost       EnforcementCapability = "provider.estimated-cost-usd"
@@ -216,7 +233,7 @@ func ParseEnforcementCapability(value string) (EnforcementCapability, error) {
 	capability := EnforcementCapability(strings.TrimSpace(value))
 	switch capability {
 	case EnforceHarnessOperations, EnforceHarnessConcurrentOperations, EnforceHarnessRequestTimeout, EnforceHarnessTotalTimeout,
-		EnforceProviderRequests, EnforceProviderConcurrency, EnforceProviderRetries, EnforceProviderInputTokens,
+		EnforceProviderRequests, EnforceProviderConcurrency, EnforceProviderRetries, EnforceProviderRequestTimeout, EnforceProviderTotalTimeout, EnforceProviderInputTokens,
 		EnforceProviderOutputTokens, EnforceProviderEstimatedCost, EnforceProviderBatchItems:
 		return capability, nil
 	default:
@@ -261,12 +278,53 @@ func (r ResolvedProfile) RuntimeSecretValues() []string {
 	return append([]string(nil), r.secretValues...)
 }
 
+// CompleteLiveProviderValidation accepts only authenticated daemon capability
+// evidence, then resolves credential references. No credential is read before
+// all required provider-side limits have been proven enforced.
+func (r *ResolvedProfile) CompleteLiveProviderValidation(manifest CapabilityManifest, lookup func(string) (string, bool)) ([]string, error) {
+	if r == nil || r.Profile.Mode != ModeLive {
+		return nil, errors.New("live provider validation requires a live resolved profile")
+	}
+	if err := validateLiveSemanticBudget(r.Profile); err != nil {
+		return nil, err
+	}
+	effectiveManifest := BuiltInHarnessManifest()
+	for capability, source := range manifest.Capabilities {
+		effectiveManifest = effectiveManifest.With(capability, source)
+	}
+	status, err := resolveEnforcementStatus(r.Profile, effectiveManifest, false)
+	if err != nil {
+		return nil, err
+	}
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	seen := map[string]struct{}{}
+	secrets := make([]string, 0, len(r.Profile.Capabilities.named()))
+	for _, named := range r.Profile.Capabilities.named() {
+		envName := named.value.SecretRef.Env
+		if _, ok := seen[envName]; ok {
+			continue
+		}
+		seen[envName] = struct{}{}
+		value, ok := lookup(envName)
+		if !ok || value == "" {
+			return nil, fmt.Errorf("required provider credential environment variable %q is not set", envName)
+		}
+		secrets = append(secrets, value)
+	}
+	r.EnforcementStatus = status
+	r.secretValues = append([]string(nil), secrets...)
+	return append([]string(nil), secrets...), nil
+}
+
 type ResolveOptions struct {
-	DryRun               bool
-	Selection            string
-	RequiredCapabilities []string
-	Manifest             CapabilityManifest
-	LookupEnv            func(string) (string, bool)
+	DryRun                      bool
+	DeferLiveProviderValidation bool
+	Selection                   string
+	RequiredCapabilities        []string
+	Manifest                    CapabilityManifest
+	LookupEnv                   func(string) (string, bool)
 }
 
 func Load(raw []byte) (Profile, error) {
@@ -336,8 +394,8 @@ func (p Profile) Validate() error {
 	if err := p.Budgets.Validate(); err != nil {
 		return err
 	}
-	if p.Mode == ModeLive && (p.Budgets.MaxRequests == 0 || p.Budgets.MaxConcurrentRequests == 0 || p.Budgets.MaxInputTokens == 0) {
-		return errors.New("live profiles require positive maxRequests, maxConcurrentRequests, and maxInputTokens")
+	if p.Mode == ModeLive && (p.Budgets.MaxRequests == 0 || p.Budgets.MaxConcurrentRequests == 0 || p.Budgets.MaxInputTokensPerRequest == 0 || p.Budgets.MaxInputTokens == 0 || p.Budgets.Cost == nil) {
+		return errors.New("live profiles require positive request, concurrency, per-request/aggregate input-token, and versioned cost limits")
 	}
 	if p.Artifacts.CaptureBodies || p.Artifacts.CaptureHeaders {
 		return errors.New("provider body/header artifact capture is unsupported in v1alpha1")
@@ -388,6 +446,25 @@ func validateCapability(mode Mode, name string, capability *Capability) error {
 	for _, item := range optionalStrings {
 		if len(item.value) > 2048 {
 			return fmt.Errorf("%s.%s exceeds 2048 bytes", prefix, item.field)
+		}
+	}
+	if capability.NetworkClass != "" && capability.NetworkClass != "local" && capability.NetworkClass != "private" && capability.NetworkClass != "public" {
+		return fmt.Errorf("%s.networkClass must be local, private, or public", prefix)
+	}
+	if capability.PrivacyClass != "" && capability.PrivacyClass != "local_only" && capability.PrivacyClass != "customer_managed" && capability.PrivacyClass != "third_party" {
+		return fmt.Errorf("%s.privacyClass must be local_only, customer_managed, or third_party", prefix)
+	}
+	if mode == ModeLive {
+		if capability.NetworkClass != "public" || capability.PrivacyClass != "third_party" {
+			return fmt.Errorf("%s live capability requires explicit public networkClass and third_party privacyClass", prefix)
+		}
+		endpoint, err := url.Parse(strings.TrimSpace(capability.BaseURL))
+		if err != nil || endpoint.Scheme != "https" || endpoint.User != nil || endpoint.Hostname() != "api.openai.com" || endpoint.Port() != "" && endpoint.Port() != "443" || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+			return fmt.Errorf("%s live baseURL must be an approved HTTPS api.openai.com endpoint without userinfo, query, or fragment", prefix)
+		}
+		path := strings.TrimSuffix(endpoint.EscapedPath(), "/")
+		if path != "/v1" {
+			return fmt.Errorf("%s live baseURL path must be /v1", prefix)
 		}
 	}
 	if capability.Batching.Mode != "single" && capability.Batching.Mode != "batch" {
@@ -544,6 +621,7 @@ func (b Budget) Validate() error {
 		{name: "maxConcurrentOperations", value: b.MaxConcurrentOperations},
 		{name: "maxConcurrentRequests", value: b.MaxConcurrentRequests},
 		{name: "maxRetriesPerRequest", value: b.MaxRetriesPerRequest},
+		{name: "maxInputTokensPerRequest", value: b.MaxInputTokensPerRequest},
 		{name: "maxInputTokens", value: b.MaxInputTokens},
 		{name: "maxOutputTokens", value: b.MaxOutputTokens},
 	}
@@ -555,6 +633,14 @@ func (b Budget) Validate() error {
 	if b.MaxEstimatedCostUSD < 0 || math.IsNaN(b.MaxEstimatedCostUSD) || math.IsInf(b.MaxEstimatedCostUSD, 0) || b.MaxEstimatedCostUSD > 1_000_000 {
 		return errors.New("budgets.maxEstimatedCostUSD must be finite and between 0 and 1000000")
 	}
+	if b.Cost != nil {
+		if strings.TrimSpace(b.Cost.Currency) == "" || strings.TrimSpace(b.Cost.PriceDefinitionVersion) == "" {
+			return errors.New("budgets.cost currency and priceDefinitionVersion are required")
+		}
+		if b.Cost.InputMicrosPerMillionTokens <= 0 || b.Cost.MaxEstimatedCostMicros <= 0 {
+			return errors.New("budgets.cost input price and maximum estimated cost must be positive")
+		}
+	}
 	if b.MaxOperations == 0 || b.MaxConcurrentOperations == 0 {
 		return errors.New("budgets.maxOperations and maxConcurrentOperations must be positive")
 	}
@@ -563,6 +649,70 @@ func (b Budget) Validate() error {
 	}
 	if b.TotalTimeout.Duration > 24*time.Hour {
 		return errors.New("budgets.totalTimeout must not exceed 24h")
+	}
+	return nil
+}
+
+func liveSemanticCeilingCost(tokens, micros int64) (int64, error) {
+	if tokens <= 0 || micros <= 0 {
+		return 0, errors.New("live semantic cost inputs must be positive")
+	}
+	const million = int64(1_000_000)
+	if tokens > math.MaxInt64/micros {
+		return 0, errors.New("live semantic cost multiplication overflows")
+	}
+	product := tokens * micros
+	if product > math.MaxInt64-(million-1) {
+		return 0, errors.New("live semantic cost rounding overflows")
+	}
+	return (product + million - 1) / million, nil
+}
+
+func validateLiveSemanticBudget(profile Profile) error {
+	if profile.Mode != ModeLive || profile.Capabilities.Embedding == nil {
+		return nil
+	}
+	if len(profile.Metadata.Name) > 128 || !daemonBudgetIdentityPattern.MatchString(profile.Metadata.Name) {
+		return errors.New("live semantic profile name must be a daemon-compatible budget identity")
+	}
+	budget := profile.Budgets
+	capability := profile.Capabilities.Embedding
+	if budget.MaxRequests <= 0 || budget.MaxRetriesPerRequest < 0 {
+		return errors.New("live semantic budgets require positive maxRequests and nonnegative maxRetriesPerRequest")
+	}
+	if budget.MaxRetriesPerRequest != 0 && budget.MaxRequests > math.MaxInt64/budget.MaxRetriesPerRequest {
+		return errors.New("live semantic budget retry attempts overflow")
+	}
+	retryAttempts := budget.MaxRequests * budget.MaxRetriesPerRequest
+	if retryAttempts > math.MaxInt64-budget.MaxRequests || budget.MaxRequests+retryAttempts > 10_000 {
+		return errors.New("live semantic budget derived attempt limit must not exceed 10000")
+	}
+	attempts := budget.MaxRequests + retryAttempts
+	if budget.MaxConcurrentRequests <= 0 || budget.MaxConcurrentRequests > attempts {
+		return errors.New("live semantic budget concurrency must be positive and not exceed derived attempts")
+	}
+	if capability.Batching.MaxItems <= 0 || capability.Batching.MaxItems > 1_000 || capability.Batching.Mode == "single" && capability.Batching.MaxItems != 1 {
+		return errors.New("live semantic budget batching is incompatible with daemon bounds")
+	}
+	if budget.MaxInputTokensPerRequest <= 0 || budget.MaxInputTokens <= 0 || budget.MaxInputTokensPerRequest > budget.MaxInputTokens {
+		return errors.New("live semantic budget input token limits are inconsistent")
+	}
+	if budget.RequestTimeout.Duration < time.Millisecond || budget.TotalTimeout.Duration < time.Millisecond || budget.RequestTimeout.Duration%time.Millisecond != 0 || budget.TotalTimeout.Duration%time.Millisecond != 0 || budget.RequestTimeout.Duration > budget.TotalTimeout.Duration {
+		return errors.New("live semantic budget timeouts are incompatible with daemon millisecond precision")
+	}
+	if budget.Cost == nil {
+		return errors.New("live semantic budget requires versioned USD cost limits")
+	}
+	if budget.Cost != nil {
+		if budget.Cost.Currency != "USD" || len(budget.Cost.PriceDefinitionVersion) > 128 || !daemonBudgetIdentityPattern.MatchString(budget.Cost.PriceDefinitionVersion) {
+			return errors.New("live semantic budget cost requires exact USD and a daemon-compatible price definition")
+		}
+		if budget.Cost.InputMicrosPerMillionTokens <= 0 || budget.Cost.MaxEstimatedCostMicros <= 0 {
+			return errors.New("live semantic budget cost limits must be positive")
+		}
+		if _, err := liveSemanticCeilingCost(budget.MaxInputTokensPerRequest, budget.Cost.InputMicrosPerMillionTokens); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -613,6 +763,11 @@ func Resolve(profile Profile, source []byte, opts ResolveOptions) (ResolvedProfi
 	if (profile.Mode == ModeEmulator || profile.Mode == ModeLive) && (strings.TrimSpace(selected.BaseURL) == "" || strings.TrimSpace(selected.ProviderModelName) == "") {
 		return ResolvedProfile{}, fmt.Errorf("%s %s requires baseURL and providerModelName", profile.Mode, required[0])
 	}
+	if profile.Mode == ModeLive && required[0] == "embedding" {
+		if err := validateLiveSemanticBudget(profile); err != nil {
+			return ResolvedProfile{}, err
+		}
+	}
 	manifest := BuiltInHarnessManifest()
 	if profile.Mode == ModeDeterministic && selected.ConnectorType == "fake" && selected.Batching.Mode == "single" && selected.Batching.MaxItems == 1 {
 		manifest = manifest.With(EnforceProviderBatchItems, "daemon-fake-connector-single-item-contract")
@@ -620,28 +775,17 @@ func Resolve(profile Profile, source []byte, opts ResolveOptions) (ResolvedProfi
 	for capability, source := range opts.Manifest.Capabilities {
 		manifest = manifest.With(capability, source)
 	}
-	status := make([]EnforcementStatus, 0, 12)
-	for _, requirement := range profile.Budgets.requirements(profile.Capabilities) {
-		source, available := manifest.Capabilities[requirement.capability]
-		item := EnforcementStatus{Limit: requirement.limit, Capability: requirement.capability, Status: "unavailable"}
-		if available && strings.TrimSpace(source) != "" {
-			item.Status = "enforced"
-			item.Source = source
-		} else if profile.Budgets.Enforcement == EnforcementAdvisory {
-			item.Status = "advisory"
-		}
-		status = append(status, item)
-		if profile.Budgets.Enforcement == EnforcementRequired && item.Status != "enforced" {
-			return ResolvedProfile{}, fmt.Errorf("required provider limit %s lacks advertised enforcement capability %s", requirement.limit, requirement.capability)
-		}
+	deferred := profile.Mode == ModeLive && opts.DeferLiveProviderValidation
+	status, err := resolveEnforcementStatus(profile, manifest, deferred)
+	if err != nil {
+		return ResolvedProfile{}, err
 	}
-	sort.Slice(status, func(i, j int) bool { return status[i].Limit < status[j].Limit })
 	lookup := opts.LookupEnv
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
 	var secrets []string
-	if profile.Mode == ModeLive && !opts.DryRun {
+	if profile.Mode == ModeLive && !opts.DryRun && !deferred {
 		seen := map[string]struct{}{}
 		for _, named := range profile.Capabilities.named() {
 			envName := named.value.SecretRef.Env
@@ -664,17 +808,45 @@ func Resolve(profile Profile, source []byte, opts ResolveOptions) (ResolvedProfi
 	return ResolvedProfile{Profile: profile, SourceSHA256: "sha256:" + hex.EncodeToString(hash[:]), Selection: selection, EnforcementStatus: status, secretValues: secrets}, nil
 }
 
+func resolveEnforcementStatus(profile Profile, manifest CapabilityManifest, deferred bool) ([]EnforcementStatus, error) {
+	status := make([]EnforcementStatus, 0, 12)
+	for _, requirement := range profile.Budgets.requirements(profile.Capabilities, profile.Mode) {
+		source, available := manifest.Capabilities[requirement.capability]
+		item := EnforcementStatus{Limit: requirement.limit, Capability: requirement.capability, Status: "unavailable"}
+		if available && strings.TrimSpace(source) != "" {
+			item.Status = "enforced"
+			item.Source = source
+		} else if deferred && strings.HasPrefix(string(requirement.capability), "provider.") {
+			item.Status = "pending_authenticated_discovery"
+		} else if profile.Budgets.Enforcement == EnforcementAdvisory {
+			item.Status = "advisory"
+		}
+		status = append(status, item)
+		if profile.Budgets.Enforcement == EnforcementRequired && item.Status != "enforced" && item.Status != "pending_authenticated_discovery" {
+			return nil, fmt.Errorf("required provider limit %s lacks advertised enforcement capability %s", requirement.limit, requirement.capability)
+		}
+	}
+	sort.Slice(status, func(i, j int) bool { return status[i].Limit < status[j].Limit })
+	return status, nil
+}
+
 type budgetRequirement struct {
 	limit      string
 	capability EnforcementCapability
 }
 
-func (b Budget) requirements(capabilities Capabilities) []budgetRequirement {
+func (b Budget) requirements(capabilities Capabilities, mode Mode) []budgetRequirement {
+	requestTimeoutCapability := EnforceHarnessRequestTimeout
+	totalTimeoutCapability := EnforceHarnessTotalTimeout
+	if mode == ModeLive {
+		requestTimeoutCapability = EnforceProviderRequestTimeout
+		totalTimeoutCapability = EnforceProviderTotalTimeout
+	}
 	out := []budgetRequirement{
 		{limit: "maxOperations", capability: EnforceHarnessOperations},
 		{limit: "maxConcurrentOperations", capability: EnforceHarnessConcurrentOperations},
-		{limit: "requestTimeout", capability: EnforceHarnessRequestTimeout},
-		{limit: "totalTimeout", capability: EnforceHarnessTotalTimeout},
+		{limit: "requestTimeout", capability: requestTimeoutCapability},
+		{limit: "totalTimeout", capability: totalTimeoutCapability},
 	}
 	if b.MaxRequests > 0 {
 		out = append(out, budgetRequirement{limit: "maxRequests", capability: EnforceProviderRequests})
@@ -685,14 +857,17 @@ func (b Budget) requirements(capabilities Capabilities) []budgetRequirement {
 	if b.MaxRetriesPerRequest > 0 {
 		out = append(out, budgetRequirement{limit: "maxRetriesPerRequest", capability: EnforceProviderRetries})
 	}
+	if b.MaxInputTokensPerRequest > 0 {
+		out = append(out, budgetRequirement{limit: "maxInputTokensPerRequest", capability: EnforceProviderInputTokens})
+	}
 	if b.MaxInputTokens > 0 {
 		out = append(out, budgetRequirement{limit: "maxInputTokens", capability: EnforceProviderInputTokens})
 	}
 	if b.MaxOutputTokens > 0 {
 		out = append(out, budgetRequirement{limit: "maxOutputTokens", capability: EnforceProviderOutputTokens})
 	}
-	if b.MaxEstimatedCostUSD > 0 {
-		out = append(out, budgetRequirement{limit: "maxEstimatedCostUSD", capability: EnforceProviderEstimatedCost})
+	if b.MaxEstimatedCostUSD > 0 || b.Cost != nil {
+		out = append(out, budgetRequirement{limit: "maxEstimatedCost", capability: EnforceProviderEstimatedCost})
 	}
 	for _, named := range capabilities.named() {
 		if named.value.Batching.MaxItems > 0 {

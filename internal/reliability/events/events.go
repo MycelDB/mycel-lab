@@ -43,32 +43,36 @@ type Runtime interface {
 	ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error
 }
 
-type LocalRuntime struct{}
+type LocalRuntime struct{ LiveSemanticProvider bool }
 
-func (LocalRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
+func (r LocalRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
 	for _, event := range phase.Events {
-		if err := executeOne(ctx, phase, event, dryRun, recorder); err != nil {
+		if err := executeOne(ctx, phase, event, dryRun, recorder, r.LiveSemanticProvider); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec, dryRun bool, recorder Recorder) error {
+func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec, dryRun bool, recorder Recorder, liveSemanticProvider bool) error {
 	operationCtx, release, err := reserveRuntimeOperation(ctx, recorder, phase.Name, event.Type)
 	if err != nil {
 		return err
 	}
 	defer release()
 	ctx = operationCtx
+	target := evidenceSafeEventTarget(event)
+	if liveSemanticProvider && strings.HasPrefix(event.Type, "semantic-") {
+		target = evidenceSafeLiveSemanticEventTarget(event)
+	}
 	if recorder != nil {
-		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"dryRun": dryRun}}); err != nil {
+		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: target, Payload: map[string]any{"dryRun": dryRun}}); err != nil {
 			return err
 		}
 	}
 	if err := validateEvent(event); err != nil {
 		if recorder != nil {
-			_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"error": err.Error()}})
+			_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: target, Payload: map[string]any{"error": err.Error()}})
 		}
 		return err
 	}
@@ -82,7 +86,7 @@ func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec,
 		}
 	}
 	if recorder != nil {
-		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"dryRun": dryRun}})
+		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: target, Payload: map[string]any{"dryRun": dryRun}})
 	}
 	return nil
 }
@@ -130,7 +134,7 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "image") == "" {
 			return fmt.Errorf("%s requires target.image", event.Type)
 		}
-	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-emulator-assert", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild":
+	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-emulator-assert", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
 		return nil
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	mycel "github.com/myceldb/mycel-go-sdk"
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
@@ -118,35 +119,43 @@ type ProcedureInferenceResources struct {
 }
 
 type SemanticResources struct {
-	TargetActorID           string              `json:"targetActorId"`
-	SpaceID                 string              `json:"spaceId,omitempty"`
-	DomainID                string              `json:"domainId,omitempty"`
-	PackageName             string              `json:"packageName"`
-	PackageVersion          string              `json:"packageVersion"`
-	PackageID               string              `json:"packageId,omitempty"`
-	EndpointKey             string              `json:"endpointKey"`
-	EndpointID              string              `json:"endpointId,omitempty"`
-	ModelKey                string              `json:"modelKey"`
-	ModelID                 string              `json:"modelId,omitempty"`
-	CapabilityID            string              `json:"capabilityId,omitempty"`
-	VectorStoreKey          string              `json:"vectorStoreKey"`
-	VectorStoreID           string              `json:"vectorStoreId,omitempty"`
-	IntelligenceProfileKey  string              `json:"intelligenceProfileKey"`
-	IntelligenceProfileID   string              `json:"intelligenceProfileId,omitempty"`
-	CredentialKey           string              `json:"credentialKey"`
-	CredentialID            string              `json:"credentialId,omitempty"`
-	CredentialGrantID       string              `json:"credentialGrantId,omitempty"`
-	AccessPolicyID          string              `json:"accessPolicyId,omitempty"`
-	SemanticRuleKey         string              `json:"semanticRuleKey"`
-	SemanticRuleID          string              `json:"semanticRuleId,omitempty"`
-	EmbeddingBindingKey     string              `json:"embeddingBindingKey"`
-	Operations              []SemanticOperation `json:"operations"`
-	Cleanup                 []SemanticOperation `json:"cleanup"`
-	MaintenanceTimeout      time.Duration       `json:"maintenanceTimeout"`
-	MaintenancePollInterval time.Duration       `json:"maintenancePollInterval"`
-	MaintenanceAnalyzeLimit int                 `json:"maintenanceAnalyzeLimit"`
-	MaintenanceProcessLimit int                 `json:"maintenanceProcessLimit"`
-	EvidenceValues          map[string]string   `json:"evidenceValues,omitempty"`
+	TargetActorID                     string                                `json:"targetActorId"`
+	TargetPrincipalID                 string                                `json:"-"`
+	LiveProvider                      bool                                  `json:"-"`
+	ExpectedProviderBudget            *adminv1.SemanticProviderBudgetPolicy `json:"-"`
+	SpaceID                           string                                `json:"spaceId,omitempty"`
+	DomainID                          string                                `json:"domainId,omitempty"`
+	PackageName                       string                                `json:"packageName"`
+	PackageVersion                    string                                `json:"packageVersion"`
+	PackageID                         string                                `json:"packageId,omitempty"`
+	EndpointKey                       string                                `json:"endpointKey"`
+	EndpointID                        string                                `json:"endpointId,omitempty"`
+	ModelKey                          string                                `json:"modelKey"`
+	ModelID                           string                                `json:"modelId,omitempty"`
+	CapabilityID                      string                                `json:"capabilityId,omitempty"`
+	VectorStoreKey                    string                                `json:"vectorStoreKey"`
+	VectorStoreID                     string                                `json:"vectorStoreId,omitempty"`
+	IntelligenceProfileKey            string                                `json:"intelligenceProfileKey"`
+	IntelligenceProfileID             string                                `json:"intelligenceProfileId,omitempty"`
+	CredentialKey                     string                                `json:"credentialKey"`
+	CredentialID                      string                                `json:"credentialId,omitempty"`
+	CredentialGrantID                 string                                `json:"credentialGrantId,omitempty"`
+	AccessPolicyID                    string                                `json:"accessPolicyId,omitempty"`
+	SemanticRuleKey                   string                                `json:"semanticRuleKey"`
+	SemanticRuleID                    string                                `json:"semanticRuleId,omitempty"`
+	EmbeddingBindingKey               string                                `json:"embeddingBindingKey"`
+	Operations                        []SemanticOperation                   `json:"operations"`
+	Cleanup                           []SemanticOperation                   `json:"cleanup"`
+	MaintenanceTimeout                time.Duration                         `json:"maintenanceTimeout"`
+	MaintenancePollInterval           time.Duration                         `json:"maintenancePollInterval"`
+	MaintenanceAnalyzeLimit           int                                   `json:"maintenanceAnalyzeLimit"`
+	MaintenanceProcessLimit           int                                   `json:"maintenanceProcessLimit"`
+	EvidenceValues                    map[string]string                     `json:"evidenceValues,omitempty"`
+	ProviderBudgetCapabilities        []string                              `json:"providerBudgetCapabilities,omitempty"`
+	ProviderBudgetContractVersion     string                                `json:"providerBudgetContractVersion,omitempty"`
+	ProviderBudgetMaxAttemptEventPage int32                                 `json:"providerBudgetMaxAttemptEventPage,omitempty"`
+	ProviderBudgetMaxScopePage        int32                                 `json:"providerBudgetMaxScopePage,omitempty"`
+	ProviderBudgetScopeID             string                                `json:"providerBudgetScopeId,omitempty"`
 }
 
 type SemanticOperation struct {
@@ -175,14 +184,17 @@ type procedureInferenceProvisionPlan struct {
 }
 
 type semanticProvisionPlan struct {
-	Spec       spec.SemanticScenarioSpec
-	Capability providerCapability
-	Secret     string
+	Spec            spec.SemanticScenarioSpec
+	Capability      providerCapability
+	ProviderProfile *provider.ResolvedProfile
+	Secret          string
 }
 
 type providerCapability struct {
 	ConnectorType   string
 	BaseURL         string
+	NetworkClass    string
+	PrivacyClass    string
 	Dimensions      int
 	VectorSpaceKey  string
 	FixtureStrategy string
@@ -191,11 +203,14 @@ type providerCapability struct {
 }
 
 type Options struct {
-	RunID         string
-	DaemonAddrs   []string
-	AdminUsername string
-	AdminPassword string
-	DryRun        bool
+	RunID                  string
+	DaemonAddrs            []string
+	AdminUsername          string
+	AdminPassword          string
+	DryRun                 bool
+	ProviderLookupEnv      func(string) (string, bool)
+	ProviderSecretObserver func(string)
+	PersistResources       func(ScenarioResources) error
 }
 
 func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResources, error) {
@@ -321,6 +336,18 @@ func planProcedureInferenceResources(scenario spec.ResolvedScenario, resources S
 	}}, nil
 }
 
+func semanticOperationPlan() []struct{ action, resource string } {
+	return []struct{ action, resource string }{
+		{"discover", "provider-budget-capability"},
+		{"apply", "inference-package"},
+		{"create", "intelligence-profile"},
+		{"create", "credential"},
+		{"create", "credential-grant"},
+		{"create", "access-policy"},
+		{"create", "semantic-rule"},
+	}
+}
+
 func planSemanticResources(scenario spec.ResolvedScenario, resources ScenarioResources, shortRun string) (*SemanticResources, *semanticProvisionPlan, error) {
 	if scenario.Semantic == nil || scenario.ProviderProfile == nil || scenario.ProviderProfile.Profile.Capabilities.Embedding == nil {
 		return nil, nil, errors.New("semantic provisioning requires a resolved embedding provider profile")
@@ -339,6 +366,8 @@ func planSemanticResources(scenario spec.ResolvedScenario, resources ScenarioRes
 	prefix := "mlab-" + shortRun
 	semanticResources := &SemanticResources{
 		TargetActorID:           target.ActorID,
+		TargetPrincipalID:       target.PrincipalID,
+		LiveProvider:            scenario.ProviderProfile.Profile.Mode == provider.ModeLive,
 		PackageName:             prefix + "-semantic",
 		PackageVersion:          "1",
 		EndpointKey:             prefix + "-endpoint",
@@ -354,14 +383,7 @@ func planSemanticResources(scenario spec.ResolvedScenario, resources ScenarioRes
 		MaintenanceProcessLimit: scenario.Semantic.Maintenance.ProcessLimit,
 		EvidenceValues:          map[string]string{},
 	}
-	operationNames := []struct{ action, resource string }{
-		{"apply", "inference-package"},
-		{"create", "intelligence-profile"},
-		{"create", "credential"},
-		{"create", "credential-grant"},
-		{"create", "access-policy"},
-		{"create", "semantic-rule"},
-	}
+	operationNames := semanticOperationPlan()
 	for index, operation := range operationNames {
 		semanticResources.Operations = append(semanticResources.Operations, SemanticOperation{Sequence: index + 1, Action: operation.action, Resource: operation.resource, Status: "planned"})
 	}
@@ -373,8 +395,8 @@ func planSemanticResources(scenario spec.ResolvedScenario, resources ScenarioRes
 	if values := scenario.ProviderProfile.RuntimeSecretValues(); len(values) > 0 {
 		secret = values[0]
 	}
-	return semanticResources, &semanticProvisionPlan{Spec: *scenario.Semantic, Secret: secret, Capability: providerCapability{
-		ConnectorType: capability.ConnectorType, BaseURL: capability.BaseURL, Dimensions: capability.Dimensions,
+	return semanticResources, &semanticProvisionPlan{Spec: *scenario.Semantic, ProviderProfile: scenario.ProviderProfile, Secret: secret, Capability: providerCapability{
+		ConnectorType: capability.ConnectorType, BaseURL: capability.BaseURL, NetworkClass: capability.NetworkClass, PrivacyClass: capability.PrivacyClass, Dimensions: capability.Dimensions,
 		VectorSpaceKey: capability.VectorSpaceKey, FixtureStrategy: capability.FixtureStrategy,
 		ProviderModel: capability.ProviderModelName, Mode: string(scenario.ProviderProfile.Profile.Mode),
 	}}, nil
@@ -489,14 +511,11 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 		}
 	}
 	if resources.Semantic != nil {
-		for _, assignment := range resources.Assignments {
-			if assignment.ActorID == resources.Semantic.TargetActorID {
-				resources.Semantic.SpaceID = assignment.SpaceID
-				resources.Semantic.DomainID = assignment.DomainID
-				break
-			}
+		refreshSemanticTargetAssignment(resources)
+		if strings.TrimSpace(resources.Semantic.TargetPrincipalID) == "" {
+			return fmt.Errorf("semantic target principal is unavailable after principal provisioning")
 		}
-		if err := provisionSemanticResources(ctx, admin, resources); err != nil {
+		if err := provisionSemanticResources(ctx, admin, resources, opts); err != nil {
 			rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			rollbackFailures := cleanupSemanticResources(rollbackCtx, admin, resources.Semantic)
 			rollbackCancel()
@@ -531,6 +550,20 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 		a.TokenExpires = session.AccessTokenExpireTime
 	}
 	return nil
+}
+
+func refreshSemanticTargetAssignment(resources *ScenarioResources) {
+	if resources == nil || resources.Semantic == nil {
+		return
+	}
+	for _, assignment := range resources.Assignments {
+		if assignment.ActorID == resources.Semantic.TargetActorID {
+			resources.Semantic.SpaceID = assignment.SpaceID
+			resources.Semantic.DomainID = assignment.DomainID
+			resources.Semantic.TargetPrincipalID = assignment.PrincipalID
+			return
+		}
+	}
 }
 
 func CleanupScenario(ctx context.Context, resources *ScenarioResources, opts Options) error {

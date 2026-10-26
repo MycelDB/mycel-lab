@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,7 +17,95 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestSemanticBudgetRetainedScopeUsesAdvertisedPageSizeAndRejectsFilterViolations(t *testing.T) {
+	if got := advertisedSemanticProviderBudgetPageSize(500); got != 500 {
+		t.Fatalf("advertised page size=%d, want 500", got)
+	}
+	if got := advertisedSemanticProviderBudgetPageSize(0); got != 100 {
+		t.Fatalf("fallback page size=%d, want 100", got)
+	}
+	now := time.Now().UTC()
+	resources := &provision.SemanticResources{SpaceID: "space-a", SemanticRuleID: "rule-a", EmbeddingBindingKey: "search", ProviderBudgetScopeID: "scope-a", ExpectedProviderBudget: &adminv1.SemanticProviderBudgetPolicy{CorrelationId: "run-a"}}
+	valid := &adminv1.SemanticProviderBudgetScopeReference{BudgetScopeId: "scope-a", SemanticRuleId: "rule-a", EmbeddingBindingKey: "search", CorrelationId: "run-a", CreatedAt: timestamppb.New(now), RetentionUntil: timestamppb.New(now.Add(time.Hour))}
+	if err := validateRetainedSemanticProviderBudgetScope(valid, resources); err != nil {
+		t.Fatalf("valid scope rejected: %v", err)
+	}
+	invalid := *valid
+	invalid.SemanticRuleId = "wrong-rule"
+	if err := validateRetainedSemanticProviderBudgetScope(&invalid, resources); err == nil {
+		t.Fatal("retained scope filter violation was accepted")
+	}
+	invalidTimestamp := *valid
+	invalidTimestamp.RetentionUntil = &timestamppb.Timestamp{Seconds: 253402300800}
+	if err := validateRetainedSemanticProviderBudgetScope(&invalidTimestamp, resources); err == nil {
+		t.Fatal("invalid retained scope timestamp was accepted")
+	}
+}
+
+func TestSemanticBudgetSnapshotCannotChangeAfterLeadingEmptyPage(t *testing.T) {
+	first := &adminv1.ListSemanticProviderBudgetAttemptEventsResponse{EarliestRetainedEventSequence: 4, SnapshotHighWaterSequence: 10, NextPageToken: "next"}
+	var earliest, snapshot uint64
+	if err := captureSemanticProviderBudgetSnapshot(0, first, &earliest, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if earliest != 4 || snapshot != 10 {
+		t.Fatalf("snapshot capture earliest=%d high-water=%d", earliest, snapshot)
+	}
+	second := &adminv1.ListSemanticProviderBudgetAttemptEventsResponse{SnapshotHighWaterSequence: 11}
+	if err := captureSemanticProviderBudgetSnapshot(1, second, &earliest, &snapshot); err == nil {
+		t.Fatal("snapshot change after leading empty page was accepted")
+	}
+}
+
+func TestSemanticBudgetEventTimestampsRejectMalformedEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	valid := &adminv1.SemanticProviderBudgetAttemptEvent{RecordedAt: timestamppb.New(now), ReservedUntil: timestamppb.New(now.Add(time.Minute))}
+	if !semanticBudgetEventTimestampsValid(valid) {
+		t.Fatal("valid event timestamps were rejected")
+	}
+	invalidRecorded := *valid
+	invalidRecorded.RecordedAt = &timestamppb.Timestamp{Seconds: 253402300800}
+	if semanticBudgetEventTimestampsValid(&invalidRecorded) {
+		t.Fatal("invalid recorded_at was accepted")
+	}
+	invalidReservation := *valid
+	invalidReservation.ReservedUntil = &timestamppb.Timestamp{Nanos: -1}
+	if semanticBudgetEventTimestampsValid(&invalidReservation) {
+		t.Fatal("invalid reserved_until was accepted")
+	}
+}
+
+func TestSemanticBudgetReconciliationRejectsUnknownEnumsAndOverflow(t *testing.T) {
+	if knownSemanticBudgetScopeState(adminv1.SemanticProviderBudgetScopeState(99)) || knownSemanticBudgetDenialReason(adminv1.SemanticProviderBudgetDenialReason(99)) || knownSemanticBudgetAttemptState(adminv1.SemanticProviderBudgetAttemptState(99)) || knownSemanticBudgetOutcome(adminv1.SemanticProviderBudgetOutcomeCategory(99)) {
+		t.Fatal("unknown semantic provider budget enum was accepted")
+	}
+	if !semanticBudgetTerminalOutcomeMatches(&adminv1.SemanticProviderBudgetAttemptEvent{State: adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_SUCCEEDED, OutcomeCategory: adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_SUCCESS, OutcomeKnown: true}) {
+		t.Fatal("valid terminal outcome pair was rejected")
+	}
+	if semanticBudgetTerminalOutcomeMatches(&adminv1.SemanticProviderBudgetAttemptEvent{State: adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_SUCCEEDED, OutcomeCategory: adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS}) {
+		t.Fatal("contradictory terminal outcome pair was accepted")
+	}
+	ambiguous := &adminv1.SemanticProviderBudgetAttemptEvent{State: adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_FAILED, OutcomeCategory: adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS, ReservedInputTokens: 10, ChargedInputTokens: 10, ReservedProviderMillis: 20, ChargedProviderMillis: 20, ReservedCostMicros: 30, ChargedCostMicros: 30}
+	if !semanticBudgetTerminalOutcomeMatches(ambiguous) || !semanticBudgetUnknownOutcomeIsConservative(ambiguous) {
+		t.Fatal("conservative transport-ambiguous failed terminal was rejected")
+	}
+	canceledAmbiguous := &adminv1.SemanticProviderBudgetAttemptEvent{State: adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_CANCELED, OutcomeCategory: adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS, ReservedInputTokens: 10, ChargedInputTokens: 10, ReservedProviderMillis: 20, ChargedProviderMillis: 20, ReservedCostMicros: 30, ChargedCostMicros: 30}
+	if !semanticBudgetTerminalOutcomeMatches(canceledAmbiguous) || !semanticBudgetUnknownOutcomeIsConservative(canceledAmbiguous) {
+		t.Fatal("conservative canceled-ambiguous terminal was rejected")
+	}
+	ambiguous.UsageKnown = true
+	ambiguous.ChargedInputTokens = 1
+	if semanticBudgetUnknownOutcomeIsConservative(ambiguous) {
+		t.Fatal("undercharged ambiguous terminal was accepted")
+	}
+	if value, overflow := checkedSemanticBudgetSum(math.MaxInt64, 1, false); value != math.MaxInt64 || !overflow {
+		t.Fatalf("checked sum=(%d,%t), want saturated overflow", value, overflow)
+	}
+}
 
 func TestDriverRuntimeCleansSensitiveSystemBackupHostDirectories(t *testing.T) {
 	if safeSystemBackupHostDir(string(os.PathSeparator)) {
@@ -52,6 +141,26 @@ func TestEventScheduleStartsAtPhaseBoundary(t *testing.T) {
 	}
 	if recorder.records[0].Type != "event-started" || recorder.records[0].PhaseName != "outage" || recorder.records[0].EventType != "pod-stop" {
 		t.Fatalf("first record not event-started at phase boundary: %+v", recorder.records[0])
+	}
+}
+
+func TestLiveSemanticLocalRuntimeRedactsDryRunTargets(t *testing.T) {
+	phase := spec.PhaseSpec{Name: "search", Events: []spec.EventSpec{{Type: "semantic-search-assert", Target: map[string]any{"query": "classification-sensitive-query", "expectedNodeIds": []string{"private-node-id"}, "limit": 1}}}}
+	recorder := &recordingEventRecorder{}
+	if err := (LocalRuntime{LiveSemanticProvider: true}).ExecutePhaseEvents(context.Background(), phase, true, recorder); err != nil {
+		t.Fatalf("ExecutePhaseEvents() error=%v", err)
+	}
+	encoded, err := json.Marshal(recorder.records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sensitive := range []string{"classification-sensitive-query", "private-node-id", "expectedNodeIds"} {
+		if strings.Contains(string(encoded), sensitive) {
+			t.Fatalf("dry-run records leaked %q: %s", sensitive, encoded)
+		}
+	}
+	if !strings.Contains(string(encoded), "sensitiveSemanticInputsRedacted") {
+		t.Fatalf("dry-run records lack redaction marker: %s", encoded)
 	}
 }
 
@@ -554,6 +663,18 @@ type recordingEventRecorder struct{ records []Record }
 func (r *recordingEventRecorder) RecordRuntimeEvent(_ context.Context, record Record) error {
 	r.records = append(r.records, record)
 	return nil
+}
+
+func TestLiveSemanticResultSanitizerDropsIdentifiersAndOutputs(t *testing.T) {
+	raw := SemanticSearchEvidence{Query: "query-secret", Results: []SemanticSearchResultItem{{NodeID: "node-secret"}}}
+	sanitized := sanitizeLiveSemanticResult("semantic-search-assert", raw)
+	encoded, err := json.Marshal(sanitized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "query-secret") || strings.Contains(string(encoded), "node-secret") {
+		t.Fatalf("sanitized result leaked semantic identifiers: %s", encoded)
+	}
 }
 
 type recordingDriver struct {

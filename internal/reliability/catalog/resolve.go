@@ -12,11 +12,12 @@ import (
 )
 
 type ResolveOptions struct {
-	ProfileDirs             []string
-	ProviderProfileOverride string
-	ProviderDryRun          bool
-	ProviderManifest        provider.CapabilityManifest
-	ProviderLookupEnv       func(string) (string, bool)
+	ProfileDirs                 []string
+	ProviderProfileOverride     string
+	ProviderDryRun              bool
+	DeferLiveProviderValidation bool
+	ProviderManifest            provider.CapabilityManifest
+	ProviderLookupEnv           func(string) (string, bool)
 }
 
 func ResolveScenarioFile(path string, opts ResolveOptions) (spec.ResolvedScenario, error) {
@@ -103,7 +104,11 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 		if scenario.ProcedureInference != nil {
 			requiredCapabilities = []string{"generation"}
 		}
-		resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{DryRun: opts.ProviderDryRun, Selection: selection, RequiredCapabilities: requiredCapabilities, Manifest: opts.ProviderManifest, LookupEnv: opts.ProviderLookupEnv})
+		deferLiveValidation := opts.DeferLiveProviderValidation && profile.Mode == provider.ModeLive && scenario.Semantic != nil && scenario.ProcedureInference == nil
+		if opts.DeferLiveProviderValidation && profile.Mode == provider.ModeLive && !deferLiveValidation {
+			return spec.ResolvedScenario{}, fmt.Errorf("provider profile %q: deferred live validation is supported only for semantic embedding scenarios with authenticated completion", selectedProviderRef)
+		}
+		resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{DryRun: opts.ProviderDryRun, DeferLiveProviderValidation: deferLiveValidation, Selection: selection, RequiredCapabilities: requiredCapabilities, Manifest: opts.ProviderManifest, LookupEnv: opts.ProviderLookupEnv})
 		if err != nil {
 			return spec.ResolvedScenario{}, fmt.Errorf("provider profile %q: %w", selectedProviderRef, err)
 		}

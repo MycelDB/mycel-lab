@@ -7,16 +7,31 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	mycel "github.com/myceldb/mycel-go-sdk"
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
 	commonv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/common/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, resources *ScenarioResources) error {
+func ValidateSemanticProviderBudgetStatusIdentity(status *adminv1.SemanticProviderBudgetStatus, resources *SemanticResources) error {
+	if status == nil || resources == nil || resources.ExpectedProviderBudget == nil {
+		return errors.New("semantic provider budget status identity is incomplete")
+	}
+	if status.GetSpaceId() != resources.SpaceID || status.GetSemanticRuleId() != resources.SemanticRuleID || status.GetEmbeddingBindingKey() != resources.EmbeddingBindingKey || status.GetCorrelationId() != resources.ExpectedProviderBudget.GetCorrelationId() || status.GetBudgetScopeId() == "" {
+		return errors.New("semantic provider budget status identity differs from the requested scope")
+	}
+	if resources.ProviderBudgetScopeID != "" && status.GetBudgetScopeId() != resources.ProviderBudgetScopeID {
+		return errors.New("semantic provider budget status scope differs from the retained scope")
+	}
+	return nil
+}
+
+func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, resources *ScenarioResources, opts Options) error {
 	if resources == nil || resources.Semantic == nil || resources.semanticPlan == nil {
 		return nil
 	}
@@ -24,6 +39,17 @@ func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, r
 	plan := resources.semanticPlan
 	if semanticResources.SpaceID == "" || semanticResources.DomainID == "" {
 		return errors.New("semantic target assignment is missing space or domain identity")
+	}
+	if plan.ProviderProfile != nil && plan.ProviderProfile.Profile.Mode == provider.ModeLive {
+		if err := discoverAndAuthorizeLiveSemanticProvider(ctx, admin, resources, opts); err != nil {
+			failedResource := "provider-budget-capability"
+			if semanticOperationStatus(semanticResources, "provider-budget-capability") == "completed" {
+				failedResource = "credential"
+			}
+			return semanticOperationFailed(semanticResources, failedResource, err)
+		}
+	} else {
+		setSemanticOperationStatus(semanticResources, "provider-budget-capability", "not-required", "")
 	}
 	metadata := map[string]any{}
 	if plan.Capability.FixtureStrategy != "" {
@@ -39,6 +65,14 @@ func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, r
 	}
 	endpointURL := strings.TrimSpace(plan.Capability.BaseURL)
 	modelName := strings.TrimSpace(plan.Capability.ProviderModel)
+	networkClass := strings.TrimSpace(plan.Capability.NetworkClass)
+	privacyClass := strings.TrimSpace(plan.Capability.PrivacyClass)
+	if networkClass == "" {
+		networkClass = "local"
+	}
+	if privacyClass == "" {
+		privacyClass = "local_only"
+	}
 	if modelName == "" {
 		modelName = semanticResources.ModelKey
 	}
@@ -47,7 +81,7 @@ func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, r
 			Name: semanticResources.PackageName, Version: semanticResources.PackageVersion, Source: "mycel-lab", Checksum: semanticResources.PackageName,
 			ModelEndpoints: []*adminv1.ModelEndpoint{{
 				Key: semanticResources.EndpointKey, Name: semanticResources.EndpointKey, ConnectorType: plan.Capability.ConnectorType,
-				EndpointUrl: endpointURL, NetworkClass: "local", PrivacyClass: "local_only", AuthModes: []string{"none"}, Operations: []string{"embeddings"}, Enabled: true, Metadata: endpointMetadata,
+				EndpointUrl: endpointURL, NetworkClass: networkClass, PrivacyClass: privacyClass, AuthModes: []string{semanticEndpointAuthMode(plan.Secret)}, Operations: []string{"embeddings"}, Enabled: true, Metadata: endpointMetadata,
 			}},
 			Models: []*adminv1.InferenceModel{{
 				Key: semanticResources.ModelKey, Kind: "embedding", ModelName: modelName, ConnectorTypes: []string{plan.Capability.ConnectorType},
@@ -77,7 +111,7 @@ func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, r
 			SpaceId: semanticResources.SpaceID, Key: semanticResources.IntelligenceProfileKey, DisplayName: semanticResources.IntelligenceProfileKey,
 			Operation: commonv1.InferenceOperation_INFERENCE_OPERATION_EMBEDDINGS, Purpose: "semantic_search", DomainIds: []string{semanticResources.DomainID},
 			CapabilityRefs: []string{semanticResources.CapabilityID}, EndpointRefs: []string{semanticResources.EndpointID}, ModelRefs: []string{semanticResources.ModelID},
-			PrivacyRequirement: &commonv1.InferencePrivacyRequirement{AllowedPrivacyClasses: []commonv1.InferencePrivacyClass{commonv1.InferencePrivacyClass_INFERENCE_PRIVACY_CLASS_LOCAL_ONLY}, RequireLocalEndpoint: true, DisallowThirdParty: true}, Enabled: true,
+			PrivacyRequirement: semanticPrivacyRequirement(privacyClass), Enabled: true,
 		})
 	})
 	if err != nil {
@@ -108,13 +142,20 @@ func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, r
 	semanticResources.CredentialID = credentialResponse.GetCredential().GetCredentialId()
 	semanticOperationCompleted(semanticResources, "credential")
 
+	if semanticResources.LiveProvider && strings.TrimSpace(semanticResources.TargetPrincipalID) == "" {
+		return semanticOperationFailed(semanticResources, "credential-grant", errors.New("live semantic target principal is unavailable"))
+	}
 	grantResponse, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.AdminIntelligenceAccessGrantServiceCreateCredentialGrantResponse, error) {
-		return admin.InferenceGrants.CreateCredentialGrant(callCtx, &adminv1.AdminIntelligenceAccessGrantServiceCreateCredentialGrantRequest{
+		request := &adminv1.AdminIntelligenceAccessGrantServiceCreateCredentialGrantRequest{
 			SpaceId: semanticResources.SpaceID, CredentialId: semanticResources.CredentialID,
 			Scope:      &commonv1.IntelligenceAccessScope{SpaceId: semanticResources.SpaceID, DomainId: semanticResources.DomainID, IncludeDescendants: true},
 			Operations: []string{"embeddings"}, ModelEndpointId: semanticResources.EndpointID, ModelId: semanticResources.ModelID,
 			IsDefault: true, AllowBackgroundUse: true,
-		})
+		}
+		if semanticResources.LiveProvider {
+			request.GranteePrincipalIds = []string{semanticResources.TargetPrincipalID}
+		}
+		return admin.InferenceGrants.CreateCredentialGrant(callCtx, request)
 	})
 	if err != nil {
 		return semanticOperationFailed(semanticResources, "credential-grant", err)
@@ -129,8 +170,8 @@ func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, r
 		return admin.InferencePolicies.CreateAccessPolicy(callCtx, &adminv1.AdminIntelligenceAccessPolicyServiceCreateAccessPolicyRequest{
 			SpaceId: semanticResources.SpaceID,
 			Scope:   &commonv1.IntelligenceAccessScope{SpaceId: semanticResources.SpaceID, DomainId: semanticResources.DomainID, IncludeDescendants: true},
-			Effect:  "allow", Operations: []string{"embeddings"}, AllowedPrivacyClasses: []string{"local_only"}, RequireLocalEndpoint: true,
-			DisallowThirdParty: true, Reason: "mycel-lab semantic run " + resources.RunID,
+			Effect:  "allow", Operations: []string{"embeddings"}, AllowedPrivacyClasses: []string{privacyClass}, RequireLocalEndpoint: privacyClass == "local_only",
+			DisallowThirdParty: privacyClass != "third_party", Reason: "mycel-lab semantic run " + resources.RunID,
 		})
 	})
 	if err != nil {
@@ -160,13 +201,17 @@ func CreateSemanticRule(ctx context.Context, admin *mycel.AdminClient, resources
 		return nil
 	}
 	rule := resources.semanticPlan.Spec.Rule
+	providerBudget := semanticProviderBudgetPolicy(resources.semanticPlan)
+	if semanticResources.LiveProvider {
+		semanticResources.ExpectedProviderBudget = proto.Clone(providerBudget).(*adminv1.SemanticProviderBudgetPolicy)
+	}
 	ruleResponse, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.CreateSemanticRuleResponse, error) {
 		return admin.Semantic.CreateSemanticRule(callCtx, &adminv1.CreateSemanticRuleRequest{Rule: &adminv1.SemanticGenerationRule{
-			SpaceId: semanticResources.SpaceID, DomainId: semanticResources.DomainID, Key: rule.Key, DisplayName: rule.DisplayName, Description: rule.Description, Enabled: true,
+			SpaceId: semanticResources.SpaceID, DomainId: semanticResources.DomainID, Key: rule.Key, DisplayName: rule.DisplayName, Description: rule.Description, Enabled: true, OwnerPrincipalId: semanticResources.TargetPrincipalID,
 			Trigger:     &adminv1.SemanticTriggerPolicy{Events: []string{"node.created", "node.updated", "node.deleted"}, Debounce: rule.DirtyCooldown.String()},
 			Selector:    &adminv1.SemanticTargetSelector{Mode: "node_type", Labels: append([]string(nil), rule.TargetLabels...), MaxResults: 4096},
 			Source:      &adminv1.SemanticSourceAssemblyPolicy{Mode: rule.SourceMode, IncludeProperties: append([]string(nil), rule.IncludeProperties...), ExcludeProperties: append([]string(nil), rule.ExcludeProperties...), MinimumTextLength: int32(rule.MinimumTextLength)},
-			Embeddings:  []*adminv1.SemanticEmbeddingBinding{{Key: rule.BindingKey, Purpose: rule.Purpose, IntelligenceProfileId: semanticResources.IntelligenceProfileID, VectorStoreId: semanticResources.VectorStoreID, Enabled: true}},
+			Embeddings:  []*adminv1.SemanticEmbeddingBinding{{Key: rule.BindingKey, Purpose: rule.Purpose, IntelligenceProfileId: semanticResources.IntelligenceProfileID, VectorStoreId: semanticResources.VectorStoreID, Enabled: true, ProviderBudget: providerBudget}},
 			Maintenance: &adminv1.SemanticMaintenancePolicy{DirtyCooldown: rule.DirtyCooldown.String(), MaxBatchSize: int32(rule.MaxBatchSize), WorkerConcurrency: int32(rule.WorkerConcurrency)},
 			Storage:     &adminv1.SemanticStoragePolicy{Searchable: true, PhysicalIndex: rule.PhysicalIndex},
 		}})
@@ -199,9 +244,179 @@ func CreateSemanticRule(ctx context.Context, admin *mycel.AdminClient, resources
 	}); err != nil {
 		return semanticOperationFailed(semanticResources, "semantic-reliability-capability", fmt.Errorf("required SGT5 semantic reliability capability unavailable: %w", err))
 	}
+	if resources.semanticPlan.ProviderProfile != nil && resources.semanticPlan.ProviderProfile.Profile.Mode == provider.ModeLive {
+		statusResponse, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+			return admin.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: semanticResources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_CurrentBinding{CurrentBinding: &adminv1.SemanticProviderBudgetBindingSelector{SemanticRuleId: semanticResources.SemanticRuleID, EmbeddingBindingKey: semanticResources.EmbeddingBindingKey}}})
+		})
+		if err != nil {
+			return semanticOperationFailed(semanticResources, "semantic-rule", fmt.Errorf("semantic provider budget status unavailable after rule creation: %w", err))
+		}
+		budgetStatus := statusResponse.GetStatus()
+		if err := ValidateSemanticProviderBudgetStatusIdentity(budgetStatus, semanticResources); err != nil {
+			return semanticOperationFailed(semanticResources, "semantic-rule", err)
+		}
+		if budgetStatus.GetState() != adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_ACTIVE || budgetStatus.GetDenialReason() != adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_NONE {
+			return semanticOperationFailed(semanticResources, "semantic-rule", errors.New("semantic provider budget scope is not active after rule creation"))
+		}
+		if !proto.Equal(budgetStatus.GetLimits(), semanticResources.ExpectedProviderBudget) || budgetStatus.GetModelEndpointId() != semanticResources.EndpointID || budgetStatus.GetModelId() != semanticResources.ModelID || budgetStatus.GetModelEndpointCapabilityId() != semanticResources.CapabilityID {
+			return semanticOperationFailed(semanticResources, "semantic-rule", errors.New("semantic provider budget scope policy or pinned route does not match the requested configuration"))
+		}
+		semanticResources.ProviderBudgetScopeID = budgetStatus.GetBudgetScopeId()
+	}
 	semanticOperationCompleted(semanticResources, "semantic-rule")
 	semanticOperationCompleted(semanticResources, "semantic-reliability-capability")
 	return nil
+}
+
+func discoverAndAuthorizeLiveSemanticProvider(ctx context.Context, admin *mycel.AdminClient, resources *ScenarioResources, opts Options) error {
+	plan := resources.semanticPlan
+	capabilities, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.GetSemanticProviderBudgetCapabilitiesResponse, error) {
+		return admin.SemanticMaintenance.GetSemanticProviderBudgetCapabilities(callCtx, &adminv1.GetSemanticProviderBudgetCapabilitiesRequest{SpaceId: resources.Semantic.SpaceID})
+	})
+	if err != nil {
+		return fmt.Errorf("authenticated semantic provider budget discovery failed: %w", err)
+	}
+	if strings.TrimSpace(capabilities.GetContractVersion()) != "semantic-provider-budget/v1" {
+		return fmt.Errorf("unsupported semantic provider budget contract %q", capabilities.GetContractVersion())
+	}
+	checks := []struct {
+		name string
+		ok   bool
+	}{
+		{"daemon_owned_scopes", capabilities.GetDaemonOwnedScopes()},
+		{"raft_replicated", capabilities.GetRaftReplicated()},
+		{"pre_provider_attempt_reservation", capabilities.GetPreProviderAttemptReservation()},
+		{"durable_restart_recovery", capabilities.GetDurableRestartRecovery()},
+		{"request_limit", capabilities.GetRequestLimit()},
+		{"derived_attempt_limit", capabilities.GetDerivedAttemptLimit()},
+		{"aggregate_retry_limit", capabilities.GetAggregateRetryLimit()},
+		{"per_request_retry_limit", capabilities.GetPerRequestRetryLimit()},
+		{"provider_concurrency_limit", capabilities.GetProviderConcurrencyLimit()},
+		{"per_request_input_token_limit", capabilities.GetPerRequestInputTokenLimit()},
+		{"aggregate_input_token_limit", capabilities.GetAggregateInputTokenLimit()},
+		{"request_timeout", capabilities.GetRequestTimeout()},
+		{"total_timeout", capabilities.GetTotalTimeout()},
+		{"versioned_cost_limit", capabilities.GetVersionedCostLimit()},
+		{"conservative_ambiguous_reservations", capabilities.GetConservativeAmbiguousReservations()},
+		{"append_only_attempt_events", capabilities.GetAppendOnlyAttemptEvents()},
+		{"overage_exhaustion", capabilities.GetOverageExhaustion()},
+		{"bounded_attempt_event_pages", capabilities.GetMaximumAttemptEventPageSize() > 0},
+		{"bounded_scope_pages", capabilities.GetMaximumScopePageSize() > 0},
+	}
+	batching := plan.ProviderProfile.Profile.Capabilities.Embedding.Batching
+	checks = append(checks, struct {
+		name string
+		ok   bool
+	}{name: "selected_batching_mode", ok: batching.Mode == "single" && batching.MaxItems == 1 && capabilities.GetSingleItemBatching() || batching.Mode == "batch" && capabilities.GetMultiItemBatching()})
+	verified := make([]string, 0, len(checks))
+	for _, check := range checks {
+		if !check.ok {
+			return fmt.Errorf("daemon semantic provider budget capability %s is not enforced", check.name)
+		}
+		verified = append(verified, check.name)
+	}
+	currencyOK := false
+	for _, currency := range capabilities.GetSupportedCurrencies() {
+		if currency == "USD" {
+			currencyOK = true
+			break
+		}
+	}
+	if !currencyOK {
+		return errors.New("daemon semantic provider budget capability does not support USD")
+	}
+	resources.Semantic.ProviderBudgetCapabilities = verified
+	resources.Semantic.ProviderBudgetContractVersion = capabilities.GetContractVersion()
+	resources.Semantic.ProviderBudgetMaxAttemptEventPage = capabilities.GetMaximumAttemptEventPageSize()
+	resources.Semantic.ProviderBudgetMaxScopePage = capabilities.GetMaximumScopePageSize()
+	resources.Semantic.EvidenceValues["providerBudgetDiscovery"] = "authenticated"
+	setSemanticOperationStatus(resources.Semantic, "provider-budget-capability", "completed", "")
+	if opts.PersistResources != nil {
+		if err := opts.PersistResources(*resources); err != nil {
+			return fmt.Errorf("persist authenticated semantic provider budget discovery: %w", err)
+		}
+	}
+
+	manifest := provider.BuiltInHarnessManifest()
+	for _, capability := range []provider.EnforcementCapability{
+		provider.EnforceProviderRequests,
+		provider.EnforceProviderConcurrency,
+		provider.EnforceProviderRetries,
+		provider.EnforceProviderRequestTimeout,
+		provider.EnforceProviderTotalTimeout,
+		provider.EnforceProviderInputTokens,
+		provider.EnforceProviderEstimatedCost,
+		provider.EnforceProviderBatchItems,
+	} {
+		manifest = manifest.With(capability, "authenticated-daemon:"+capabilities.GetContractVersion())
+	}
+	secrets, err := plan.ProviderProfile.CompleteLiveProviderValidation(manifest, opts.ProviderLookupEnv)
+	if err != nil {
+		return err
+	}
+	if len(secrets) != 1 {
+		return errors.New("live semantic provider requires exactly one resolved credential")
+	}
+	plan.Secret = secrets[0]
+	if opts.ProviderSecretObserver != nil {
+		opts.ProviderSecretObserver(plan.Secret)
+	}
+	return nil
+}
+
+func semanticEndpointAuthMode(secret string) string {
+	if secret != "" {
+		return "api_key"
+	}
+	return "none"
+}
+
+func semanticPrivacyRequirement(privacyClass string) *commonv1.InferencePrivacyRequirement {
+	if privacyClass == "third_party" {
+		return &commonv1.InferencePrivacyRequirement{AllowedPrivacyClasses: []commonv1.InferencePrivacyClass{commonv1.InferencePrivacyClass_INFERENCE_PRIVACY_CLASS_THIRD_PARTY}}
+	}
+	if privacyClass == "private" || privacyClass == "customer_managed" {
+		return &commonv1.InferencePrivacyRequirement{AllowedPrivacyClasses: []commonv1.InferencePrivacyClass{commonv1.InferencePrivacyClass_INFERENCE_PRIVACY_CLASS_PRIVATE}}
+	}
+	return &commonv1.InferencePrivacyRequirement{AllowedPrivacyClasses: []commonv1.InferencePrivacyClass{commonv1.InferencePrivacyClass_INFERENCE_PRIVACY_CLASS_LOCAL_ONLY}, RequireLocalEndpoint: true, DisallowThirdParty: true}
+}
+
+func semanticProviderBudgetPolicy(plan *semanticProvisionPlan) *adminv1.SemanticProviderBudgetPolicy {
+	if plan == nil || plan.ProviderProfile == nil || plan.ProviderProfile.Profile.Mode != provider.ModeLive {
+		return nil
+	}
+	budget := plan.ProviderProfile.Profile.Budgets
+	capability := plan.ProviderProfile.Profile.Capabilities.Embedding
+	maxRequests := budget.MaxRequests
+	maxRetryAttempts := maxRequests * budget.MaxRetriesPerRequest
+	maxRetriesPerRequest := budget.MaxRetriesPerRequest
+	maxConcurrent := budget.MaxConcurrentRequests
+	maxBatchItems := int64(capability.Batching.MaxItems)
+	maxInputPerRequest := budget.MaxInputTokensPerRequest
+	maxInput := budget.MaxInputTokens
+	batchingMode := adminv1.SemanticProviderBatchingMode_SEMANTIC_PROVIDER_BATCHING_MODE_SINGLE
+	if capability.Batching.Mode == "batch" {
+		batchingMode = adminv1.SemanticProviderBatchingMode_SEMANTIC_PROVIDER_BATCHING_MODE_BATCH
+	}
+	policy := &adminv1.SemanticProviderBudgetPolicy{
+		CorrelationId:              plan.ProviderProfile.Profile.Metadata.Name,
+		MaxRequests:                &maxRequests,
+		MaxRetryAttempts:           &maxRetryAttempts,
+		MaxRetriesPerRequest:       &maxRetriesPerRequest,
+		MaxConcurrentProviderCalls: &maxConcurrent,
+		BatchingMode:               &batchingMode,
+		MaxBatchItems:              &maxBatchItems,
+		MaxInputTokensPerRequest:   &maxInputPerRequest,
+		MaxInputTokens:             &maxInput,
+		RequestTimeout:             durationpb.New(budget.RequestTimeout.Duration),
+		TotalTimeout:               durationpb.New(budget.TotalTimeout.Duration),
+	}
+	if budget.Cost != nil {
+		inputPrice := budget.Cost.InputMicrosPerMillionTokens
+		maxCost := budget.Cost.MaxEstimatedCostMicros
+		policy.Cost = &adminv1.SemanticProviderCostLimit{Currency: budget.Cost.Currency, PriceDefinitionVersion: budget.Cost.PriceDefinitionVersion, InputMicrosPerMillionTokens: &inputPrice, MaxEstimatedCostMicros: &maxCost}
+	}
+	return policy
 }
 
 func withAdminAuth[T any](ctx context.Context, admin *mycel.AdminClient, call func(context.Context) (T, error)) (T, error) {
@@ -212,6 +427,15 @@ func withAdminAuth[T any](ctx context.Context, admin *mycel.AdminClient, call fu
 
 func semanticOperationCompleted(resources *SemanticResources, resource string) {
 	setSemanticOperationStatus(resources, resource, "completed", "")
+}
+
+func semanticOperationStatus(resources *SemanticResources, resource string) string {
+	for _, operation := range resources.Operations {
+		if operation.Resource == resource {
+			return operation.Status
+		}
+	}
+	return ""
 }
 
 func setSemanticOperationStatus(resources *SemanticResources, resource, state, message string) {
@@ -225,14 +449,28 @@ func setSemanticOperationStatus(resources *SemanticResources, resource, state, m
 }
 
 func semanticOperationFailed(resources *SemanticResources, resource string, err error) error {
+	recordedError := err.Error()
+	returnedError := err
+	if resources.LiveProvider {
+		category := "operation_failed"
+		if code := status.Code(err); code != codes.Unknown {
+			category = strings.ToLower(code.String())
+		} else if errors.Is(err, context.Canceled) {
+			category = "canceled"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			category = "deadline_exceeded"
+		}
+		recordedError = category
+		returnedError = fmt.Errorf("live semantic provisioning failed (%s)", category)
+	}
 	for index := range resources.Operations {
 		if resources.Operations[index].Resource == resource {
 			resources.Operations[index].Status = "failed"
-			resources.Operations[index].Error = err.Error()
+			resources.Operations[index].Error = recordedError
 			break
 		}
 	}
-	return err
+	return returnedError
 }
 
 func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, resources *SemanticResources) []string {
