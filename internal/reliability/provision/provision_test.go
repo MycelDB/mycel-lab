@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	mycel "github.com/myceldb/mycel-go-sdk"
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -64,6 +66,9 @@ func TestPlanScenarioCreatesWriterResourcesAndReaderAssignments(t *testing.T) {
 	resources, err := PlanScenario(scenario, Options{RunID: "raft-3-node-short-outage-20260912-000000", DaemonAddrs: []string{"127.0.0.1:19091", "127.0.0.1:19092", "127.0.0.1:19093"}, DryRun: true})
 	if err != nil {
 		t.Fatalf("PlanScenario() error = %v", err)
+	}
+	if want := []string{"127.0.0.1:19091", "127.0.0.1:19092", "127.0.0.1:19093"}; !reflect.DeepEqual(resources.DaemonAddrs, want) {
+		t.Fatalf("daemon addrs=%v, want %v", resources.DaemonAddrs, want)
 	}
 	if len(resources.Principals) != 6 {
 		t.Fatalf("principals=%d, want 6", len(resources.Principals))
@@ -297,6 +302,72 @@ func TestCleanupAcrossSpaceBarrierRetriesAuditReferencedResources(t *testing.T) 
 				t.Fatalf("cleanup order=%v, want %v", calls, want)
 			}
 		})
+	}
+}
+
+func TestReadSemanticAdminAcrossDaemonsRetriesTransientLeaderGap(t *testing.T) {
+	scenario := &ScenarioResources{AdminAddr: "node-a:9091", DaemonAddrs: []string{"node-a:9091"}, Semantic: &SemanticResources{MaintenanceTimeout: 100 * time.Millisecond, MaintenancePollInterval: time.Millisecond}}
+	calls := 0
+	result, err := ReadSemanticAdminAcrossDaemons(context.Background(), &mycel.AdminClient{}, "node-a:9091", scenario, func(context.Context, *mycel.AdminClient) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", status.Error(codes.Unavailable, "election in progress")
+		}
+		return "leader-read", nil
+	})
+	if err != nil || result != "leader-read" || calls != 2 || scenario.AdminAddr != "node-a:9091" {
+		t.Fatalf("ReadSemanticAdminAcrossDaemons() result=%q error=%v calls=%d admin=%q", result, err, calls, scenario.AdminAddr)
+	}
+}
+
+func TestReadSemanticAdminAcrossDaemonsDoesNotRetryAuthorizationFailure(t *testing.T) {
+	scenario := &ScenarioResources{AdminAddr: "node-a:9091", DaemonAddrs: []string{"node-a:9091"}, Semantic: &SemanticResources{MaintenanceTimeout: 100 * time.Millisecond, MaintenancePollInterval: time.Millisecond}}
+	calls := 0
+	_, err := ReadSemanticAdminAcrossDaemons(context.Background(), &mycel.AdminClient{}, "node-a:9091", scenario, func(context.Context, *mycel.AdminClient) (string, error) {
+		calls++
+		return "", status.Error(codes.PermissionDenied, "denied")
+	})
+	if status.Code(err) != codes.PermissionDenied || calls != 1 {
+		t.Fatalf("ReadSemanticAdminAcrossDaemons() code=%s calls=%d, want PermissionDenied and one call", status.Code(err), calls)
+	}
+}
+
+func TestReadSemanticProviderBudgetStatusFindsRaftLeader(t *testing.T) {
+	calls := 0
+	want := &adminv1.GetSemanticProviderBudgetStatusResponse{Status: &adminv1.SemanticProviderBudgetStatus{BudgetScopeId: "scope-leader"}}
+	response, addr, err := readSemanticProviderBudgetStatus(context.Background(), []semanticBudgetStatusReader{
+		{addr: "follower:9091", read: func(context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+			calls++
+			return nil, status.Error(codes.Unavailable, "follower cannot serve linearizable read")
+		}},
+		{addr: "leader:9091", read: func(context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+			calls++
+			return want, nil
+		}},
+	})
+	if err != nil || response != want || addr != "leader:9091" || calls != 2 {
+		t.Fatalf("readSemanticProviderBudgetStatus() response=%p addr=%q error=%v calls=%d, want leader response and two calls", response, addr, err, calls)
+	}
+}
+
+func TestReadSemanticProviderBudgetStatusFailsClosed(t *testing.T) {
+	calls := 0
+	_, _, err := readSemanticProviderBudgetStatus(context.Background(), []semanticBudgetStatusReader{
+		{addr: "follower:9091", read: func(context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+			calls++
+			return nil, status.Error(codes.Unavailable, "follower")
+		}},
+		{addr: "denied:9091", read: func(context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+			calls++
+			return nil, status.Error(codes.PermissionDenied, "denied")
+		}},
+		{addr: "unused:9091", read: func(context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+			calls++
+			return &adminv1.GetSemanticProviderBudgetStatusResponse{}, nil
+		}},
+	})
+	if status.Code(err) != codes.PermissionDenied || calls != 2 {
+		t.Fatalf("readSemanticProviderBudgetStatus() code=%s calls=%d, want PermissionDenied after two calls", status.Code(err), calls)
 	}
 }
 
@@ -548,8 +619,33 @@ func TestProcedureInferenceCleanupRetainedByAuditRequiresExactRootedClosure(t *t
 	}
 }
 
+func TestProcedureInferenceCleanupAcceptsBoundedEndpointAuditClosureAboveLegacyLimit(t *testing.T) {
+	const (
+		capabilityID = "11111111-1111-4111-8111-111111111111"
+		credentialID = "22222222-2222-4222-8222-222222222222"
+		grantID      = "33333333-3333-4333-8333-333333333333"
+		profileID    = "44444444-4444-4444-8444-444444444444"
+		endpointID   = "55555555-5555-4555-8555-555555555555"
+	)
+	resources := &ProcedureInferenceResources{CapabilityID: capabilityID, CredentialID: credentialID, CredentialGrantID: grantID, IntelligenceProfileID: profileID, EndpointID: endpointID}
+	proof := &procedureInferenceCleanupProof{nodes: map[string]procedureInferenceCleanupProofNode{
+		"capability":           {ID: capabilityID, ImmutableRoot: true},
+		"credential":           {ID: credentialID, ImmutableRoot: true},
+		"credential-grant":     {ID: grantID, ImmutableRoot: true},
+		"intelligence-profile": {ID: profileID, ImmutableRoot: true},
+	}}
+	references := []string{"capability:" + capabilityID, "credential:" + credentialID, "credential_grant:" + grantID, "intelligence_profile:" + profileID}
+	for index := 0; index < 17; index++ {
+		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	details, retained := procedureInferenceCleanupRetainedByAudit(resources, "endpoint", proof, status.Error(codes.FailedPrecondition, "endpoint is referenced by "+strings.Join(references, ", ")))
+	if !retained || details["referenceCount"] != 21 {
+		t.Fatalf("bounded endpoint audit closure retained=%t details=%v, want 21 proven references", retained, details)
+	}
+}
+
 func TestProcedureInferenceCleanupRejectsAndBoundsOversizedReferenceEvidence(t *testing.T) {
-	const referenceCount = 30
+	const referenceCount = maxCleanupReferenceEvidence + 10
 	references := make([]string, 0, referenceCount)
 	for index := 0; index < referenceCount; index++ {
 		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))

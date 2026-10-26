@@ -170,7 +170,7 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 		}
 		return evidence, err
 	case "semantic-provider-budget-reconcile":
-		return reconcileSemanticProviderBudget(ctx, admin, semanticResources, target)
+		return reconcileSemanticProviderBudget(ctx, admin, addr, resources, target)
 	case "semantic-rebuild":
 		rebuildCtx, stopRebuild := context.WithCancel(ctx)
 		var mutationDone <-chan error
@@ -311,7 +311,8 @@ func validateRetainedSemanticProviderBudgetScope(scope *adminv1.SemanticProvider
 	return nil
 }
 
-func verifyRetainedSemanticProviderBudgetScope(ctx context.Context, admin *mycel.AdminClient, resources *provision.SemanticResources) error {
+func verifyRetainedSemanticProviderBudgetScope(ctx context.Context, admin *mycel.AdminClient, adminAddr string, scenario *provision.ScenarioResources) error {
+	resources := scenario.Semantic
 	pageSize := advertisedSemanticProviderBudgetPageSize(resources.ProviderBudgetMaxScopePage)
 	pageToken := ""
 	seenTokens := map[string]struct{}{}
@@ -327,9 +328,9 @@ func verifyRetainedSemanticProviderBudgetScope(ctx context.Context, admin *mycel
 			}
 			seenTokens[pageToken] = struct{}{}
 		}
-		callCtx, cancel := admin.AuthCallContext(ctx)
-		page, err := admin.SemanticMaintenance.ListSemanticProviderBudgetScopes(callCtx, &adminv1.ListSemanticProviderBudgetScopesRequest{SpaceId: resources.SpaceID, CorrelationId: resources.ExpectedProviderBudget.GetCorrelationId(), SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, PageSize: pageSize, PageToken: pageToken})
-		cancel()
+		page, err := provision.ReadSemanticAdminAcrossDaemons(ctx, admin, adminAddr, scenario, func(callCtx context.Context, client *mycel.AdminClient) (*adminv1.ListSemanticProviderBudgetScopesResponse, error) {
+			return client.SemanticMaintenance.ListSemanticProviderBudgetScopes(callCtx, &adminv1.ListSemanticProviderBudgetScopesRequest{SpaceId: resources.SpaceID, CorrelationId: resources.ExpectedProviderBudget.GetCorrelationId(), SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, PageSize: pageSize, PageToken: pageToken})
+		})
 		if err != nil {
 			return fmt.Errorf("list retained semantic provider budget scopes: %w", err)
 		}
@@ -423,13 +424,14 @@ func captureSemanticProviderBudgetSnapshot(pageIndex int64, page *adminv1.ListSe
 	return nil
 }
 
-func reconcileSemanticProviderBudget(ctx context.Context, admin *mycel.AdminClient, resources *provision.SemanticResources, target map[string]any) (SemanticProviderBudgetReconciliation, error) {
+func reconcileSemanticProviderBudget(ctx context.Context, admin *mycel.AdminClient, adminAddr string, scenario *provision.ScenarioResources, target map[string]any) (SemanticProviderBudgetReconciliation, error) {
+	resources := scenario.Semantic
 	if resources.ProviderBudgetScopeID == "" {
 		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget scope is unavailable")
 	}
-	callCtx, cancel := admin.AuthCallContext(ctx)
-	statusResponse, err := admin.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_BudgetScopeId{BudgetScopeId: resources.ProviderBudgetScopeID}})
-	cancel()
+	statusResponse, err := provision.ReadSemanticAdminAcrossDaemons(ctx, admin, adminAddr, scenario, func(callCtx context.Context, client *mycel.AdminClient) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+		return client.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_BudgetScopeId{BudgetScopeId: resources.ProviderBudgetScopeID}})
+	})
 	if err != nil {
 		return SemanticProviderBudgetReconciliation{}, fmt.Errorf("get semantic provider budget status: %w", err)
 	}
@@ -455,7 +457,7 @@ func reconcileSemanticProviderBudget(ctx context.Context, admin *mycel.AdminClie
 		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget attempt limit is outside reconciliation bounds")
 	}
 	maxEvents := maxAttempts * 2
-	if err := verifyRetainedSemanticProviderBudgetScope(ctx, admin, resources); err != nil {
+	if err := verifyRetainedSemanticProviderBudgetScope(ctx, admin, adminAddr, scenario); err != nil {
 		return SemanticProviderBudgetReconciliation{}, err
 	}
 	var events []*adminv1.SemanticProviderBudgetAttemptEvent
@@ -473,9 +475,9 @@ func reconcileSemanticProviderBudget(ctx context.Context, admin *mycel.AdminClie
 			}
 			seenPageTokens[pageToken] = struct{}{}
 		}
-		callCtx, cancel = admin.AuthCallContext(ctx)
-		page, listErr := admin.SemanticMaintenance.ListSemanticProviderBudgetAttemptEvents(callCtx, &adminv1.ListSemanticProviderBudgetAttemptEventsRequest{SpaceId: resources.SpaceID, BudgetScopeId: resources.ProviderBudgetScopeID, PageSize: pageSize, PageToken: pageToken})
-		cancel()
+		page, listErr := provision.ReadSemanticAdminAcrossDaemons(ctx, admin, adminAddr, scenario, func(callCtx context.Context, client *mycel.AdminClient) (*adminv1.ListSemanticProviderBudgetAttemptEventsResponse, error) {
+			return client.SemanticMaintenance.ListSemanticProviderBudgetAttemptEvents(callCtx, &adminv1.ListSemanticProviderBudgetAttemptEventsRequest{SpaceId: resources.SpaceID, BudgetScopeId: resources.ProviderBudgetScopeID, PageSize: pageSize, PageToken: pageToken})
+		})
 		if listErr != nil {
 			return SemanticProviderBudgetReconciliation{}, fmt.Errorf("list semantic provider budget events: %w", listErr)
 		}
@@ -954,13 +956,14 @@ type semanticBudgetAuthorizationSnapshot struct {
 	denial    adminv1.SemanticProviderBudgetDenialReason
 }
 
-func readSemanticBudgetAuthorizationSnapshot(ctx context.Context, client *mycel.AdminClient, resources *provision.SemanticResources) (semanticBudgetAuthorizationSnapshot, error) {
+func readSemanticBudgetAuthorizationSnapshot(ctx context.Context, client *mycel.AdminClient, clientAddr string, scenario *provision.ScenarioResources) (semanticBudgetAuthorizationSnapshot, error) {
+	resources := scenario.Semantic
 	if resources == nil || strings.TrimSpace(resources.ProviderBudgetScopeID) == "" {
 		return semanticBudgetAuthorizationSnapshot{}, errors.New("semantic provider budget scope is unavailable for authorization proof")
 	}
-	callCtx, cancel := client.AuthCallContext(ctx)
-	response, err := client.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_BudgetScopeId{BudgetScopeId: resources.ProviderBudgetScopeID}})
-	cancel()
+	response, err := provision.ReadSemanticAdminAcrossDaemons(ctx, client, clientAddr, scenario, func(callCtx context.Context, peer *mycel.AdminClient) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+		return peer.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_BudgetScopeId{BudgetScopeId: resources.ProviderBudgetScopeID}})
+	})
 	if err != nil {
 		return semanticBudgetAuthorizationSnapshot{}, err
 	}
@@ -985,7 +988,7 @@ func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision
 		return nil, fmt.Errorf("dial semantic controller for authorization proof: %w", err)
 	}
 	defer controller.Close()
-	before, err := readSemanticBudgetAuthorizationSnapshot(ctx, controller, resources.Semantic)
+	before, err := readSemanticBudgetAuthorizationSnapshot(ctx, controller, controllerAssignment.DaemonAddr, resources)
 	if err != nil {
 		return nil, fmt.Errorf("capture semantic provider budget before unauthorized search: %w", err)
 	}
@@ -1015,7 +1018,7 @@ func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision
 	if code != codes.PermissionDenied && code != codes.NotFound {
 		return nil, fmt.Errorf("unauthorized semantic search returned %s, want PermissionDenied or NotFound", code)
 	}
-	after, err := readSemanticBudgetAuthorizationSnapshot(ctx, controller, resources.Semantic)
+	after, err := readSemanticBudgetAuthorizationSnapshot(ctx, controller, controllerAssignment.DaemonAddr, resources)
 	if err != nil {
 		return nil, fmt.Errorf("capture semantic provider budget after unauthorized search: %w", err)
 	}
