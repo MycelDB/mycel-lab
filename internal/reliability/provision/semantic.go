@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	mycel "github.com/myceldb/mycel-go-sdk"
@@ -239,33 +240,88 @@ func CreateSemanticRule(ctx context.Context, admin *mycel.AdminClient, resources
 	if semanticResources.SemanticRuleID == "" {
 		semanticResources.SemanticRuleID = ruleResponse.GetRule().GetSemanticRuleId()
 	}
-	if _, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.GetSemanticReliabilityStatusResponse, error) {
-		return admin.SemanticMaintenance.GetSemanticReliabilityStatus(callCtx, &adminv1.GetSemanticReliabilityStatusRequest{SpaceId: semanticResources.SpaceID, SemanticRuleId: semanticResources.SemanticRuleID, EmbeddingBindingKey: semanticResources.EmbeddingBindingKey})
-	}); err != nil {
-		return semanticOperationFailed(semanticResources, "semantic-reliability-capability", fmt.Errorf("required SGT5 semantic reliability capability unavailable: %w", err))
+	liveBudget := resources.semanticPlan.ProviderProfile != nil && resources.semanticPlan.ProviderProfile.Profile.Mode == provider.ModeLive
+	budgetStatus, err := waitForSemanticRuleReadiness(ctx, admin, semanticResources, liveBudget)
+	if err != nil {
+		resource := "semantic-reliability-capability"
+		if liveBudget {
+			resource = "semantic-rule"
+		}
+		return semanticOperationFailed(semanticResources, resource, err)
 	}
-	if resources.semanticPlan.ProviderProfile != nil && resources.semanticPlan.ProviderProfile.Profile.Mode == provider.ModeLive {
-		statusResponse, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
-			return admin.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: semanticResources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_CurrentBinding{CurrentBinding: &adminv1.SemanticProviderBudgetBindingSelector{SemanticRuleId: semanticResources.SemanticRuleID, EmbeddingBindingKey: semanticResources.EmbeddingBindingKey}}})
-		})
-		if err != nil {
-			return semanticOperationFailed(semanticResources, "semantic-rule", fmt.Errorf("semantic provider budget status unavailable after rule creation: %w", err))
-		}
-		budgetStatus := statusResponse.GetStatus()
-		if err := ValidateSemanticProviderBudgetStatusIdentity(budgetStatus, semanticResources); err != nil {
-			return semanticOperationFailed(semanticResources, "semantic-rule", err)
-		}
-		if budgetStatus.GetState() != adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_ACTIVE || budgetStatus.GetDenialReason() != adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_NONE {
-			return semanticOperationFailed(semanticResources, "semantic-rule", errors.New("semantic provider budget scope is not active after rule creation"))
-		}
-		if !proto.Equal(budgetStatus.GetLimits(), semanticResources.ExpectedProviderBudget) || budgetStatus.GetModelEndpointId() != semanticResources.EndpointID || budgetStatus.GetModelId() != semanticResources.ModelID || budgetStatus.GetModelEndpointCapabilityId() != semanticResources.CapabilityID {
-			return semanticOperationFailed(semanticResources, "semantic-rule", errors.New("semantic provider budget scope policy or pinned route does not match the requested configuration"))
-		}
+	if liveBudget {
 		semanticResources.ProviderBudgetScopeID = budgetStatus.GetBudgetScopeId()
 	}
 	semanticOperationCompleted(semanticResources, "semantic-rule")
 	semanticOperationCompleted(semanticResources, "semantic-reliability-capability")
 	return nil
+}
+
+func waitForSemanticRuleReadiness(ctx context.Context, admin *mycel.AdminClient, resources *SemanticResources, requireBudget bool) (*adminv1.SemanticProviderBudgetStatus, error) {
+	timeout := resources.MaintenanceTimeout
+	if timeout <= 0 {
+		timeout = time.Minute
+	}
+	pollInterval := resources.MaintenancePollInterval
+	if pollInterval <= 0 {
+		pollInterval = 100 * time.Millisecond
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var lastErr error
+	for {
+		_, err := withAdminAuth(waitCtx, admin, func(callCtx context.Context) (*adminv1.GetSemanticReliabilityStatusResponse, error) {
+			return admin.SemanticMaintenance.GetSemanticReliabilityStatus(callCtx, &adminv1.GetSemanticReliabilityStatusRequest{SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey})
+		})
+		if err == nil {
+			if !requireBudget {
+				return nil, nil
+			}
+			statusResponse, statusErr := withAdminAuth(waitCtx, admin, func(callCtx context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+				return admin.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_CurrentBinding{CurrentBinding: &adminv1.SemanticProviderBudgetBindingSelector{SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey}}})
+			})
+			if statusErr == nil {
+				budgetStatus := statusResponse.GetStatus()
+				if identityErr := ValidateSemanticProviderBudgetStatusIdentity(budgetStatus, resources); identityErr != nil {
+					return nil, identityErr
+				}
+				if budgetStatus.GetState() != adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_ACTIVE || budgetStatus.GetDenialReason() != adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_NONE {
+					return nil, errors.New("semantic provider budget scope is not active after rule creation")
+				}
+				if !proto.Equal(budgetStatus.GetLimits(), resources.ExpectedProviderBudget) || budgetStatus.GetModelEndpointId() != resources.EndpointID || budgetStatus.GetModelId() != resources.ModelID || budgetStatus.GetModelEndpointCapabilityId() != resources.CapabilityID {
+					return nil, errors.New("semantic provider budget scope policy or pinned route does not match the requested configuration")
+				}
+				return budgetStatus, nil
+			}
+			if !semanticReadinessRetryable(statusErr) {
+				return nil, fmt.Errorf("semantic provider budget status unavailable after rule creation: %w", statusErr)
+			}
+			lastErr = statusErr
+		} else {
+			if !semanticReadinessRetryable(err) {
+				return nil, fmt.Errorf("required SGT5 semantic reliability capability unavailable: %w", err)
+			}
+			lastErr = err
+		}
+
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("semantic rule readiness did not converge: %w", errors.Join(lastErr, waitCtx.Err()))
+		case <-timer.C:
+		}
+	}
+}
+
+func semanticReadinessRetryable(err error) bool {
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.FailedPrecondition, codes.NotFound, codes.Aborted:
+		return true
+	default:
+		return false
+	}
 }
 
 func discoverAndAuthorizeLiveSemanticProvider(ctx context.Context, admin *mycel.AdminClient, resources *ScenarioResources, opts Options) error {
@@ -520,27 +576,55 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 			return err
 		}},
 	}
+	proofResources := semanticCleanupProofResources(resources)
+	if resources.cleanupProof == nil {
+		resources.cleanupProof = &procedureInferenceCleanupProof{nodes: make(map[string]procedureInferenceCleanupProofNode)}
+	}
+	proof := resources.cleanupProof
 	for _, step := range steps {
 		if strings.TrimSpace(step.id) == "" {
-			setSemanticCleanupStatus(resources, step.resource, "not-created", "")
+			setSemanticCleanupStatus(resources, step.resource, "not-created", "", nil)
 			continue
 		}
 		callCtx, cancel := admin.AuthCallContext(ctx)
 		err := step.call(callCtx)
 		cancel()
 		if err != nil && status.Code(err) != codes.NotFound {
-			if semanticCleanupRetainedByAudit(err) {
-				setSemanticCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit references")
+			details, retained := semanticCleanupRetention(proofResources, step.resource, proof, err)
+			if retained {
+				setSemanticCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit closure", details)
 				continue
+			}
+			if shouldInvalidateProcedureInferenceCleanupProof(status.Code(err)) {
+				proof.clear()
 			}
 			message := sanitizedSemanticCleanupFailure(step.resource, err)
 			failures = append(failures, message)
-			setSemanticCleanupStatus(resources, step.resource, "failed", message)
+			setSemanticCleanupStatus(resources, step.resource, "failed", message, details)
 			continue
 		}
-		setSemanticCleanupStatus(resources, step.resource, "completed", "")
+		if node, retained := proof.node(step.resource, step.id); retained {
+			setSemanticCleanupStatus(resources, step.resource, "retained-by-audit", "immutable audit closure", node.Details)
+			continue
+		}
+		setSemanticCleanupStatus(resources, step.resource, "completed", "", nil)
 	}
 	return failures
+}
+
+func semanticCleanupProofResources(resources *SemanticResources) *ProcedureInferenceResources {
+	if resources == nil {
+		return nil
+	}
+	return &ProcedureInferenceResources{
+		AccessPolicyID:        resources.AccessPolicyID,
+		CredentialGrantID:     resources.CredentialGrantID,
+		CredentialID:          resources.CredentialID,
+		IntelligenceProfileID: resources.IntelligenceProfileID,
+		CapabilityID:          resources.CapabilityID,
+		ModelID:               resources.ModelID,
+		EndpointID:            resources.EndpointID,
+	}
 }
 
 const (
@@ -607,16 +691,31 @@ func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, i
 }
 
 func semanticCleanupRetainedByAudit(err error) bool {
-	references, rejectionCategory, _ := semanticCleanupReferences(err)
+	_, retained := semanticCleanupDirectAuditRetention(err)
+	return retained
+}
+
+func semanticCleanupRetention(resources *ProcedureInferenceResources, targetResource string, proof *procedureInferenceCleanupProof, err error) (map[string]any, bool) {
+	// Semantic rules and vector stores are not members of the shared inference
+	// catalog dependency graph. Preserve their direct immutable-audit retention
+	// classification without allowing them to establish transitive roots.
+	if targetResource == "semantic-rule" || targetResource == "vector-store" {
+		return semanticCleanupDirectAuditRetention(err)
+	}
+	return procedureInferenceCleanupRetainedByAudit(resources, targetResource, proof, err)
+}
+
+func semanticCleanupDirectAuditRetention(err error) (map[string]any, bool) {
+	references, rejectionCategory, observedReferenceCount := semanticCleanupReferences(err)
 	if rejectionCategory != "" {
-		return false
+		return procedureInferenceCleanupRejectionEvidence(rejectionCategory, observedReferenceCount, procedureInferenceSafeEvidenceReferences(references)), false
 	}
 	for _, reference := range references {
 		if reference.Type != "usage_event" && reference.Type != "policy_decision" {
-			return false
+			return procedureInferenceCleanupRejectionEvidence("unsupported-reference-type", len(references), procedureInferenceSafeEvidenceReferences(references)), false
 		}
 	}
-	return true
+	return procedureInferenceCleanupReferenceEvidence("retentionCategory", "immutable-audit-direct", references), true
 }
 
 var (
@@ -628,11 +727,12 @@ func sanitizedSemanticCleanupFailure(resource string, err error) string {
 	return fmt.Sprintf("delete %s: %s", resource, sanitizedProcedureInferenceProvisionError(err))
 }
 
-func setSemanticCleanupStatus(resources *SemanticResources, resource, state, message string) {
+func setSemanticCleanupStatus(resources *SemanticResources, resource, state, message string, details map[string]any) {
 	for index := range resources.Cleanup {
 		if resources.Cleanup[index].Resource == resource {
 			resources.Cleanup[index].Status = state
 			resources.Cleanup[index].Error = message
+			resources.Cleanup[index].Details = details
 			return
 		}
 	}
