@@ -300,6 +300,19 @@ func TestCleanupAcrossSpaceBarrierRetriesAuditReferencedResources(t *testing.T) 
 	}
 }
 
+func TestSemanticReadinessRetryableFailsClosed(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded, codes.FailedPrecondition, codes.NotFound, codes.Aborted} {
+		if !semanticReadinessRetryable(status.Error(code, "transient readiness")) {
+			t.Fatalf("code %s must be retryable for idempotent semantic readiness reads", code)
+		}
+	}
+	for _, code := range []codes.Code{codes.OK, codes.Canceled, codes.PermissionDenied, codes.Unauthenticated, codes.InvalidArgument, codes.Internal, codes.Unknown, codes.ResourceExhausted} {
+		if semanticReadinessRetryable(status.Error(code, "not allowlisted")) {
+			t.Fatalf("code %s must fail closed for semantic readiness", code)
+		}
+	}
+}
+
 func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 	const (
 		usageOne    = "usage_event:11111111-1111-4111-8111-111111111111"
@@ -333,12 +346,44 @@ func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSemanticCleanupRetentionPreservesDirectAuditRootsForLeafTargets(t *testing.T) {
+	const rawID = "11111111-1111-4111-8111-111111111111"
+	for _, resource := range []string{"semantic-rule", "vector-store"} {
+		t.Run(resource, func(t *testing.T) {
+			proof := &procedureInferenceCleanupProof{nodes: make(map[string]procedureInferenceCleanupProofNode)}
+			details, retained := semanticCleanupRetention(&ProcedureInferenceResources{}, resource, proof, status.Error(codes.FailedPrecondition, resource+" is referenced by usage_event:"+rawID))
+			if !retained {
+				t.Fatalf("%s direct immutable-audit root must be retained", resource)
+			}
+			if len(proof.nodes) != 0 {
+				t.Fatalf("%s direct retention must not establish transitive proof roots", resource)
+			}
+			encoded, err := json.Marshal(details)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), rawID) {
+				t.Fatalf("%s retention evidence leaked raw reference ID: %s", resource, encoded)
+			}
+		})
+	}
+}
+
+func TestSemanticCleanupRetentionLeafTargetsRejectRunOwnedReferences(t *testing.T) {
+	const rawID = "11111111-1111-4111-8111-111111111111"
+	for _, resource := range []string{"semantic-rule", "vector-store"} {
+		if _, retained := semanticCleanupRetention(&ProcedureInferenceResources{}, resource, &procedureInferenceCleanupProof{}, status.Error(codes.FailedPrecondition, resource+" is referenced by intelligence_profile:"+rawID)); retained {
+			t.Fatalf("%s must reject non-audit direct references", resource)
+		}
+	}
+}
+
 func TestSemanticCleanupFailureEvidenceExcludesRawDaemonReferences(t *testing.T) {
 	const rawID = "11111111-1111-4111-8111-111111111111"
 	err := status.Error(codes.FailedPrecondition, "capability is referenced by usage_event:"+rawID+", ...9 more raw-secret")
 	resources := &SemanticResources{Cleanup: []SemanticOperation{{Resource: "capability", Status: "planned"}}}
 	message := sanitizedSemanticCleanupFailure("capability", err)
-	setSemanticCleanupStatus(resources, "capability", "failed", message)
+	setSemanticCleanupStatus(resources, "capability", "failed", message, nil)
 	encoded, marshalErr := json.Marshal(resources.Cleanup)
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
@@ -350,6 +395,33 @@ func TestSemanticCleanupFailureEvidenceExcludesRawDaemonReferences(t *testing.T)
 		if strings.Contains(string(encoded), prohibited) {
 			t.Fatalf("semantic cleanup evidence leaked %q: %s", prohibited, encoded)
 		}
+	}
+}
+
+func TestSemanticCleanupProofResourcesSupportsImmutableAuditClosure(t *testing.T) {
+	const (
+		profileID    = "11111111-1111-4111-8111-111111111111"
+		capabilityID = "22222222-2222-4222-8222-222222222222"
+		modelID      = "33333333-3333-4333-8333-333333333333"
+		endpointID   = "44444444-4444-4444-8444-444444444444"
+		decisionID   = "55555555-5555-4555-8555-555555555555"
+	)
+	resources := semanticCleanupProofResources(&SemanticResources{IntelligenceProfileID: profileID, CapabilityID: capabilityID, ModelID: modelID, EndpointID: endpointID})
+	proof := &procedureInferenceCleanupProof{nodes: make(map[string]procedureInferenceCleanupProofNode)}
+	if _, retained := procedureInferenceCleanupRetainedByAudit(resources, "intelligence-profile", proof, status.Error(codes.FailedPrecondition, "profile is referenced by policy_decision:"+decisionID)); !retained {
+		t.Fatal("profile directly rooted in immutable audit evidence must be retained")
+	}
+	if _, retained := procedureInferenceCleanupRetainedByAudit(resources, "capability", proof, status.Error(codes.FailedPrecondition, "capability is referenced by intelligence_profile:"+profileID)); !retained {
+		t.Fatal("capability rooted through the retained profile must be retained")
+	}
+	if _, retained := procedureInferenceCleanupRetainedByAudit(resources, "model", proof, status.Error(codes.FailedPrecondition, "model is referenced by capability:"+capabilityID+", intelligence_profile:"+profileID)); !retained {
+		t.Fatal("model rooted through retained run-owned resources must be retained")
+	}
+	if _, retained := procedureInferenceCleanupRetainedByAudit(resources, "endpoint", proof, status.Error(codes.FailedPrecondition, "endpoint is referenced by capability:"+capabilityID+", intelligence_profile:"+profileID)); !retained {
+		t.Fatal("endpoint rooted through retained run-owned resources must be retained")
+	}
+	if _, retained := proof.node("model", modelID); !retained {
+		t.Fatal("model retention proof must remain rooted")
 	}
 }
 

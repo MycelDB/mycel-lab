@@ -156,6 +156,7 @@ type SemanticResources struct {
 	ProviderBudgetMaxAttemptEventPage int32                                 `json:"providerBudgetMaxAttemptEventPage,omitempty"`
 	ProviderBudgetMaxScopePage        int32                                 `json:"providerBudgetMaxScopePage,omitempty"`
 	ProviderBudgetScopeID             string                                `json:"providerBudgetScopeId,omitempty"`
+	cleanupProof                      *procedureInferenceCleanupProof
 }
 
 type SemanticOperation struct {
