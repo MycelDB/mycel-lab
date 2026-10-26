@@ -26,6 +26,7 @@ type ScenarioResources struct {
 	RunID                  string                       `json:"runId"`
 	DryRun                 bool                         `json:"dryRun"`
 	AdminAddr              string                       `json:"adminAddr,omitempty"`
+	DaemonAddrs            []string                     `json:"daemonAddrs,omitempty"`
 	Principals             []Principal                  `json:"principals"`
 	Spaces                 []Space                      `json:"spaces"`
 	Domains                []Domain                     `json:"domains"`
@@ -219,9 +220,9 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 	if runID == "" {
 		runID = sanitizeName(scenario.Metadata.Name)
 	}
-	resources := ScenarioResources{ScenarioName: scenario.Metadata.Name, RunID: runID, DryRun: opts.DryRun, CreatedAt: time.Now().UTC()}
-	if len(opts.DaemonAddrs) > 0 {
-		resources.AdminAddr = opts.DaemonAddrs[0]
+	resources := ScenarioResources{ScenarioName: scenario.Metadata.Name, RunID: runID, DryRun: opts.DryRun, CreatedAt: time.Now().UTC(), DaemonAddrs: append([]string(nil), opts.DaemonAddrs...)}
+	if len(resources.DaemonAddrs) > 0 {
+		resources.AdminAddr = resources.DaemonAddrs[0]
 	}
 	shortRun := shortRunID(runID)
 	writerAssignments := map[string][]ActorAssignment{}

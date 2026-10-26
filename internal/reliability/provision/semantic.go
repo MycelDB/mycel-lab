@@ -241,7 +241,7 @@ func CreateSemanticRule(ctx context.Context, admin *mycel.AdminClient, resources
 		semanticResources.SemanticRuleID = ruleResponse.GetRule().GetSemanticRuleId()
 	}
 	liveBudget := resources.semanticPlan.ProviderProfile != nil && resources.semanticPlan.ProviderProfile.Profile.Mode == provider.ModeLive
-	budgetStatus, err := waitForSemanticRuleReadiness(ctx, admin, semanticResources, liveBudget)
+	budgetStatus, err := waitForSemanticRuleReadiness(ctx, admin, resources, liveBudget)
 	if err != nil {
 		resource := "semantic-reliability-capability"
 		if liveBudget {
@@ -257,7 +257,8 @@ func CreateSemanticRule(ctx context.Context, admin *mycel.AdminClient, resources
 	return nil
 }
 
-func waitForSemanticRuleReadiness(ctx context.Context, admin *mycel.AdminClient, resources *SemanticResources, requireBudget bool) (*adminv1.SemanticProviderBudgetStatus, error) {
+func waitForSemanticRuleReadiness(ctx context.Context, admin *mycel.AdminClient, scenario *ScenarioResources, requireBudget bool) (*adminv1.SemanticProviderBudgetStatus, error) {
+	resources := scenario.Semantic
 	timeout := resources.MaintenanceTimeout
 	if timeout <= 0 {
 		timeout = time.Minute
@@ -269,6 +270,17 @@ func waitForSemanticRuleReadiness(ctx context.Context, admin *mycel.AdminClient,
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	var budgetReaders []semanticBudgetStatusReader
+	closeReaders := func() {}
+	if requireBudget {
+		var err error
+		budgetReaders, closeReaders, err = semanticBudgetStatusReaders(waitCtx, admin, scenario)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer closeReaders()
+
 	var lastErr error
 	for {
 		_, err := withAdminAuth(waitCtx, admin, func(callCtx context.Context) (*adminv1.GetSemanticReliabilityStatusResponse, error) {
@@ -278,10 +290,13 @@ func waitForSemanticRuleReadiness(ctx context.Context, admin *mycel.AdminClient,
 			if !requireBudget {
 				return nil, nil
 			}
-			statusResponse, statusErr := withAdminAuth(waitCtx, admin, func(callCtx context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
-				return admin.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_CurrentBinding{CurrentBinding: &adminv1.SemanticProviderBudgetBindingSelector{SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey}}})
-			})
+			statusResponse, selectedAddr, statusErr := readSemanticProviderBudgetStatus(waitCtx, budgetReaders)
 			if statusErr == nil {
+				if selectedAddr != "" {
+					// Keep subsequent budget reconciliation reads on the system-Raft
+					// leader selected by this successful linearizable read.
+					scenario.AdminAddr = selectedAddr
+				}
 				budgetStatus := statusResponse.GetStatus()
 				if identityErr := ValidateSemanticProviderBudgetStatusIdentity(budgetStatus, resources); identityErr != nil {
 					return nil, identityErr
@@ -313,6 +328,154 @@ func waitForSemanticRuleReadiness(ctx context.Context, admin *mycel.AdminClient,
 		case <-timer.C:
 		}
 	}
+}
+
+type semanticBudgetStatusReader struct {
+	addr string
+	read func(context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error)
+}
+
+func semanticBudgetStatusReaders(ctx context.Context, primary *mycel.AdminClient, scenario *ScenarioResources) ([]semanticBudgetStatusReader, func(), error) {
+	resources := scenario.Semantic
+	request := &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_CurrentBinding{CurrentBinding: &adminv1.SemanticProviderBudgetBindingSelector{SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey}}}
+	type readinessAdmin struct {
+		addr   string
+		client *mycel.AdminClient
+	}
+	clients := []readinessAdmin{{addr: strings.TrimSpace(scenario.AdminAddr), client: primary}}
+	seen := map[string]struct{}{strings.TrimSpace(scenario.AdminAddr): {}}
+	for _, rawAddr := range scenario.DaemonAddrs {
+		addr := strings.TrimSpace(rawAddr)
+		if addr == "" {
+			continue
+		}
+		if _, exists := seen[addr]; exists {
+			continue
+		}
+		seen[addr] = struct{}{}
+		client, err := mycel.DialAdmin(ctx, mycel.Config{Addr: addr, AccessToken: primary.AccessToken(), AccessTokenExpireTime: primary.AccessTokenExpireTime(), ClientName: "mycel-lab-semantic-readiness"})
+		if err != nil {
+			for _, opened := range clients[1:] {
+				_ = opened.client.Close()
+			}
+			return nil, func() {}, fmt.Errorf("dial semantic readiness admin: %w", err)
+		}
+		clients = append(clients, readinessAdmin{addr: addr, client: client})
+	}
+	readers := make([]semanticBudgetStatusReader, 0, len(clients))
+	for _, entry := range clients {
+		entry := entry
+		readers = append(readers, semanticBudgetStatusReader{addr: entry.addr, read: func(readCtx context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+			return withAdminAuth(readCtx, entry.client, func(callCtx context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+				return entry.client.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, request)
+			})
+		}})
+	}
+	return readers, func() {
+		for _, opened := range clients[1:] {
+			_ = opened.client.Close()
+		}
+	}, nil
+}
+
+// ReadSemanticAdminAcrossDaemons executes one authenticated, idempotent semantic
+// budget read against each daemon until the current system-Raft leader serves it.
+// It never retries mutations and never creates additional login sessions.
+func ReadSemanticAdminAcrossDaemons[T any](ctx context.Context, primary *mycel.AdminClient, primaryAddr string, scenario *ScenarioResources, read func(context.Context, *mycel.AdminClient) (T, error)) (T, error) {
+	var zero T
+	if primary == nil || scenario == nil {
+		return zero, errors.New("semantic admin read requires a primary client and scenario resources")
+	}
+	readTimeout := 10 * time.Second
+	if scenario.Semantic != nil && scenario.Semantic.MaintenanceTimeout > 0 && scenario.Semantic.MaintenanceTimeout < readTimeout {
+		readTimeout = scenario.Semantic.MaintenanceTimeout
+	}
+	readCtx, cancelRead := context.WithTimeout(ctx, readTimeout)
+	defer cancelRead()
+	addresses := make([]string, 0, len(scenario.DaemonAddrs)+2)
+	seen := make(map[string]struct{}, len(scenario.DaemonAddrs)+2)
+	for _, rawAddr := range append([]string{primaryAddr, scenario.AdminAddr}, scenario.DaemonAddrs...) {
+		addr := strings.TrimSpace(rawAddr)
+		if addr == "" {
+			continue
+		}
+		if _, exists := seen[addr]; exists {
+			continue
+		}
+		seen[addr] = struct{}{}
+		addresses = append(addresses, addr)
+	}
+	if len(addresses) == 0 {
+		return zero, status.Error(codes.Unavailable, "semantic provider budget read has no daemon endpoints")
+	}
+	pollInterval := 100 * time.Millisecond
+	if scenario.Semantic != nil && scenario.Semantic.MaintenancePollInterval > 0 {
+		pollInterval = scenario.Semantic.MaintenancePollInterval
+	}
+	var lastErr error
+	for {
+		for _, addr := range addresses {
+			client := primary
+			closeClient := false
+			if addr != strings.TrimSpace(primaryAddr) {
+				var err error
+				client, err = mycel.DialAdmin(readCtx, mycel.Config{Addr: addr, AccessToken: primary.AccessToken(), AccessTokenExpireTime: primary.AccessTokenExpireTime(), ClientName: "mycel-lab-semantic-budget-read"})
+				if err != nil {
+					if readCtx.Err() != nil {
+						return zero, fmt.Errorf("semantic provider budget read did not find the system leader: %w", errors.Join(lastErr, readCtx.Err()))
+					}
+					if !semanticReadinessRetryable(err) {
+						return zero, err
+					}
+					lastErr = err
+					continue
+				}
+				closeClient = true
+			}
+			callCtx, cancel := client.AuthCallContext(readCtx)
+			result, err := read(callCtx, client)
+			cancel()
+			if closeClient {
+				_ = client.Close()
+			}
+			if err == nil {
+				scenario.AdminAddr = addr
+				return result, nil
+			}
+			if readCtx.Err() != nil {
+				return zero, fmt.Errorf("semantic provider budget read did not find the system leader: %w", errors.Join(lastErr, err, readCtx.Err()))
+			}
+			if !semanticReadinessRetryable(err) {
+				return zero, err
+			}
+			lastErr = err
+		}
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-readCtx.Done():
+			timer.Stop()
+			return zero, fmt.Errorf("semantic provider budget read did not find the system leader: %w", errors.Join(lastErr, readCtx.Err()))
+		case <-timer.C:
+		}
+	}
+}
+
+func readSemanticProviderBudgetStatus(ctx context.Context, readers []semanticBudgetStatusReader) (*adminv1.GetSemanticProviderBudgetStatusResponse, string, error) {
+	var lastErr error
+	for _, reader := range readers {
+		response, err := reader.read(ctx)
+		if err == nil {
+			return response, reader.addr, nil
+		}
+		if !semanticReadinessRetryable(err) {
+			return nil, "", err
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = status.Error(codes.Unavailable, "semantic provider budget status reader is unavailable")
+	}
+	return nil, "", lastErr
 }
 
 func semanticReadinessRetryable(err error) bool {
@@ -628,7 +791,7 @@ func semanticCleanupProofResources(resources *SemanticResources) *ProcedureInfer
 }
 
 const (
-	maxCleanupReferenceEvidence     = 20
+	maxCleanupReferenceEvidence     = 32
 	maxCleanupReferenceTokens       = maxCleanupReferenceEvidence + 1
 	maxCleanupReferenceMessageBytes = 4096
 )
