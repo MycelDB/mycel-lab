@@ -169,6 +169,8 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 			captureSemanticReliability(resources, target, evidence)
 		}
 		return evidence, err
+	case "semantic-provider-budget-reconcile":
+		return reconcileSemanticProviderBudget(ctx, admin, semanticResources, target)
 	case "semantic-rebuild":
 		rebuildCtx, stopRebuild := context.WithCancel(ctx)
 		var mutationDone <-chan error
@@ -267,6 +269,382 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 	default:
 		return nil, fmt.Errorf("unsupported semantic event %q", eventType)
 	}
+}
+
+type SemanticProviderBudgetReconciliation struct {
+	ScopeState                string `json:"scopeState"`
+	DenialReason              string `json:"denialReason"`
+	Requests                  int64  `json:"requests"`
+	Attempts                  int64  `json:"attempts"`
+	RetryAttempts             int64  `json:"retryAttempts"`
+	BatchItems                int64  `json:"batchItems"`
+	CompletedAttempts         int64  `json:"completedAttempts"`
+	AmbiguousAttempts         int64  `json:"ambiguousAttempts"`
+	ReservedEvents            int64  `json:"reservedEvents"`
+	TerminalEvents            int64  `json:"terminalEvents"`
+	InputTokens               int64  `json:"inputTokens"`
+	ProviderMillis            int64  `json:"providerMillis"`
+	EstimatedCostMicros       int64  `json:"estimatedCostMicros"`
+	AccountingOverflow        bool   `json:"accountingOverflow"`
+	EarliestRetainedSequence  uint64 `json:"earliestRetainedSequence"`
+	SnapshotHighWaterSequence uint64 `json:"snapshotHighWaterSequence"`
+	HistoryComplete           bool   `json:"historyComplete"`
+	AttemptPairsValid         bool   `json:"attemptPairsValid"`
+	UsageWithinLimits         bool   `json:"usageWithinLimits"`
+	RetainedScopeDiscovered   bool   `json:"retainedScopeDiscovered"`
+}
+
+func advertisedSemanticProviderBudgetPageSize(advertised int32) int32 {
+	if advertised > 0 {
+		return advertised
+	}
+	return 100
+}
+
+func validateRetainedSemanticProviderBudgetScope(scope *adminv1.SemanticProviderBudgetScopeReference, resources *provision.SemanticResources) error {
+	if scope.GetBudgetScopeId() != resources.ProviderBudgetScopeID || scope.GetSemanticRuleId() != resources.SemanticRuleID || scope.GetEmbeddingBindingKey() != resources.EmbeddingBindingKey || scope.GetCorrelationId() != resources.ExpectedProviderBudget.GetCorrelationId() {
+		return errors.New("semantic provider budget retained scope filter integrity is invalid")
+	}
+	if scope.GetCreatedAt() == nil || scope.GetRetentionUntil() == nil || scope.GetCreatedAt().CheckValid() != nil || scope.GetRetentionUntil().CheckValid() != nil || !scope.GetRetentionUntil().AsTime().After(scope.GetCreatedAt().AsTime()) {
+		return errors.New("semantic provider budget retained scope evidence is inconsistent")
+	}
+	return nil
+}
+
+func verifyRetainedSemanticProviderBudgetScope(ctx context.Context, admin *mycel.AdminClient, resources *provision.SemanticResources) error {
+	pageSize := advertisedSemanticProviderBudgetPageSize(resources.ProviderBudgetMaxScopePage)
+	pageToken := ""
+	seenTokens := map[string]struct{}{}
+	var previousSequence uint64
+	matches := 0
+	for pages := 0; ; pages++ {
+		if pages > 10_000 {
+			return errors.New("semantic provider budget scope pagination exceeded its bound")
+		}
+		if pageToken != "" {
+			if _, duplicate := seenTokens[pageToken]; duplicate {
+				return errors.New("semantic provider budget scope pagination repeated a token")
+			}
+			seenTokens[pageToken] = struct{}{}
+		}
+		callCtx, cancel := admin.AuthCallContext(ctx)
+		page, err := admin.SemanticMaintenance.ListSemanticProviderBudgetScopes(callCtx, &adminv1.ListSemanticProviderBudgetScopesRequest{SpaceId: resources.SpaceID, CorrelationId: resources.ExpectedProviderBudget.GetCorrelationId(), SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, PageSize: pageSize, PageToken: pageToken})
+		cancel()
+		if err != nil {
+			return fmt.Errorf("list retained semantic provider budget scopes: %w", err)
+		}
+		for _, scope := range page.GetScopes() {
+			if scope.GetScopeSequence() == 0 || previousSequence > 0 && scope.GetScopeSequence() <= previousSequence {
+				return errors.New("semantic provider budget retained scope ordering is invalid")
+			}
+			previousSequence = scope.GetScopeSequence()
+			if err := validateRetainedSemanticProviderBudgetScope(scope, resources); err != nil {
+				return err
+			}
+			matches++
+		}
+		pageToken = page.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+	}
+	if matches != 1 {
+		return errors.New("semantic provider budget retained scope was not discovered exactly once")
+	}
+	return nil
+}
+
+func knownSemanticBudgetScopeState(state adminv1.SemanticProviderBudgetScopeState) bool {
+	switch state {
+	case adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_ACTIVE,
+		adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_COMPLETED,
+		adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_EXPIRED,
+		adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_EXHAUSTED:
+		return true
+	default:
+		return false
+	}
+}
+
+func knownSemanticBudgetDenialReason(reason adminv1.SemanticProviderBudgetDenialReason) bool {
+	return reason >= adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_NONE && reason <= adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_CAPACITY
+}
+
+func knownSemanticBudgetAttemptState(state adminv1.SemanticProviderBudgetAttemptState) bool {
+	return state >= adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_RESERVED && state <= adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_AMBIGUOUS
+}
+
+func knownSemanticBudgetOutcome(outcome adminv1.SemanticProviderBudgetOutcomeCategory) bool {
+	return outcome >= adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_NONE && outcome <= adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS
+}
+
+func semanticBudgetEventTimestampsValid(event *adminv1.SemanticProviderBudgetAttemptEvent) bool {
+	return event != nil && event.GetRecordedAt() != nil && event.GetReservedUntil() != nil && event.GetRecordedAt().CheckValid() == nil && event.GetReservedUntil().CheckValid() == nil
+}
+
+func semanticBudgetTerminalOutcomeMatches(event *adminv1.SemanticProviderBudgetAttemptEvent) bool {
+	switch event.GetState() {
+	case adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_SUCCEEDED:
+		return event.GetOutcomeCategory() == adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_SUCCESS && event.GetOutcomeKnown()
+	case adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_FAILED:
+		if event.GetOutcomeCategory() == adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS {
+			return !event.GetOutcomeKnown()
+		}
+		return (event.GetOutcomeCategory() == adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_TRANSIENT_FAILURE || event.GetOutcomeCategory() == adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_PERMANENT_FAILURE) && event.GetOutcomeKnown()
+	case adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_CANCELED:
+		return event.GetOutcomeCategory() == adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_CANCELED_BEFORE_EFFECT && event.GetOutcomeKnown() || event.GetOutcomeCategory() == adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS && !event.GetOutcomeKnown()
+	case adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_AMBIGUOUS:
+		return event.GetOutcomeCategory() == adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS && !event.GetOutcomeKnown()
+	default:
+		return false
+	}
+}
+
+func semanticBudgetUnknownOutcomeIsConservative(event *adminv1.SemanticProviderBudgetAttemptEvent) bool {
+	return event.GetOutcomeKnown() || !event.GetUsageKnown() && !event.GetProviderDurationKnown() && event.GetChargedInputTokens() == event.GetReservedInputTokens() && event.GetChargedProviderMillis() == event.GetReservedProviderMillis() && event.GetChargedCostMicros() == event.GetReservedCostMicros()
+}
+
+func checkedSemanticBudgetSum(current, additional int64, overflow bool) (int64, bool) {
+	if additional < 0 || current > math.MaxInt64-additional {
+		return math.MaxInt64, true
+	}
+	return current + additional, overflow
+}
+
+func captureSemanticProviderBudgetSnapshot(pageIndex int64, page *adminv1.ListSemanticProviderBudgetAttemptEventsResponse, earliest, snapshot *uint64) error {
+	if pageIndex == 0 {
+		*earliest = page.GetEarliestRetainedEventSequence()
+		*snapshot = page.GetSnapshotHighWaterSequence()
+		return nil
+	}
+	if page.GetSnapshotHighWaterSequence() != *snapshot {
+		return errors.New("semantic provider budget event snapshot changed during pagination")
+	}
+	return nil
+}
+
+func reconcileSemanticProviderBudget(ctx context.Context, admin *mycel.AdminClient, resources *provision.SemanticResources, target map[string]any) (SemanticProviderBudgetReconciliation, error) {
+	if resources.ProviderBudgetScopeID == "" {
+		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget scope is unavailable")
+	}
+	callCtx, cancel := admin.AuthCallContext(ctx)
+	statusResponse, err := admin.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_BudgetScopeId{BudgetScopeId: resources.ProviderBudgetScopeID}})
+	cancel()
+	if err != nil {
+		return SemanticProviderBudgetReconciliation{}, fmt.Errorf("get semantic provider budget status: %w", err)
+	}
+	statusValue := statusResponse.GetStatus()
+	if err := provision.ValidateSemanticProviderBudgetStatusIdentity(statusValue, resources); err != nil {
+		return SemanticProviderBudgetReconciliation{}, err
+	}
+	if statusValue.GetUsage() == nil || statusValue.GetLimits() == nil {
+		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget status is incomplete")
+	}
+	if !proto.Equal(statusValue.GetLimits(), resources.ExpectedProviderBudget) || statusValue.GetModelEndpointId() != resources.EndpointID || statusValue.GetModelId() != resources.ModelID || statusValue.GetModelEndpointCapabilityId() != resources.CapabilityID {
+		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget status policy or route differs from the requested configuration")
+	}
+	if !knownSemanticBudgetScopeState(statusValue.GetState()) || !knownSemanticBudgetDenialReason(statusValue.GetDenialReason()) || statusValue.GetState() == adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_EXPIRED || statusValue.GetState() == adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_ACTIVE && statusValue.GetDenialReason() != adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_NONE || statusValue.GetState() == adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_COMPLETED && statusValue.GetDenialReason() != adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_NONE || statusValue.GetState() == adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_EXHAUSTED && statusValue.GetDenialReason() == adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_NONE {
+		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget status has an unacceptable state")
+	}
+	limits := statusValue.GetLimits()
+	if limits.GetMaxRetryAttempts() > math.MaxInt64-limits.GetMaxRequests() {
+		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget attempt limit overflows")
+	}
+	maxAttempts := limits.GetMaxRequests() + limits.GetMaxRetryAttempts()
+	if maxAttempts <= 0 || maxAttempts > 10000 {
+		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget attempt limit is outside reconciliation bounds")
+	}
+	maxEvents := maxAttempts * 2
+	if err := verifyRetainedSemanticProviderBudgetScope(ctx, admin, resources); err != nil {
+		return SemanticProviderBudgetReconciliation{}, err
+	}
+	var events []*adminv1.SemanticProviderBudgetAttemptEvent
+	pageToken := ""
+	seenPageTokens := map[string]struct{}{}
+	var earliest, snapshot uint64
+	pageSize := advertisedSemanticProviderBudgetPageSize(resources.ProviderBudgetMaxAttemptEventPage)
+	for pages := int64(0); ; pages++ {
+		if pages > maxEvents+1 {
+			return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget event pagination exceeded its bound")
+		}
+		if pageToken != "" {
+			if _, duplicate := seenPageTokens[pageToken]; duplicate {
+				return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget event pagination repeated a token")
+			}
+			seenPageTokens[pageToken] = struct{}{}
+		}
+		callCtx, cancel = admin.AuthCallContext(ctx)
+		page, listErr := admin.SemanticMaintenance.ListSemanticProviderBudgetAttemptEvents(callCtx, &adminv1.ListSemanticProviderBudgetAttemptEventsRequest{SpaceId: resources.SpaceID, BudgetScopeId: resources.ProviderBudgetScopeID, PageSize: pageSize, PageToken: pageToken})
+		cancel()
+		if listErr != nil {
+			return SemanticProviderBudgetReconciliation{}, fmt.Errorf("list semantic provider budget events: %w", listErr)
+		}
+		if page.GetHistoryGap() {
+			return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget history has a retention gap")
+		}
+		if err := captureSemanticProviderBudgetSnapshot(pages, page, &earliest, &snapshot); err != nil {
+			return SemanticProviderBudgetReconciliation{}, err
+		}
+		if int64(len(events))+int64(len(page.GetEvents())) > maxEvents {
+			return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget event history exceeds the configured attempt bound")
+		}
+		events = append(events, page.GetEvents()...)
+		pageToken = page.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+	}
+	if statusValue.GetEarliestRetainedEventSequence() != earliest || statusValue.GetHighWaterEventSequence() != snapshot {
+		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget status/event snapshot mismatch")
+	}
+	usage := statusValue.GetUsage()
+	if usage.GetRequests() < 0 || usage.GetAttempts() < 0 || usage.GetRetryAttempts() < 0 || usage.GetBatchItems() < 0 || usage.GetActiveProviderCalls() < 0 || usage.GetInputTokens() < 0 || usage.GetProviderMillis() < 0 || usage.GetEstimatedCostMicros() < 0 || usage.GetAmbiguousAttempts() < 0 {
+		return SemanticProviderBudgetReconciliation{}, errors.New("semantic provider budget usage contains negative counters")
+	}
+	evidence := SemanticProviderBudgetReconciliation{
+		ScopeState: statusValue.GetState().String(), DenialReason: statusValue.GetDenialReason().String(),
+		Requests: usage.GetRequests(), Attempts: usage.GetAttempts(), RetryAttempts: usage.GetRetryAttempts(), AmbiguousAttempts: usage.GetAmbiguousAttempts(),
+		InputTokens: usage.GetInputTokens(), ProviderMillis: usage.GetProviderMillis(), EstimatedCostMicros: usage.GetEstimatedCostMicros(), AccountingOverflow: usage.GetAccountingOverflow(),
+		EarliestRetainedSequence: earliest, SnapshotHighWaterSequence: snapshot, HistoryComplete: true, RetainedScopeDiscovered: true,
+	}
+	type attemptVersions struct {
+		reserved, terminal int
+		requestID          string
+		retryIndex         int64
+		batchItems         int64
+		reservedEvent      *adminv1.SemanticProviderBudgetAttemptEvent
+		terminalEvent      *adminv1.SemanticProviderBudgetAttemptEvent
+	}
+	attempts := map[string]attemptVersions{}
+	requestRetries := map[string]map[int64]struct{}{}
+	lastSequence := uint64(0)
+	for _, event := range events {
+		if event.GetEventSequence() <= lastSequence || event.GetEventSequence() > snapshot || event.GetBudgetScopeId() != resources.ProviderBudgetScopeID || event.GetAttemptId() == "" || event.GetRequestId() == "" || event.GetRetryIndex() < 0 || event.GetRetryIndex() > limits.GetMaxRetriesPerRequest() || event.GetBatchItems() <= 0 || event.GetBatchItems() > limits.GetMaxBatchItems() || !semanticBudgetEventTimestampsValid(event) || event.GetReservedInputTokens() < 0 || event.GetChargedInputTokens() < 0 || event.GetReservedProviderMillis() < 0 || event.GetChargedProviderMillis() < 0 || event.GetReservedCostMicros() < 0 || event.GetChargedCostMicros() < 0 || event.GetReservedInputTokens() > limits.GetMaxInputTokensPerRequest() || event.GetReservedProviderMillis() > limits.GetRequestTimeout().AsDuration().Milliseconds() {
+			return evidence, errors.New("semantic provider budget event identity, sequence, or per-request bound is invalid")
+		}
+		if !knownSemanticBudgetAttemptState(event.GetState()) || !knownSemanticBudgetOutcome(event.GetOutcomeCategory()) {
+			return evidence, errors.New("semantic provider budget event identity, sequence, or per-request bound is invalid")
+		}
+		lastSequence = event.GetEventSequence()
+		version := attempts[event.GetAttemptId()]
+		switch event.GetState() {
+		case adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_RESERVED:
+			if event.GetAttemptVersion() != 1 || version.reserved != 0 || version.terminal != 0 {
+				return evidence, errors.New("semantic provider budget reservation event is not immutable version 1")
+			}
+			indexes := requestRetries[event.GetRequestId()]
+			if indexes == nil {
+				indexes = map[int64]struct{}{}
+				requestRetries[event.GetRequestId()] = indexes
+			}
+			if _, duplicate := indexes[event.GetRetryIndex()]; duplicate {
+				return evidence, errors.New("semantic provider budget request contains a duplicate retry index")
+			}
+			indexes[event.GetRetryIndex()] = struct{}{}
+			if event.GetOutcomeCategory() != adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_NONE || event.GetOutcomeKnown() || event.GetUsageKnown() || event.GetProviderDurationKnown() || event.GetChargedInputTokens() != event.GetReservedInputTokens() || event.GetChargedProviderMillis() != event.GetReservedProviderMillis() || event.GetChargedCostMicros() != event.GetReservedCostMicros() {
+				return evidence, errors.New("semantic provider budget reservation has terminal or non-conservative accounting fields")
+			}
+			version = attemptVersions{reserved: 1, requestID: event.GetRequestId(), retryIndex: event.GetRetryIndex(), batchItems: event.GetBatchItems(), reservedEvent: event}
+			evidence.ReservedEvents++
+			var batchOverflow bool
+			evidence.BatchItems, batchOverflow = checkedSemanticBudgetSum(evidence.BatchItems, event.GetBatchItems(), false)
+			if batchOverflow {
+				return evidence, errors.New("semantic provider budget batch accounting overflowed")
+			}
+		case adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_SUCCEEDED,
+			adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_FAILED,
+			adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_CANCELED,
+			adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_AMBIGUOUS:
+			if event.GetAttemptVersion() != 2 || version.reserved != 1 || version.terminal != 0 || event.GetRequestId() != version.requestID || event.GetRetryIndex() != version.retryIndex || event.GetBatchItems() != version.batchItems || !semanticBudgetTerminalOutcomeMatches(event) {
+				return evidence, errors.New("semantic provider budget terminal event is not paired with one reservation")
+			}
+			reserved := version.reservedEvent
+			if event.GetReservedInputTokens() != reserved.GetReservedInputTokens() || event.GetReservedProviderMillis() != reserved.GetReservedProviderMillis() || event.GetReservedCostMicros() != reserved.GetReservedCostMicros() || !event.GetReservedUntil().AsTime().Equal(reserved.GetReservedUntil().AsTime()) {
+				return evidence, errors.New("semantic provider budget terminal event changed its immutable reservation")
+			}
+			if !event.GetUsageKnown() && (event.GetChargedInputTokens() != event.GetReservedInputTokens() || event.GetChargedCostMicros() != event.GetReservedCostMicros()) {
+				return evidence, errors.New("semantic provider budget terminal event does not conservatively charge unknown usage")
+			}
+			if !event.GetProviderDurationKnown() && event.GetChargedProviderMillis() != event.GetReservedProviderMillis() {
+				return evidence, errors.New("semantic provider budget terminal event does not conservatively charge unknown duration")
+			}
+			if !semanticBudgetUnknownOutcomeIsConservative(event) {
+				return evidence, errors.New("semantic provider budget unknown outcome released a conservative reservation")
+			}
+			version.terminal++
+			version.terminalEvent = event
+			evidence.TerminalEvents++
+		default:
+			return evidence, errors.New("semantic provider budget event has an unspecified state")
+		}
+		attempts[event.GetAttemptId()] = version
+	}
+	derivedRetries := int64(0)
+	for _, indexes := range requestRetries {
+		if _, ok := indexes[0]; !ok || int64(len(indexes)-1) > limits.GetMaxRetriesPerRequest() {
+			return evidence, errors.New("semantic provider budget request retry sequence is invalid")
+		}
+		for index := int64(0); index < int64(len(indexes)); index++ {
+			if _, ok := indexes[index]; !ok {
+				return evidence, errors.New("semantic provider budget request retry sequence has a gap")
+			}
+		}
+		derivedRetries += int64(len(indexes) - 1)
+	}
+	requireTerminal := boolTarget(target, "requireTerminal", true)
+	if requireTerminal && evidence.TerminalEvents != evidence.ReservedEvents {
+		return evidence, fmt.Errorf("semantic provider budget has %d reservations but %d terminal events", evidence.ReservedEvents, evidence.TerminalEvents)
+	}
+	minimumAttempts := int64(intTarget(target, "minimumAttempts", 1))
+	if evidence.ReservedEvents < minimumAttempts {
+		return evidence, fmt.Errorf("semantic provider budget observed %d attempts, want at least %d", evidence.ReservedEvents, minimumAttempts)
+	}
+	evidence.CompletedAttempts = evidence.TerminalEvents
+	var derivedInput, derivedMillis, derivedCost, derivedActive, derivedAmbiguous int64
+	derivedOverflow := false
+	reservationExceeded := false
+	now := time.Now().UTC()
+	for _, version := range attempts {
+		selected := version.reservedEvent
+		if version.terminalEvent != nil {
+			selected = version.terminalEvent
+			reservationExceeded = reservationExceeded || selected.GetChargedInputTokens() > selected.GetReservedInputTokens() || selected.GetChargedProviderMillis() > selected.GetReservedProviderMillis() || selected.GetChargedCostMicros() > selected.GetReservedCostMicros() || selected.GetChargedCostSaturated()
+		}
+		if selected == nil {
+			return evidence, errors.New("semantic provider budget attempt lacks a reservation event")
+		}
+		derivedInput, derivedOverflow = checkedSemanticBudgetSum(derivedInput, selected.GetChargedInputTokens(), derivedOverflow)
+		derivedMillis, derivedOverflow = checkedSemanticBudgetSum(derivedMillis, selected.GetChargedProviderMillis(), derivedOverflow)
+		derivedCost, derivedOverflow = checkedSemanticBudgetSum(derivedCost, selected.GetChargedCostMicros(), derivedOverflow || selected.GetChargedCostSaturated())
+		if version.terminalEvent == nil {
+			derivedActive++
+			if selected.GetReservedUntil() != nil && !selected.GetReservedUntil().AsTime().After(now) {
+				derivedAmbiguous++
+			}
+		} else if !selected.GetOutcomeKnown() {
+			derivedActive++
+			derivedAmbiguous++
+		} else if selected.GetState() == adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_AMBIGUOUS {
+			derivedAmbiguous++
+		}
+	}
+	if evidence.ReservedEvents != usage.GetAttempts() || int64(len(requestRetries)) != usage.GetRequests() || derivedRetries != usage.GetRetryAttempts() || evidence.BatchItems != usage.GetBatchItems() || derivedInput != usage.GetInputTokens() || derivedMillis != usage.GetProviderMillis() || derivedCost != usage.GetEstimatedCostMicros() || derivedActive != usage.GetActiveProviderCalls() || derivedAmbiguous != usage.GetAmbiguousAttempts() || derivedOverflow != usage.GetAccountingOverflow() {
+		return evidence, errors.New("semantic provider budget aggregate usage does not reconcile with immutable events")
+	}
+	if reservationExceeded && (statusValue.GetState() != adminv1.SemanticProviderBudgetScopeState_SEMANTIC_PROVIDER_BUDGET_SCOPE_STATE_EXHAUSTED || statusValue.GetDenialReason() != adminv1.SemanticProviderBudgetDenialReason_SEMANTIC_PROVIDER_BUDGET_DENIAL_REASON_ACCOUNTING) {
+		return evidence, errors.New("semantic provider budget reservation overage did not exhaust the scope with accounting denial")
+	}
+	evidence.BatchItems = usage.GetBatchItems()
+	evidence.AttemptPairsValid = true
+	if limits.GetMaxBatchItems() <= 0 || limits.GetMaxBatchItems() > math.MaxInt64/maxAttempts {
+		return evidence, errors.New("semantic provider budget batch aggregate bound overflows")
+	}
+	maxBatchItems := limits.GetMaxBatchItems() * maxAttempts
+	evidence.UsageWithinLimits = usage.GetRequests() <= limits.GetMaxRequests() && usage.GetAttempts() <= maxAttempts && usage.GetRetryAttempts() <= limits.GetMaxRetryAttempts() && usage.GetBatchItems() <= maxBatchItems && usage.GetActiveProviderCalls() <= limits.GetMaxConcurrentProviderCalls() && usage.GetAmbiguousAttempts() <= usage.GetAttempts() && usage.GetInputTokens() <= limits.GetMaxInputTokens() && usage.GetProviderMillis() <= limits.GetTotalTimeout().AsDuration().Milliseconds() && usage.GetEstimatedCostMicros() <= limits.GetCost().GetMaxEstimatedCostMicros() && !usage.GetAccountingOverflow()
+	if !evidence.UsageWithinLimits {
+		return evidence, errors.New("semantic provider budget usage exceeded configured limits")
+	}
+	return evidence, nil
 }
 
 func mutateDuringSemanticRebuild(ctx context.Context, admin *mycel.AdminClient, resources *provision.ScenarioResources, semanticResources *provision.SemanticResources, target map[string]any) error {
@@ -569,7 +947,48 @@ func executeSemanticGraphMutation(ctx context.Context, resources *provision.Scen
 	return result, nil
 }
 
+type semanticBudgetAuthorizationSnapshot struct {
+	highWater uint64
+	usage     *adminv1.SemanticProviderBudgetUsage
+	state     adminv1.SemanticProviderBudgetScopeState
+	denial    adminv1.SemanticProviderBudgetDenialReason
+}
+
+func readSemanticBudgetAuthorizationSnapshot(ctx context.Context, client *mycel.AdminClient, resources *provision.SemanticResources) (semanticBudgetAuthorizationSnapshot, error) {
+	if resources == nil || strings.TrimSpace(resources.ProviderBudgetScopeID) == "" {
+		return semanticBudgetAuthorizationSnapshot{}, errors.New("semantic provider budget scope is unavailable for authorization proof")
+	}
+	callCtx, cancel := client.AuthCallContext(ctx)
+	response, err := client.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_BudgetScopeId{BudgetScopeId: resources.ProviderBudgetScopeID}})
+	cancel()
+	if err != nil {
+		return semanticBudgetAuthorizationSnapshot{}, err
+	}
+	value := response.GetStatus()
+	if err := provision.ValidateSemanticProviderBudgetStatusIdentity(value, resources); err != nil {
+		return semanticBudgetAuthorizationSnapshot{}, err
+	}
+	if value.GetUsage() == nil {
+		return semanticBudgetAuthorizationSnapshot{}, errors.New("semantic provider budget status is incomplete")
+	}
+	return semanticBudgetAuthorizationSnapshot{highWater: value.GetHighWaterEventSequence(), usage: proto.Clone(value.GetUsage()).(*adminv1.SemanticProviderBudgetUsage), state: value.GetState(), denial: value.GetDenialReason()}, nil
+}
+
 func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision.ScenarioResources, target map[string]any) (map[string]any, error) {
+	controllerClient, controllerAssignment, err := dialSemanticActor(ctx, resources)
+	if err != nil {
+		return nil, fmt.Errorf("resolve semantic controller for authorization proof: %w", err)
+	}
+	controllerClient.Close()
+	controller, err := mycel.DialAdmin(ctx, mycel.Config{Addr: controllerAssignment.DaemonAddr, AccessToken: controllerAssignment.AccessToken, RefreshToken: controllerAssignment.RefreshToken, ClientName: "mycel-lab-semantic-authorization-proof"})
+	if err != nil {
+		return nil, fmt.Errorf("dial semantic controller for authorization proof: %w", err)
+	}
+	defer controller.Close()
+	before, err := readSemanticBudgetAuthorizationSnapshot(ctx, controller, resources.Semantic)
+	if err != nil {
+		return nil, fmt.Errorf("capture semantic provider budget before unauthorized search: %w", err)
+	}
 	groupName := strings.TrimSpace(fmt.Sprint(target["actorGroup"]))
 	if groupName == "" || groupName == "<nil>" {
 		return nil, errors.New("semantic unauthorized search requires actorGroup")
@@ -596,7 +1015,14 @@ func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision
 	if code != codes.PermissionDenied && code != codes.NotFound {
 		return nil, fmt.Errorf("unauthorized semantic search returned %s, want PermissionDenied or NotFound", code)
 	}
-	return map[string]any{"actorGroup": groupName, "rejectedCode": code.String(), "targetSpaceId": resources.Semantic.SpaceID, "targetDomainId": resources.Semantic.DomainID}, nil
+	after, err := readSemanticBudgetAuthorizationSnapshot(ctx, controller, resources.Semantic)
+	if err != nil {
+		return nil, fmt.Errorf("capture semantic provider budget after unauthorized search: %w", err)
+	}
+	if before.highWater != after.highWater || before.state != after.state || before.denial != after.denial || !proto.Equal(before.usage, after.usage) {
+		return nil, errors.New("unauthorized semantic search changed provider budget evidence")
+	}
+	return map[string]any{"actorGroup": groupName, "rejectedCode": code.String(), "targetSpaceId": resources.Semantic.SpaceID, "targetDomainId": resources.Semantic.DomainID, "providerBudgetUnchanged": true}, nil
 }
 
 func executeSemanticSearchAssertion(ctx context.Context, resources *provision.ScenarioResources, target map[string]any) (SemanticSearchEvidence, error) {

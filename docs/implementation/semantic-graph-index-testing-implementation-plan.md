@@ -1,6 +1,6 @@
 # Provider-Neutral Semantic Graph Index Testing Implementation Plan
 
-Status: Proposed
+Status: SGT0–SGT8 accepted for supported capabilities; SGT9 direct OpenAI-compatible embedding implementation complete but live execution remains approval- and credential-gated; SGT10 pending.
 Tracking issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 Primary repository: `mycel-lab`
 Related repositories: `mycel-api`, `mycel-go-sdk`, `mycel`
@@ -348,7 +348,7 @@ The daemon intelligence profile/policy must enforce provider-facing limits:
 - elapsed provider time and absolute run deadline;
 - optional estimated cost against a versioned price definition.
 
-The current policy API exposes per-request token limits and `max_requests_per_run`, but it does not provide the atomic concurrency, aggregate usage, elapsed-time, retry-attempt, and cost reservations required by this plan. SGT1b is therefore a prerequisite for live profiles that declare those fields. Until then, profile validation accepts only limits demonstrably enforced by the selected daemon capability or an independently verified provider-account hard control.
+The SGT9 contract now provides daemon-owned immutable semantic budget scopes, authenticated enforcement discovery, pre-provider reservations, aggregate/per-request retry limits, concurrency/batch/input-token/time/versioned-cost limits, conservative ambiguous accounting, durable restart recovery, retained-scope discovery, and fixed-snapshot attempt events. Live profile resolution remains pending until the authenticated daemon advertises every required invariant; missing capability evidence fails before credential lookup.
 
 The harness reconciles safe daemon usage diagnostics with its reservation ledger. Protocol-emulator request counts provide an independent exact check. A live profile cannot claim a provider limit that neither the daemon nor a reviewed provider/account control enforces; such a profile fails preflight rather than treating harness RPC counts as provider counts.
 
@@ -370,7 +370,7 @@ Secret safety is defense in depth:
 
 A redaction scanner finding is a gating test failure. Its report contains file path, detector category, and byte range, but not the matched secret.
 
-## 5. Proposed package and artifact layout
+## 5. Package and artifact layout
 
 ```text
 internal/reliability/
@@ -548,11 +548,14 @@ uses the local emulator and finite provider/harness budgets; it never calls a
 live provider. Extreme 10,000-attempt and 64 MiB boundary arithmetic remains
 daemon unit/race coverage rather than routine environment load.
 
-SGT1b is accepted only when a separately approved run records the exact daemon
-image digest and harness revision, passes redaction, and receives independent
-evidence review. SGT9 remains blocked until then. This section supersedes the
-public client-managed scope/API sequencing above; the historical frozen SGT0
-contract remains unchanged.
+Procedure-inference SGT1b acceptance is complete for the supported emulator,
+recovery, and backup/restore capabilities. Semantic embedding budgets are a
+separate daemon-owned scope: the additive API, SDK bindings, daemon wiring, and
+Lab direct-embedding scenario are implemented candidates, but no SGT9 live run
+is accepted without separate approval, credentials, exact image provenance,
+redaction, and independent evidence review. This section supersedes the public
+client-managed scope/API sequencing above; the historical frozen SGT0 contract
+remains unchanged.
 
 ### SGT2: Deterministic daemon embedding prerequisite
 
@@ -853,14 +856,14 @@ Repositories: `mycel-lab`; connector/pipeline/provenance additions follow `mycel
 
 Risk: high; external cost and confidentiality
 
-Add example profiles and an operator command for manually initiated runs only after SGT1b hard-budget enforcement and each profile's required connector/pipeline capabilities exist. Initial live runs are non-gating.
+The direct OpenAI-compatible embedding tranche is implemented as `semantic-live-provider` / `compose-semantic-live-provider`. It performs authenticated capability discovery before credential lookup, provisions a daemon-owned budget, asserts a synthetic ranking invariant, and reconciles fixed-snapshot immutable attempt events. It is manually initiated and non-gating; no live execution has been performed or authorized. Later composition, routing, migration, and cross-provider checks remain capability-gated.
 
 Rules:
 
 - explicit live execution fails if credentials, model, route, budget, or network policy are missing;
 - live assertions use invariants: expected top-K membership, lifecycle transitions, isolation, source proof, freshness, and provenance;
 - exact vectors, exact scores, and stable total ordering are forbidden unless the provider offers an explicit deterministic guarantee and the profile opts in;
-- model/route identifiers and provider request IDs are retained only when classified safe;
+- approved configured model, endpoint, and capability route identifiers may be retained for provenance; provider-generated request and attempt identifiers are forbidden in SGT9 live artifacts;
 - prompts/projected data and response bodies are not retained by default;
 - synthetic corpora are required unless an operator explicitly selects an approved data classification;
 - budget limits are lower than provider account limits and are enforced by the daemon before each provider request, with the harness reserving worst-case fan-out before each triggering operation.

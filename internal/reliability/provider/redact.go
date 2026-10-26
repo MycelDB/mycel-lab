@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -19,7 +20,7 @@ const Redacted = "[REDACTED]"
 
 var sensitiveKeys = map[string]struct{}{
 	"password": {}, "newpassword": {}, "oldpassword": {},
-	"secret": {}, "secretvalue": {}, "clientsecret": {}, "credential": {}, "credentialvalue": {},
+	"secret": {}, "secretref": {}, "secretvalue": {}, "clientsecret": {}, "credential": {}, "credentialvalue": {},
 	"apikey": {}, "authorization": {}, "proxyauthorization": {}, "bearer": {},
 	"cookie": {}, "setcookie": {}, "accesstoken": {}, "refreshtoken": {},
 	"authtoken": {}, "tlscertificate": {}, "tlsprivatekey": {}, "privatekey": {},
@@ -31,6 +32,7 @@ type textDetector struct {
 }
 
 type Redactor struct {
+	mu        sync.RWMutex
 	secrets   []string
 	detectors []textDetector
 }
@@ -48,6 +50,28 @@ func NewRedactor(secrets []string) *Redactor {
 	}
 	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
 	return &Redactor{secrets: values, detectors: defaultTextDetectors()}
+}
+
+func (r *Redactor) AddSecrets(secrets ...string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	unique := make(map[string]struct{}, len(r.secrets)+len(secrets))
+	for _, secret := range r.secrets {
+		unique[secret] = struct{}{}
+	}
+	for _, secret := range secrets {
+		if secret != "" {
+			unique[secret] = struct{}{}
+		}
+	}
+	r.secrets = r.secrets[:0]
+	for secret := range unique {
+		r.secrets = append(r.secrets, secret)
+	}
+	sort.Slice(r.secrets, func(i, j int) bool { return len(r.secrets[i]) > len(r.secrets[j]) })
 }
 
 func defaultTextDetectors() []textDetector {
@@ -173,7 +197,10 @@ func (r *Redactor) sanitizeSlice(values []any, depth int, state *sanitizeState) 
 }
 
 func (r *Redactor) SanitizeText(text string) string {
-	for _, secret := range r.secrets {
+	r.mu.RLock()
+	secrets := append([]string(nil), r.secrets...)
+	r.mu.RUnlock()
+	for _, secret := range secrets {
 		text = strings.ReplaceAll(text, secret, Redacted)
 	}
 	for _, detector := range r.detectors {

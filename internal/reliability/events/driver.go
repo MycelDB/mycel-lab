@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
@@ -38,6 +39,77 @@ func NewDriverRuntimeWithScenario(driver env.EnvironmentDriver, environment env.
 
 func (r *DriverRuntime) SetEndpointRecovery(recovery env.EndpointRecovery) {
 	r.EndpointRecovery = recovery
+}
+
+func (r *DriverRuntime) liveSemanticProvider() bool {
+	return r.Scenario.ProviderProfile != nil && r.Scenario.ProviderProfile.Profile.Mode == "live" && r.Scenario.Semantic != nil
+}
+
+func (r *DriverRuntime) evidenceSafeEventTarget(event spec.EventSpec) map[string]any {
+	if !r.liveSemanticProvider() || !strings.HasPrefix(event.Type, "semantic-") {
+		return evidenceSafeEventTarget(event)
+	}
+	return evidenceSafeLiveSemanticEventTarget(event)
+}
+
+func evidenceSafeLiveSemanticEventTarget(event spec.EventSpec) map[string]any {
+	allowed := map[string]struct{}{}
+	switch event.Type {
+	case "semantic-backfill":
+		allowed = map[string]struct{}{"force": {}, "limit": {}, "expectedSelected": {}, "minimumGenerated": {}}
+	case "semantic-maintenance-await":
+		allowed = map[string]struct{}{"timeout": {}, "pollInterval": {}}
+	case "semantic-search-assert":
+		allowed = map[string]struct{}{"limit": {}, "minimumScore": {}, "expectedResultCount": {}, "requireProvenance": {}, "requireActualRoute": {}, "allPages": {}, "allowWarnings": {}}
+	case "semantic-reliability-assert":
+		allowed = map[string]struct{}{"expectRebuildRequired": {}, "maximumUnresolvedGapCount": {}, "requireFreshAtLatest": {}, "minimumSemanticGeneration": {}, "requireDeltaAfterPinned": {}}
+	case "semantic-provider-budget-reconcile":
+		allowed = map[string]struct{}{"minimumAttempts": {}, "requireTerminal": {}}
+	case "semantic-rule-enable":
+		allowed = map[string]struct{}{"enabled": {}}
+	}
+	out := map[string]any{"sensitiveSemanticInputsRedacted": true}
+	for key, value := range event.Target {
+		if _, ok := allowed[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func sanitizeLiveSemanticResult(eventType string, result any) any {
+	switch eventType {
+	case "semantic-maintenance-await":
+		if value, ok := result.(SemanticMaintenanceResult); ok {
+			return map[string]any{"iterations": len(value.Observations), "converged": value.Converged}
+		}
+		return map[string]any{"completed": result != nil}
+	case "semantic-reliability-assert":
+		return map[string]any{"asserted": result != nil, "sensitiveSemanticOutputsRedacted": true}
+	case "semantic-unauthorized-search":
+		return map[string]any{"rejected": result != nil, "sensitiveSemanticIdentifiersRedacted": true}
+	case "semantic-rebuild":
+		return map[string]any{"completed": result != nil, "sensitiveSemanticOutputsRedacted": true}
+	case "semantic-provider-budget-reconcile":
+		if value, ok := result.(SemanticProviderBudgetReconciliation); ok {
+			return map[string]any{"requests": value.Requests, "attempts": value.Attempts, "retryAttempts": value.RetryAttempts, "batchItems": value.BatchItems, "completedAttempts": value.CompletedAttempts, "ambiguousAttempts": value.AmbiguousAttempts, "reservedEvents": value.ReservedEvents, "terminalEvents": value.TerminalEvents, "historyComplete": value.HistoryComplete, "attemptPairsValid": value.AttemptPairsValid, "usageWithinLimits": value.UsageWithinLimits, "retainedScopeDiscovered": value.RetainedScopeDiscovered, "sensitiveSemanticIdentifiersRedacted": true}
+		}
+		return map[string]any{"reconciled": result != nil}
+	case "semantic-rule-enable", "semantic-rule-projection-update":
+		return map[string]any{"completed": result != nil}
+	}
+	switch value := result.(type) {
+	case SemanticGraphMutationResult:
+		return map[string]any{"action": value.Action, "committed": value.CommittedRevision > 0, "sensitiveSemanticInputsRedacted": true}
+	case SemanticSearchEvidence:
+		return map[string]any{"resultCount": len(value.Results), "warningCount": len(value.Warnings), "rejectedCode": value.RejectedCode, "rankingInvariantChecked": true, "sensitiveSemanticOutputsRedacted": true}
+	case SemanticBackfillResult:
+		return map[string]any{"selected": value.Selected, "generated": value.Generated, "skipped": value.Skipped, "failed": value.Failed}
+	}
+	if eventType == "semantic-rule-create" {
+		return map[string]any{"created": true}
+	}
+	return map[string]any{"completed": result != nil, "sensitiveSemanticOutputsRedacted": true}
 }
 
 func (r *DriverRuntime) CleanupSensitiveHostArtifacts() error {
@@ -74,7 +146,7 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 	defer release()
 	ctx = operationCtx
 	if recorder != nil {
-		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: map[string]any{"dryRun": dryRun, "runtime": r.Environment.Driver}}); err != nil {
+		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: r.evidenceSafeEventTarget(event), Payload: map[string]any{"dryRun": dryRun, "runtime": r.Environment.Driver}}); err != nil {
 			return err
 		}
 	}
@@ -109,7 +181,7 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 		}
 	}
 	if recorder != nil {
-		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: completionPayload})
+		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: r.evidenceSafeEventTarget(event), Payload: completionPayload})
 	}
 	return nil
 }
@@ -142,8 +214,11 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "commonfolio-automation-await-terminal":
 		result, err := executeCommonFolioAwaitTerminalEvent(ctx, r.Driver, r.Environment, r.Resources, event.Target)
 		return map[string]any{"commonfolioTerminalFixture": result}, err
-	case "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild":
+	case "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
 		result, err := executeSemanticEvent(ctx, r.Resources, event.Type, event.Target)
+		if r.liveSemanticProvider() {
+			result = sanitizeLiveSemanticResult(event.Type, result)
+		}
 		return map[string]any{"semantic": result}, err
 	case "cluster-recovery-wait":
 		result, err := executeClusterRecoveryWaitEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Target)
@@ -257,12 +332,23 @@ func nodeOrdinal(target map[string]any) int {
 }
 
 func (r *DriverRuntime) recordFailure(ctx context.Context, recorder Recorder, phase spec.PhaseSpec, event spec.EventSpec, eventPayload map[string]any, err error) error {
+	returnedError := err
+	payload := map[string]any{"error": err.Error(), "runtime": r.Environment.Driver}
+	if r.liveSemanticProvider() && strings.HasPrefix(event.Type, "semantic-") {
+		category := "operation_failed"
+		if errors.Is(err, context.Canceled) {
+			category = "canceled"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			category = "deadline_exceeded"
+		}
+		payload = map[string]any{"errorCategory": category, "runtime": r.Environment.Driver, "sensitiveSemanticFailureRedacted": true}
+		returnedError = fmt.Errorf("live semantic event %s failed (%s)", event.Type, category)
+	}
 	if recorder != nil {
-		payload := map[string]any{"error": err.Error(), "runtime": r.Environment.Driver}
 		for key, value := range eventPayload {
 			payload[key] = value
 		}
-		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: evidenceSafeEventTarget(event), Payload: payload})
+		_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: r.evidenceSafeEventTarget(event), Payload: payload})
 	}
-	return err
+	return returnedError
 }

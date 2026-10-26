@@ -8,6 +8,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added the manual SGT9 OpenAI-compatible live embedding suite with authenticated semantic-budget capability discovery before credential resolution, synthetic ranking invariants, immutable daemon-attempt reconciliation, explicit third-party endpoint policy, and live-artifact sanitization (#46).
 - Added issue #50 provider-neutral procedure-inference acceptance contracts: a credential-free generation emulator, authoritative attempt/run/change polling assertions, completed control-barrier checks, clustered restart recovery, and system backup/restore scenarios.
 - Added sanitized process-bound procedure-inference evidence validation and explicit separation between environment acceptance and daemon-only extreme capacity arithmetic.
 - Added the SGT6 deterministic k3d semantic recovery suite for follower/leader/sequential restart, pending work, persisted indexes, interrupted rebuild, stale-completion fencing, replica outage, and per-node convergence (#46).

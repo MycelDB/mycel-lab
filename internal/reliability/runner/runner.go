@@ -274,6 +274,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if requiresImmutableBuildProvenance(scenario) {
 		environment.Metadata["requireImageProvenance"] = strconv.FormatBool(!opts.DryRun)
 	}
+	if liveSemanticScenario(scenario) {
+		environment.Metadata["liveSemanticProvider"] = "true"
+	}
 	cleanupEnvironment := true
 	var resources provision.ScenarioResources
 	resourcesPlanned := false
@@ -300,6 +303,11 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		if retentionRequested {
 			cleanupEnvironment = false
 			evidence["retained"] = true
+			if resourcesPlanned {
+				if _, err := sink.WriteJSON("environment/scenario-resources.json", resources); err != nil {
+					return err
+				}
+			}
 			_, writeErr := sink.WriteJSON("environment/post-run-cleanup.json", evidence)
 			return writeErr
 		}
@@ -447,13 +455,21 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
-	provisionErr := provision.ProvisionScenario(provisionCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun})
+	provisionErr := provision.ProvisionScenario(provisionCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun, ProviderSecretObserver: func(secret string) { redactor.AddSecrets(secret) }, PersistResources: func(snapshot provision.ScenarioResources) error {
+		_, err := sink.WriteJSON("environment/scenario-resources.json", snapshot)
+		return err
+	}})
 	provisionErr = errors.Join(provisionErr, releaseProvision())
 	if provisionErr != nil {
 		return failAfterEnvironmentCreate(RunFailed, provisionErr)
 	}
 	if _, err := sink.WriteJSON("environment/scenario-resources.json", resources); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
+	}
+	if scenario.ProviderProfile != nil {
+		if _, err := sink.WriteJSON("provider/provider-profile-resolved.json", scenario.ProviderProfile); err != nil {
+			return failAfterEnvironmentCreate(RunFailed, err)
+		}
 	}
 	if _, err := sink.WriteJSON("actors/assignments.json", resources.Assignments); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
@@ -708,7 +724,7 @@ func writeConsoleEndpoints(w io.Writer, endpoints []env.ConsoleEndpoint) {
 
 func defaultEventRuntime(opts Options, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, resources *provision.ScenarioResources) events.Runtime {
 	if opts.DryRun {
-		return events.LocalRuntime{}
+		return events.LocalRuntime{LiveSemanticProvider: scenario.ProviderProfile != nil && scenario.ProviderProfile.Profile.Mode == provider.ModeLive && scenario.Semantic != nil}
 	}
 	return events.NewDriverRuntimeWithScenario(driver, environment, scenario, resources)
 }
@@ -732,7 +748,7 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 		if !filepath.IsAbs(scenarioPath) {
 			scenarioPath = filepath.Join(baseDir, scenarioPath)
 		}
-		resolved, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProfileDirs: opts.ProfileDirs, ProviderProfileOverride: opts.ProviderProfileOverride, ProviderDryRun: opts.DryRun, ProviderManifest: opts.ProviderManifest})
+		resolved, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProfileDirs: opts.ProfileDirs, ProviderProfileOverride: opts.ProviderProfileOverride, ProviderDryRun: opts.DryRun, DeferLiveProviderValidation: true, ProviderManifest: opts.ProviderManifest})
 		if err != nil {
 			return out, err
 		}
@@ -752,6 +768,10 @@ func evidenceSafeResolvedScenario(scenario spec.ResolvedScenario) spec.ResolvedS
 		copy.Phases[phaseIndex].Events = append([]spec.EventSpec(nil), scenario.Phases[phaseIndex].Events...)
 		for eventIndex := range copy.Phases[phaseIndex].Events {
 			event := &copy.Phases[phaseIndex].Events[eventIndex]
+			if scenario.ProviderProfile != nil && scenario.ProviderProfile.Profile.Mode == provider.ModeLive && scenario.Semantic != nil && strings.HasPrefix(event.Type, "semantic-") {
+				event.Target = liveSemanticEvidenceTarget(event.Type, event.Target)
+				continue
+			}
 			if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
 				continue
 			}
@@ -767,6 +787,31 @@ func evidenceSafeResolvedScenario(scenario spec.ResolvedScenario) spec.ResolvedS
 		}
 	}
 	return copy
+}
+
+func liveSemanticEvidenceTarget(eventType string, target map[string]any) map[string]any {
+	allowed := map[string]struct{}{}
+	switch eventType {
+	case "semantic-backfill":
+		allowed = map[string]struct{}{"force": {}, "limit": {}, "expectedSelected": {}, "minimumGenerated": {}}
+	case "semantic-maintenance-await":
+		allowed = map[string]struct{}{"timeout": {}, "pollInterval": {}}
+	case "semantic-search-assert":
+		allowed = map[string]struct{}{"limit": {}, "minimumScore": {}, "expectedResultCount": {}, "requireProvenance": {}, "requireActualRoute": {}, "allPages": {}, "allowWarnings": {}}
+	case "semantic-reliability-assert":
+		allowed = map[string]struct{}{"expectRebuildRequired": {}, "maximumUnresolvedGapCount": {}, "requireFreshAtLatest": {}, "minimumSemanticGeneration": {}, "requireDeltaAfterPinned": {}}
+	case "semantic-provider-budget-reconcile":
+		allowed = map[string]struct{}{"minimumAttempts": {}, "requireTerminal": {}}
+	case "semantic-rule-enable":
+		allowed = map[string]struct{}{"enabled": {}}
+	}
+	out := map[string]any{"sensitiveSemanticInputsRedacted": true}
+	for key, value := range target {
+		if _, ok := allowed[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario, buildIdentity harnessBuildIdentity) error {
@@ -815,8 +860,12 @@ func currentHarnessBuildIdentity() harnessBuildIdentity {
 	return identity
 }
 
+func liveSemanticScenario(scenario spec.ResolvedScenario) bool {
+	return scenario.Semantic != nil && scenario.ProviderProfile != nil && scenario.ProviderProfile.Profile.Mode == provider.ModeLive
+}
+
 func requiresImmutableBuildProvenance(scenario spec.ResolvedScenario) bool {
-	return scenario.ProcedureInference != nil
+	return scenario.ProcedureInference != nil || liveSemanticScenario(scenario)
 }
 
 func validHarnessBuildIdentity(identity harnessBuildIdentity) bool {

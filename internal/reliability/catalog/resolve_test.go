@@ -4,10 +4,24 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
+
+func TestResolveScenarioFileRejectsDeferredLiveGenerationBeforeCredentialLookup(t *testing.T) {
+	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-procedure-inference-control-emulator", "compose-procedure-inference-control-emulator.yaml")
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "openai-compatible-live.yaml")
+	lookups := 0
+	_, err := ResolveScenarioFile(scenarioPath, ResolveOptions{ProviderProfileOverride: profilePath, DeferLiveProviderValidation: true, ProviderLookupEnv: func(string) (string, bool) { lookups++; return "", false }})
+	if err == nil || !strings.Contains(err.Error(), "deferred live validation is supported only for semantic embedding scenarios") {
+		t.Fatalf("ResolveScenarioFile() error=%v", err)
+	}
+	if lookups != 0 {
+		t.Fatalf("credential lookups=%d, want zero", lookups)
+	}
+}
 
 func TestResolveScenarioFileByName(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml")

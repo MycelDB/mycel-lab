@@ -1198,3 +1198,10 @@ func (d *recordingDriver) ProviderEmulatorObservations(context.Context, env.Envi
 	d.providerObservationCalls++
 	return env.ExecResult{Stdout: d.providerObservations}, d.providerObservationErr
 }
+
+func TestLiveSemanticScenarioRequiresImmutableBuildProvenance(t *testing.T) {
+	scenario := spec.ResolvedScenario{Semantic: &spec.SemanticScenarioSpec{}, ProviderProfile: &provider.ResolvedProfile{Profile: provider.Profile{Mode: provider.ModeLive}}}
+	if !liveSemanticScenario(scenario) || !requiresImmutableBuildProvenance(scenario) {
+		t.Fatal("live semantic scenario did not require immutable build provenance")
+	}
+}

@@ -12,9 +12,49 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestValidateSemanticProviderBudgetStatusIdentityRejectsEveryMismatch(t *testing.T) {
+	resources := &SemanticResources{SpaceID: "space-a", SemanticRuleID: "rule-a", EmbeddingBindingKey: "search", ProviderBudgetScopeID: "scope-a", ExpectedProviderBudget: &adminv1.SemanticProviderBudgetPolicy{CorrelationId: "run-a"}}
+	valid := adminv1.SemanticProviderBudgetStatus{SpaceId: "space-a", SemanticRuleId: "rule-a", EmbeddingBindingKey: "search", BudgetScopeId: "scope-a", CorrelationId: "run-a"}
+	if err := ValidateSemanticProviderBudgetStatusIdentity(&valid, resources); err != nil {
+		t.Fatalf("valid identity rejected: %v", err)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*adminv1.SemanticProviderBudgetStatus)
+	}{
+		{"space", func(v *adminv1.SemanticProviderBudgetStatus) { v.SpaceId = "wrong" }},
+		{"rule", func(v *adminv1.SemanticProviderBudgetStatus) { v.SemanticRuleId = "wrong" }},
+		{"binding", func(v *adminv1.SemanticProviderBudgetStatus) { v.EmbeddingBindingKey = "wrong" }},
+		{"scope", func(v *adminv1.SemanticProviderBudgetStatus) { v.BudgetScopeId = "wrong" }},
+		{"correlation", func(v *adminv1.SemanticProviderBudgetStatus) { v.CorrelationId = "wrong" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := valid
+			tc.mutate(&candidate)
+			if err := ValidateSemanticProviderBudgetStatusIdentity(&candidate, resources); err == nil {
+				t.Fatal("identity mismatch was accepted")
+			}
+		})
+	}
+}
+
+func TestSemanticOperationPlanRecordsCapabilityDiscoveryFirst(t *testing.T) {
+	plan := semanticOperationPlan()
+	if len(plan) == 0 || plan[0].action != "discover" || plan[0].resource != "provider-budget-capability" {
+		t.Fatalf("semantic operation plan=%+v", plan)
+	}
+	for index, operation := range plan[1:] {
+		if operation.resource == "provider-budget-capability" {
+			t.Fatalf("capability discovery repeated after provisioning at index %d", index+1)
+		}
+	}
+}
 
 func TestPlanScenarioCreatesWriterResourcesAndReaderAssignments(t *testing.T) {
 	scenario, err := catalog.ResolveScenarioFile(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml"), catalog.ResolveOptions{})
@@ -89,6 +129,54 @@ func TestPlanScenarioQualifiesWriterResourcesByActorGroup(t *testing.T) {
 		if !strings.Contains(resources.Spaces[i].Name, group) || !strings.Contains(resources.Domains[i].Key, group) {
 			t.Fatalf("resource scope does not include actor group %q: space=%q domain=%q", group, resources.Spaces[i].Name, resources.Domains[i].Key)
 		}
+	}
+}
+
+func TestLiveSemanticScenarioPlansOutsiderAgainstControllerSpace(t *testing.T) {
+	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-semantic-live-provider", "compose-semantic-live-provider.yaml")
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "openai-compatible-live.yaml")
+	manifest := provider.BuiltInHarnessManifest()
+	for _, capability := range []provider.EnforcementCapability{provider.EnforceProviderRequests, provider.EnforceProviderConcurrency, provider.EnforceProviderRetries, provider.EnforceProviderRequestTimeout, provider.EnforceProviderTotalTimeout, provider.EnforceProviderInputTokens, provider.EnforceProviderEstimatedCost, provider.EnforceProviderBatchItems} {
+		manifest = manifest.With(capability, "daemon")
+	}
+	scenario, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProviderProfileOverride: profilePath, ProviderDryRun: true, ProviderManifest: manifest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := PlanScenario(scenario, Options{RunID: "semantic-live-plan", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignments := AssignmentMap(resources)
+	controller := assignments["semantic-controller-0"]
+	outsider := assignments["semantic-outsider-0"]
+	if outsider.BehaviorType != "gql-read" || outsider.TargetActorID != controller.ActorID || outsider.TargetGroup != "semantic-controller" {
+		t.Fatalf("outsider does not target controller space: outsider=%+v controller=%+v", outsider, controller)
+	}
+}
+
+func TestComposeSemanticLiveProviderOperationTimeoutExceedsMaintenance(t *testing.T) {
+	scenarioPath := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-semantic-live-provider", "compose-semantic-live-provider.yaml")
+	profilePath := filepath.Join("..", "..", "..", "tests", "reliability", "provider-profiles", "openai-compatible-live.yaml")
+	manifest := provider.BuiltInHarnessManifest()
+	for _, capability := range []provider.EnforcementCapability{provider.EnforceProviderRequests, provider.EnforceProviderConcurrency, provider.EnforceProviderRetries, provider.EnforceProviderRequestTimeout, provider.EnforceProviderTotalTimeout, provider.EnforceProviderInputTokens, provider.EnforceProviderEstimatedCost, provider.EnforceProviderBatchItems} {
+		manifest = manifest.With(capability, "daemon")
+	}
+	scenario, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{
+		ProviderProfileOverride: profilePath,
+		ProviderDryRun:          true,
+		ProviderManifest:        manifest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scenario.Semantic == nil || scenario.ProviderProfile == nil {
+		t.Fatal("semantic scenario or provider profile was not resolved")
+	}
+	maintenanceTimeout := scenario.Semantic.Maintenance.Timeout.Duration
+	requestTimeout := scenario.ProviderProfile.Profile.Budgets.RequestTimeout.Duration
+	if requestTimeout <= maintenanceTimeout {
+		t.Fatalf("harness operation timeout=%s must exceed maintenance timeout=%s", requestTimeout, maintenanceTimeout)
 	}
 }
 
@@ -602,6 +690,17 @@ func TestProcedureInferenceTargetPrincipalID(t *testing.T) {
 	}
 }
 
+func TestRefreshSemanticTargetAssignmentPropagatesProvisionedPrincipal(t *testing.T) {
+	resources := &ScenarioResources{
+		Assignments: []ActorAssignment{{ActorID: "semantic-controller-0", SpaceID: "space-a", DomainID: "domain-a", PrincipalID: "principal-a"}},
+		Semantic:    &SemanticResources{TargetActorID: "semantic-controller-0"},
+	}
+	refreshSemanticTargetAssignment(resources)
+	if resources.Semantic.SpaceID != "space-a" || resources.Semantic.DomainID != "domain-a" || resources.Semantic.TargetPrincipalID != "principal-a" {
+		t.Fatalf("semantic target assignment was not refreshed: %+v", resources.Semantic)
+	}
+}
+
 func TestPlanScenarioCreatesDeterministicSafeSemanticPlan(t *testing.T) {
 	scenario, err := catalog.ResolveScenarioFile(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "raft-3-node-short-outage.yaml"), catalog.ResolveOptions{})
 	if err != nil {
@@ -634,7 +733,7 @@ func TestPlanScenarioCreatesDeterministicSafeSemanticPlan(t *testing.T) {
 	if first.Semantic == nil || !reflect.DeepEqual(first.Semantic, second.Semantic) {
 		t.Fatalf("semantic plans are not deterministic: first=%#v second=%#v", first.Semantic, second.Semantic)
 	}
-	wantOperations := []string{"inference-package", "intelligence-profile", "credential", "credential-grant", "access-policy", "semantic-rule"}
+	wantOperations := []string{"provider-budget-capability", "inference-package", "intelligence-profile", "credential", "credential-grant", "access-policy", "semantic-rule"}
 	for index, want := range wantOperations {
 		if got := first.Semantic.Operations[index]; got.Sequence != index+1 || got.Resource != want || got.Status != "planned" {
 			t.Fatalf("operation[%d]=%#v want resource %q", index, got, want)

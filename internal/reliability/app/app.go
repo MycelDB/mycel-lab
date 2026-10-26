@@ -383,10 +383,11 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 
 func resolveOptionsFromRun(args []string, opts runner.Options) catalog.ResolveOptions {
 	return catalog.ResolveOptions{
-		ProfileDirs:             flagValues(args, "--profile-dir"),
-		ProviderProfileOverride: opts.ProviderProfileOverride,
-		ProviderDryRun:          opts.DryRun,
-		ProviderManifest:        opts.ProviderManifest,
+		ProfileDirs:                 flagValues(args, "--profile-dir"),
+		ProviderProfileOverride:     opts.ProviderProfileOverride,
+		ProviderDryRun:              opts.DryRun,
+		DeferLiveProviderValidation: true,
+		ProviderManifest:            opts.ProviderManifest,
 	}
 }
 

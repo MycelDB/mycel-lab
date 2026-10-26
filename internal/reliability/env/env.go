@@ -1678,6 +1678,9 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 	requireClosedEvidence := environment.Metadata["requireImageProvenance"] == "true"
 	diagnosticCaptureFailed := false
 	for _, service := range services {
+		if environment.Metadata["liveSemanticProvider"] == "true" {
+			continue
+		}
 		if !requireClosedEvidence {
 			result, err := d.compose(ctx, environment, "logs", "--no-color", "--tail=5000", service)
 			if _, writeErr := sink.WriteText(filepath.Join("environment", "logs", service+".log"), formatCommandResult(result, err)); writeErr != nil {

@@ -2,13 +2,15 @@ apiVersion: reliability.mycel.io/v1alpha1
 kind: ProviderProfile
 metadata:
   name: openai-compatible-live
-  description: SGT1 live-profile contract fixture; intentionally preflight-blocked until trusted SGT1b daemon enforcement discovery is available.
+  description: SGT9 OpenAI embeddings profile; live use requires authenticated daemon enforcement discovery before credential resolution.
 mode: live
 capabilities:
   embedding:
     connectorType: openai-compatible
     endpointKey: openai-compatible-live
     baseURL: https://api.openai.com/v1
+    networkClass: public
+    privacyClass: third_party
     modelKey: live/text-embedding
     providerModelName: text-embedding-3-small
     dimensions: 1536
@@ -16,8 +18,8 @@ capabilities:
     secretRef:
       env: OPENAI_API_KEY
     batching:
-      mode: batch
-      maxItems: 16
+      mode: single
+      maxItems: 1
 budgets:
   enforcement: required
   maxOperations: 128
@@ -25,10 +27,14 @@ budgets:
   maxConcurrentOperations: 4
   maxConcurrentRequests: 2
   maxRetriesPerRequest: 1
+  maxInputTokensPerRequest: 8192
   maxInputTokens: 20000
-  maxOutputTokens: 1
-  maxEstimatedCostUSD: 1.00
-  requestTimeout: 15s
+  cost:
+    currency: USD
+    priceDefinitionVersion: openai-text-embedding-3-small-2026-08
+    inputMicrosPerMillionTokens: 20000
+    maxEstimatedCostMicros: 1000000
+  requestTimeout: 90s
   totalTimeout: 5m
 artifacts:
   captureBodies: false

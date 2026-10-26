@@ -1,0 +1,175 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-semantic-live-provider
+  description: SGT9 direct OpenAI-compatible embedding acceptance with daemon-owned budgets and invariant-based ranking.
+seed: 9009
+providerProfileRef: openai-compatible-live
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+    projectNamePrefix: mycel-lab-semantic-live
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: semantic-controller
+    profileRef: semantic-controller
+    count: 1
+    rate:
+      mode: per-actor
+      commitsPerSecond: 1
+  - name: semantic-outsider
+    profileRef: gql-reader
+    count: 1
+    target:
+      actorGroups:
+        - semantic-controller
+    rate:
+      mode: per-actor
+      queriesPerSecond: 1
+semantic:
+  targetActorGroup: semantic-controller
+  rule:
+    deferProvisioning: true
+    key: sgt9-live-document-search
+    displayName: SGT9 live document search
+    description: Run-scoped direct provider embedding rule.
+    targetLabels: [Document]
+    bindingKey: search
+    purpose: semantic_search
+    sourceMode: self
+    includeProperties: [text]
+    minimumTextLength: 1
+    physicalIndex: exact
+    dirtyCooldown: 1ms
+    maxBatchSize: 1
+    workerConcurrency: 1
+  maintenance:
+    timeout: 60s
+    pollInterval: 250ms
+    analyzeLimit: 16
+    processLimit: 16
+phases:
+  - name: seed-synthetic-corpus
+    duration: 1ms
+    events:
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000009001
+          labels: [Document]
+          text: Veterinary guidance for caring for a sick cat, including hydration and contacting a veterinarian.
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000009002
+          labels: [Document]
+          text: An introduction to quantum field theory and particle interactions in high energy physics.
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000009003
+          labels: [Document]
+          text: A recipe for fresh pasta with tomatoes, basil, olive oil, and parmesan cheese.
+  - name: embed-and-converge
+    duration: 1ms
+    events:
+      - type: semantic-rule-create
+        target:
+          semantic: deferred
+      - type: semantic-backfill
+        target:
+          force: true
+          limit: 8
+          expectedSelected: 3
+          minimumGenerated: 3
+      - type: semantic-maintenance-await
+        target:
+          timeout: 60s
+          pollInterval: 250ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 1
+  - name: assert-ranking-invariant
+    duration: 1ms
+    events:
+      - type: semantic-search-assert
+        target:
+          query: What should I do when my cat is ill and needs care?
+          limit: 1
+          expectedResultCount: 1
+          requireProvenance: true
+          requireActualRoute: false
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000009001
+      - type: semantic-unauthorized-search
+        target:
+          actorGroup: semantic-outsider
+  - name: update-delete-lifecycle
+    duration: 1ms
+    events:
+      - type: semantic-node-update
+        target:
+          nodeId: 00000000-0000-4000-8000-000000009001
+          text: Updated veterinary instructions for an ill cat emphasize hydration, urgent warning signs, and prompt veterinarian contact.
+          captureRevisionAs: live-provider-update-revision
+      - type: semantic-maintenance-await
+        target:
+          timeout: 60s
+          pollInterval: 250ms
+      - type: semantic-reliability-assert
+        target:
+          expectRebuildRequired: false
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+      - type: semantic-search-assert
+        target:
+          query: How should I care for a sick cat while arranging veterinary help?
+          limit: 1
+          expectedResultCount: 1
+          requireProvenance: true
+          expectSourceRevisionFrom: live-provider-update-revision
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000009001
+      - type: semantic-node-delete
+        target:
+          nodeId: 00000000-0000-4000-8000-000000009001
+      - type: semantic-maintenance-await
+        target:
+          timeout: 60s
+          pollInterval: 250ms
+      - type: semantic-search-assert
+        target:
+          query: How should I care for a sick cat while arranging veterinary help?
+          limit: 3
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000009001
+      - type: semantic-provider-budget-reconcile
+        target:
+          minimumAttempts: 7
+          requireTerminal: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 60s
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
