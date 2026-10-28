@@ -971,6 +971,9 @@ type semanticBudgetAuthorizationSnapshot struct {
 // retain enough evidence to distinguish authorization from authentication and
 // to account for provider effects.
 type SemanticAuthorizationProbeResult struct {
+	Stage                   string
+	ActorAuthenticated      bool
+	SearchAttempted         bool
 	Rejected                bool
 	RejectedCode            string
 	ProviderBudgetObserved  bool
@@ -985,9 +988,10 @@ type SemanticAuthorizationProbeResult struct {
 	AmbiguousAttempts       int64
 }
 
-func semanticAuthorizationProbeResult(code codes.Code, before, after semanticBudgetAuthorizationSnapshot, observed bool) SemanticAuthorizationProbeResult {
+func semanticAuthorizationProbeResult(code codes.Code, before, after semanticBudgetAuthorizationSnapshot, observed, searchAttempted bool) SemanticAuthorizationProbeResult {
 	result := SemanticAuthorizationProbeResult{
-		Rejected:                code == codes.PermissionDenied || code == codes.NotFound,
+		SearchAttempted:         searchAttempted,
+		Rejected:                searchAttempted && (code == codes.PermissionDenied || code == codes.NotFound),
 		RejectedCode:            code.String(),
 		ProviderBudgetObserved:  observed,
 		ProviderBudgetUnchanged: observed && before.highWater == after.highWater && before.state == after.state && before.denial == after.denial && proto.Equal(before.usage, after.usage),
@@ -1026,24 +1030,50 @@ func readSemanticBudgetAuthorizationSnapshot(ctx context.Context, client *mycel.
 	return semanticBudgetAuthorizationSnapshot{highWater: value.GetHighWaterEventSequence(), usage: proto.Clone(value.GetUsage()).(*adminv1.SemanticProviderBudgetUsage), state: value.GetState(), denial: value.GetDenialReason()}, nil
 }
 
+func retainSemanticAuthorizationFailureEvidence(ctx context.Context, controller *mycel.AdminClient, controllerAddr string, resources *provision.ScenarioResources, before semanticBudgetAuthorizationSnapshot, observeBudget bool, stage string, actorAuthenticated bool, cause error) (SemanticAuthorizationProbeResult, error) {
+	result := semanticAuthorizationProbeResult(status.Code(cause), before, semanticBudgetAuthorizationSnapshot{}, false, false)
+	result.Stage = stage
+	result.ActorAuthenticated = actorAuthenticated
+	if !observeBudget {
+		return result, fmt.Errorf("%s: %w", stage, cause)
+	}
+	after, snapshotErr := readSemanticBudgetAuthorizationSnapshot(ctx, controller, controllerAddr, resources)
+	result = semanticAuthorizationProbeResult(status.Code(cause), before, after, snapshotErr == nil, false)
+	result.Stage = stage
+	result.ActorAuthenticated = actorAuthenticated
+	if snapshotErr != nil {
+		result.Stage = stage + "-budget-after-unavailable"
+	}
+	return result, fmt.Errorf("%s: %w", stage, cause)
+}
+
 func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision.ScenarioResources, target map[string]any) (SemanticAuthorizationProbeResult, error) {
+	result := SemanticAuthorizationProbeResult{Stage: "controller-resolution"}
 	controllerClient, controllerAssignment, err := dialSemanticActor(ctx, resources)
 	if err != nil {
-		return SemanticAuthorizationProbeResult{}, fmt.Errorf("resolve semantic controller for authorization proof: %w", err)
+		return result, fmt.Errorf("resolve semantic controller for authorization proof: %w", err)
 	}
 	controllerClient.Close()
-	controller, err := mycel.DialAdmin(ctx, mycel.Config{Addr: controllerAssignment.DaemonAddr, AccessToken: controllerAssignment.AccessToken, RefreshToken: controllerAssignment.RefreshToken, ClientName: "mycel-lab-semantic-authorization-proof"})
+	result.Stage = "controller-client"
+	controller, err := mycel.DialAdmin(ctx, mycel.Config{Addr: controllerAssignment.DaemonAddr, AccessToken: controllerAssignment.AccessToken, ClientName: "mycel-lab-semantic-authorization-proof"})
 	if err != nil {
-		return SemanticAuthorizationProbeResult{}, fmt.Errorf("dial semantic controller for authorization proof: %w", err)
+		return result, fmt.Errorf("dial semantic controller for authorization proof: %w", err)
 	}
 	defer controller.Close()
-	before, err := readSemanticBudgetAuthorizationSnapshot(ctx, controller, controllerAssignment.DaemonAddr, resources)
-	if err != nil {
-		return SemanticAuthorizationProbeResult{}, fmt.Errorf("capture semantic provider budget before unauthorized search: %w", err)
+	budgetConfigured := resources.Semantic != nil && strings.TrimSpace(resources.Semantic.ProviderBudgetScopeID) != ""
+	observeBudget := budgetConfigured || boolTarget(target, "requireProviderBudgetEvidence", false)
+	var before semanticBudgetAuthorizationSnapshot
+	if observeBudget {
+		result.Stage = "budget-before"
+		before, err = readSemanticBudgetAuthorizationSnapshot(ctx, controller, controllerAssignment.DaemonAddr, resources)
+		if err != nil {
+			return result, fmt.Errorf("capture semantic provider budget before unauthorized search: %w", err)
+		}
 	}
+	result.Stage = "negative-actor-assignment"
 	groupName := strings.TrimSpace(fmt.Sprint(target["actorGroup"]))
 	if groupName == "" || groupName == "<nil>" {
-		return SemanticAuthorizationProbeResult{}, errors.New("semantic unauthorized search requires actorGroup")
+		return result, errors.New("semantic unauthorized search requires actorGroup")
 	}
 	var outsider provision.ActorAssignment
 	for _, assignment := range resources.Assignments {
@@ -1052,30 +1082,52 @@ func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision
 			break
 		}
 	}
-	if outsider.ActorID == "" || strings.TrimSpace(outsider.Username) == "" || outsider.Password == "" || strings.TrimSpace(outsider.DaemonAddr) == "" {
-		return SemanticAuthorizationProbeResult{}, fmt.Errorf("semantic unauthorized actor group %q has no direct-login assignment", groupName)
+	if outsider.ActorID == "" || strings.TrimSpace(outsider.PrincipalID) == "" || strings.TrimSpace(outsider.Username) == "" || strings.TrimSpace(outsider.AccessToken) == "" || strings.TrimSpace(outsider.DaemonAddr) == "" {
+		return result, fmt.Errorf("semantic unauthorized actor group %q has no node-local session assignment", groupName)
 	}
 
-	// Do not reuse a cached actor token for this proof. Clustered daemons may use
-	// node-local signing keys, so authenticate the outsider directly against the
-	// exact daemon that will receive the negative-control request.
-	client, err := mycel.Dial(ctx, mycel.Config{Addr: outsider.DaemonAddr, Username: outsider.Username, Password: outsider.Password, ClientName: "mycel-lab-semantic-negative"})
+	// Provisioning creates this session through an admin client authenticated to
+	// outsider.DaemonAddr. Reuse that node-local session instead of performing a
+	// second password login, which would add an unrelated Raft session mutation
+	// to an otherwise read-only authorization negative control.
+	result.Stage = "negative-actor-client"
+	client, err := mycel.Dial(ctx, mycel.Config{Addr: outsider.DaemonAddr, AccessToken: outsider.AccessToken, ClientName: "mycel-lab-semantic-negative"})
 	if err != nil {
-		return SemanticAuthorizationProbeResult{}, fmt.Errorf("directly authenticate semantic unauthorized actor: %w", err)
+		return retainSemanticAuthorizationFailureEvidence(ctx, controller, controllerAssignment.DaemonAddr, resources, before, observeBudget, result.Stage, false, err)
 	}
 	defer client.Close()
+	result.Stage = "negative-actor-authentication"
+	identity, err := client.WhoAmI(ctx)
+	if err != nil {
+		return retainSemanticAuthorizationFailureEvidence(ctx, controller, controllerAssignment.DaemonAddr, resources, before, observeBudget, result.Stage, false, err)
+	}
+	if identity.PrincipalID != outsider.PrincipalID || identity.Username != outsider.Username {
+		return retainSemanticAuthorizationFailureEvidence(ctx, controller, controllerAssignment.DaemonAddr, resources, before, observeBudget, result.Stage, false, status.Error(codes.FailedPrecondition, "semantic unauthorized actor identity does not match its assignment"))
+	}
+	result.ActorAuthenticated = true
+	result.Stage = "semantic-search"
 	callCtx, cancel := client.AuthCallContext(ctx)
 	_, searchErr := client.Semantic.SemanticSearch(callCtx, &clientv1.SemanticSearchRequest{SpaceId: resources.Semantic.SpaceID, DomainId: resources.Semantic.DomainID, SemanticRuleId: proto.String(resources.Semantic.SemanticRuleID), EmbeddingBindingKey: proto.String(resources.Semantic.EmbeddingBindingKey), Query: "axis-0", Limit: 1})
 	cancel()
 	code := status.Code(searchErr)
 
-	// Always perform the read-only after snapshot, even for an unexpected code,
-	// so a failed live negative control still proves whether provider accounting
-	// changed and retains bounded aggregate usage without provider content.
-	after, snapshotErr := readSemanticBudgetAuthorizationSnapshot(ctx, controller, controllerAssignment.DaemonAddr, resources)
-	result := semanticAuthorizationProbeResult(code, before, after, snapshotErr == nil)
-	if snapshotErr != nil {
-		return result, fmt.Errorf("capture semantic provider budget after unauthorized search: %w", snapshotErr)
+	// When the scenario configures daemon-owned provider accounting, always
+	// perform the read-only after snapshot, even for an unexpected code. Pure
+	// deterministic fixtures have no budget scope and still exercise the exact
+	// node-local authentication and authorization path without fabricated usage.
+	var after semanticBudgetAuthorizationSnapshot
+	budgetObserved := false
+	if observeBudget {
+		result.Stage = "budget-after"
+		after, err = readSemanticBudgetAuthorizationSnapshot(ctx, controller, controllerAssignment.DaemonAddr, resources)
+		budgetObserved = err == nil
+	}
+	result = semanticAuthorizationProbeResult(code, before, after, budgetObserved, true)
+	result.Stage = "semantic-search-result"
+	result.ActorAuthenticated = true
+	if observeBudget && err != nil {
+		result.Stage = "budget-after"
+		return result, fmt.Errorf("capture semantic provider budget after unauthorized search: %w", err)
 	}
 	if code != codes.PermissionDenied && code != codes.NotFound {
 		if searchErr == nil {
@@ -1083,9 +1135,11 @@ func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision
 		}
 		return result, fmt.Errorf("unauthorized semantic search returned %s, want PermissionDenied or NotFound: %w", code, searchErr)
 	}
-	if !result.ProviderBudgetUnchanged {
+	if observeBudget && !result.ProviderBudgetUnchanged {
+		result.Stage = "budget-verification"
 		return result, status.Error(codes.FailedPrecondition, "unauthorized semantic search changed provider budget evidence")
 	}
+	result.Stage = "complete"
 	return result, nil
 }
 

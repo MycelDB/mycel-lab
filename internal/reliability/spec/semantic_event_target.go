@@ -129,7 +129,9 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 			"rejectConfigurationHashFrom", "captureRecordAs", "captureConfigurationHashAs", "expectRecordFrom", "rejectRecordFrom",
 		), nil
 	case "semantic-unauthorized-search":
-		return map[string]semanticTargetField{"actorGroup": required(nonEmptySemanticString)}, nil
+		return map[string]semanticTargetField{
+			"actorGroup": required(nonEmptySemanticString), "requireProviderBudgetEvidence": boolField,
+		}, nil
 	case "semantic-rule-enable":
 		return map[string]semanticTargetField{"enabled": required(semanticBool)}, nil
 	case "semantic-rule-projection-update":

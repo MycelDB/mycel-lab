@@ -27,12 +27,15 @@ type semanticAuthorizationProbeGRPCServer struct {
 	adminv1.UnimplementedAdminSemanticMaintenanceServiceServer
 
 	token        string
+	principalID  string
+	username     string
 	searchCode   codes.Code
 	mutateBudget bool
 	budget       *adminv1.SemanticProviderBudgetStatus
 	budgetMu     *sync.Mutex
 
 	loginCalls  atomic.Int64
+	whoAmICalls atomic.Int64
 	searchCalls atomic.Int64
 	budgetCalls atomic.Int64
 }
@@ -43,6 +46,14 @@ func (s *semanticAuthorizationProbeGRPCServer) Login(_ context.Context, req *com
 		return nil, status.Error(codes.Unauthenticated, "credentials are required")
 	}
 	return &commonv1.LoginResponse{AccessToken: s.token, AccessTokenExpireTime: timestamppb.New(time.Now().Add(time.Hour))}, nil
+}
+
+func (s *semanticAuthorizationProbeGRPCServer) WhoAmI(ctx context.Context, _ *commonv1.WhoAmIRequest) (*commonv1.WhoAmIResponse, error) {
+	s.whoAmICalls.Add(1)
+	if err := s.requireOwnToken(ctx); err != nil {
+		return nil, err
+	}
+	return &commonv1.WhoAmIResponse{Principal: &commonv1.AuthPrincipal{PrincipalId: s.principalID, Username: s.username}}, nil
 }
 
 func (s *semanticAuthorizationProbeGRPCServer) GetSemanticProviderBudgetStatus(ctx context.Context, _ *adminv1.GetSemanticProviderBudgetStatusRequest) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
@@ -113,17 +124,15 @@ func semanticAuthorizationProbeFixture(t *testing.T, searchCode codes.Code, muta
 		HighWaterEventSequence: 8,
 	}
 	budgetMu := &sync.Mutex{}
-	controllerServer := &semanticAuthorizationProbeGRPCServer{token: "controller-local-token", searchCode: codes.Unimplemented, budget: budget, budgetMu: budgetMu}
-	outsiderServer := &semanticAuthorizationProbeGRPCServer{token: "outsider-local-token", searchCode: searchCode, mutateBudget: mutateBudget, budget: budget, budgetMu: budgetMu}
+	controllerServer := &semanticAuthorizationProbeGRPCServer{token: "controller-local-token", principalID: "controller-principal", username: "controller", searchCode: codes.Unimplemented, budget: budget, budgetMu: budgetMu}
+	outsiderServer := &semanticAuthorizationProbeGRPCServer{token: "outsider-local-token", principalID: "outsider-principal", username: "outsider", searchCode: searchCode, mutateBudget: mutateBudget, budget: budget, budgetMu: budgetMu}
 	controllerAddr := startSemanticAuthorizationProbeServer(t, controllerServer)
 	outsiderAddr := startSemanticAuthorizationProbeServer(t, outsiderServer)
 	resources := &provision.ScenarioResources{
 		AdminAddr: controllerAddr, DaemonAddrs: []string{controllerAddr},
 		Assignments: []provision.ActorAssignment{
-			{ActorID: "controller-0", GroupName: "semantic-controller", DaemonAddr: controllerAddr, AccessToken: "controller-local-token"},
-			// Deliberately stale/foreign cached tokens prove the negative control
-			// performs a fresh direct login against outsiderAddr.
-			{ActorID: "outsider-0", GroupName: "semantic-outsider", DaemonAddr: outsiderAddr, Username: "outsider", Password: "runtime-only-password", AccessToken: "foreign-node-token", RefreshToken: "foreign-refresh-token"},
+			{ActorID: "controller-0", GroupName: "semantic-controller", PrincipalID: "controller-principal", Username: "controller", DaemonAddr: controllerAddr, AccessToken: "controller-local-token"},
+			{ActorID: "outsider-0", GroupName: "semantic-outsider", PrincipalID: "outsider-principal", DaemonAddr: outsiderAddr, Username: "outsider", AccessToken: "outsider-local-token"},
 		},
 		Semantic: &provision.SemanticResources{
 			TargetActorID: "controller-0", SpaceID: "space", DomainID: "domain", SemanticRuleID: "rule", EmbeddingBindingKey: "search", ProviderBudgetScopeID: "scope",
@@ -133,7 +142,7 @@ func semanticAuthorizationProbeFixture(t *testing.T, searchCode codes.Code, muta
 	return resources, controllerServer, outsiderServer
 }
 
-func TestSemanticUnauthorizedSearchAuthenticatesNegativeActorDirectly(t *testing.T) {
+func TestSemanticUnauthorizedSearchVerifiesProvisionedNodeLocalSession(t *testing.T) {
 	resources, controller, outsider := semanticAuthorizationProbeFixture(t, codes.PermissionDenied, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -142,17 +151,53 @@ func TestSemanticUnauthorizedSearchAuthenticatesNegativeActorDirectly(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Rejected || result.RejectedCode != codes.PermissionDenied.String() || !result.ProviderBudgetObserved || !result.ProviderBudgetUnchanged {
-		t.Fatalf("result=%+v, want permission denial and unchanged observed budget", result)
+	if result.Stage != "complete" || !result.ActorAuthenticated || !result.SearchAttempted || !result.Rejected || result.RejectedCode != codes.PermissionDenied.String() || !result.ProviderBudgetObserved || !result.ProviderBudgetUnchanged {
+		t.Fatalf("result=%+v, want authenticated permission denial and unchanged observed budget", result)
 	}
 	if result.Requests != 4 || result.Attempts != 4 || result.InputTokens != 32 || result.EstimatedCostMicros != 1 {
 		t.Fatalf("result=%+v, want exact aggregate budget evidence", result)
 	}
-	if outsider.loginCalls.Load() != 1 || outsider.searchCalls.Load() != 1 {
-		t.Fatalf("outsider login calls=%d search calls=%d, want 1 and 1", outsider.loginCalls.Load(), outsider.searchCalls.Load())
+	if outsider.loginCalls.Load() != 0 || outsider.whoAmICalls.Load() != 1 || outsider.searchCalls.Load() != 1 {
+		t.Fatalf("outsider login calls=%d whoami calls=%d search calls=%d, want 0, 1, 1", outsider.loginCalls.Load(), outsider.whoAmICalls.Load(), outsider.searchCalls.Load())
 	}
 	if controller.budgetCalls.Load() != 2 {
 		t.Fatalf("controller budget calls=%d, want before and after snapshots", controller.budgetCalls.Load())
+	}
+}
+
+func TestSemanticUnauthorizedSearchWithoutBudgetScopeStillExercisesNodeLocalSession(t *testing.T) {
+	resources, controller, outsider := semanticAuthorizationProbeFixture(t, codes.PermissionDenied, false)
+	resources.Semantic.ProviderBudgetScopeID = ""
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := executeSemanticUnauthorizedSearch(ctx, resources, map[string]any{"actorGroup": "semantic-outsider"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stage != "complete" || !result.ActorAuthenticated || !result.SearchAttempted || !result.Rejected || result.RejectedCode != codes.PermissionDenied.String() || result.ProviderBudgetObserved || result.ProviderBudgetUnchanged {
+		t.Fatalf("result=%+v, want authenticated permission denial without fabricated budget evidence", result)
+	}
+	if outsider.loginCalls.Load() != 0 || outsider.whoAmICalls.Load() != 1 || outsider.searchCalls.Load() != 1 || controller.budgetCalls.Load() != 0 {
+		t.Fatalf("login=%d whoami=%d search=%d budget=%d, want 0, 1, 1, 0", outsider.loginCalls.Load(), outsider.whoAmICalls.Load(), outsider.searchCalls.Load(), controller.budgetCalls.Load())
+	}
+}
+
+func TestSemanticUnauthorizedSearchRequiredBudgetFailsClosedWhenScopeMissing(t *testing.T) {
+	resources, controller, outsider := semanticAuthorizationProbeFixture(t, codes.PermissionDenied, false)
+	resources.Semantic.ProviderBudgetScopeID = ""
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := executeSemanticUnauthorizedSearch(ctx, resources, map[string]any{"actorGroup": "semantic-outsider", "requireProviderBudgetEvidence": true})
+	if err == nil {
+		t.Fatal("expected missing required budget scope to fail")
+	}
+	if result.Stage != "budget-before" || result.ActorAuthenticated || result.SearchAttempted || result.ProviderBudgetObserved {
+		t.Fatalf("result=%+v, want budget-before failure without authentication or search", result)
+	}
+	if outsider.loginCalls.Load() != 0 || outsider.whoAmICalls.Load() != 0 || outsider.searchCalls.Load() != 0 || controller.budgetCalls.Load() != 0 {
+		t.Fatalf("login=%d whoami=%d search=%d budget=%d, want 0, 0, 0, 0", outsider.loginCalls.Load(), outsider.whoAmICalls.Load(), outsider.searchCalls.Load(), controller.budgetCalls.Load())
 	}
 }
 
@@ -165,11 +210,11 @@ func TestSemanticUnauthorizedSearchRetainsBudgetEvidenceForUnexpectedCode(t *tes
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("error=%v code=%s, want Unauthenticated", err, status.Code(err))
 	}
-	if result.Rejected || result.RejectedCode != codes.Unauthenticated.String() || !result.ProviderBudgetObserved || !result.ProviderBudgetUnchanged || result.Requests != 4 {
+	if result.Stage != "semantic-search-result" || !result.ActorAuthenticated || !result.SearchAttempted || result.Rejected || result.RejectedCode != codes.Unauthenticated.String() || !result.ProviderBudgetObserved || !result.ProviderBudgetUnchanged || result.Requests != 4 {
 		t.Fatalf("result=%+v, want safe unexpected-code and unchanged-budget evidence", result)
 	}
-	if outsider.loginCalls.Load() != 1 || outsider.searchCalls.Load() != 1 || controller.budgetCalls.Load() != 2 {
-		t.Fatalf("login=%d search=%d budget=%d, want 1, 1, 2", outsider.loginCalls.Load(), outsider.searchCalls.Load(), controller.budgetCalls.Load())
+	if outsider.loginCalls.Load() != 0 || outsider.whoAmICalls.Load() != 1 || outsider.searchCalls.Load() != 1 || controller.budgetCalls.Load() != 2 {
+		t.Fatalf("login=%d whoami=%d search=%d budget=%d, want 0, 1, 1, 2", outsider.loginCalls.Load(), outsider.whoAmICalls.Load(), outsider.searchCalls.Load(), controller.budgetCalls.Load())
 	}
 }
 
@@ -182,7 +227,43 @@ func TestSemanticUnauthorizedSearchFailsIfBudgetChanges(t *testing.T) {
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("error=%v code=%s, want FailedPrecondition", err, status.Code(err))
 	}
-	if !result.Rejected || !result.ProviderBudgetObserved || result.ProviderBudgetUnchanged {
+	if result.Stage != "budget-verification" || !result.ActorAuthenticated || !result.SearchAttempted || !result.Rejected || !result.ProviderBudgetObserved || result.ProviderBudgetUnchanged {
 		t.Fatalf("result=%+v, want rejected request with changed budget evidence", result)
+	}
+}
+
+func TestSemanticUnauthorizedSearchRetainsStageAndBudgetWhenNodeLocalSessionIsRejected(t *testing.T) {
+	resources, controller, outsider := semanticAuthorizationProbeFixture(t, codes.PermissionDenied, false)
+	resources.Assignments[1].AccessToken = "foreign-node-token"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := executeSemanticUnauthorizedSearch(ctx, resources, map[string]any{"actorGroup": "semantic-outsider"})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("error=%v code=%s, want Unauthenticated", err, status.Code(err))
+	}
+	if result.Stage != "negative-actor-authentication" || result.ActorAuthenticated || result.SearchAttempted || result.Rejected || result.RejectedCode != codes.Unauthenticated.String() || !result.ProviderBudgetObserved || !result.ProviderBudgetUnchanged || result.Requests != 4 {
+		t.Fatalf("result=%+v, want safe authentication-stage and unchanged-budget evidence", result)
+	}
+	if outsider.loginCalls.Load() != 0 || outsider.whoAmICalls.Load() != 1 || outsider.searchCalls.Load() != 0 || controller.budgetCalls.Load() != 2 {
+		t.Fatalf("login=%d whoami=%d search=%d budget=%d, want 0, 1, 0, 2", outsider.loginCalls.Load(), outsider.whoAmICalls.Load(), outsider.searchCalls.Load(), controller.budgetCalls.Load())
+	}
+}
+
+func TestSemanticUnauthorizedSearchRejectsMismatchedNodeLocalIdentity(t *testing.T) {
+	resources, controller, outsider := semanticAuthorizationProbeFixture(t, codes.PermissionDenied, false)
+	outsider.principalID = "different-principal"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := executeSemanticUnauthorizedSearch(ctx, resources, map[string]any{"actorGroup": "semantic-outsider"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("error=%v code=%s, want FailedPrecondition", err, status.Code(err))
+	}
+	if result.Stage != "negative-actor-authentication" || result.ActorAuthenticated || result.SearchAttempted || result.Rejected || !result.ProviderBudgetObserved || !result.ProviderBudgetUnchanged {
+		t.Fatalf("result=%+v, want safe identity-mismatch stage and unchanged-budget evidence", result)
+	}
+	if outsider.loginCalls.Load() != 0 || outsider.whoAmICalls.Load() != 1 || outsider.searchCalls.Load() != 0 || controller.budgetCalls.Load() != 2 {
+		t.Fatalf("login=%d whoami=%d search=%d budget=%d, want 0, 1, 0, 2", outsider.loginCalls.Load(), outsider.whoAmICalls.Load(), outsider.searchCalls.Load(), controller.budgetCalls.Load())
 	}
 }
