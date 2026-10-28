@@ -191,35 +191,64 @@ func provisionSemanticResources(ctx context.Context, admin *mycel.AdminClient, r
 	return CreateSemanticRule(ctx, admin, resources)
 }
 
+// ValidateSemanticRuleForCreate proves the exact deferred semantic-rule payload
+// and scoped semantic.manage authorization through the read-only validation RPC.
+// It is safe to repeat before the single create attempt.
+func ValidateSemanticRuleForCreate(ctx context.Context, admin *mycel.AdminClient, resources *ScenarioResources) error {
+	rule, err := semanticRuleForCreate(resources)
+	if err != nil {
+		return err
+	}
+	response, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.ValidateSemanticRuleResponse, error) {
+		return admin.Semantic.ValidateSemanticRule(callCtx, &adminv1.ValidateSemanticRuleRequest{Rule: rule})
+	})
+	if err != nil {
+		return err
+	}
+	if response == nil || !response.GetValid() {
+		return errors.New("semantic rule validation did not accept the deferred create payload")
+	}
+	return nil
+}
+
+func semanticRuleForCreate(resources *ScenarioResources) (*adminv1.SemanticGenerationRule, error) {
+	if resources == nil || resources.Semantic == nil || resources.semanticPlan == nil {
+		return nil, errors.New("semantic resources are incomplete")
+	}
+	semanticResources := resources.Semantic
+	rule := resources.semanticPlan.Spec.Rule
+	return &adminv1.SemanticGenerationRule{
+		SpaceId: semanticResources.SpaceID, DomainId: semanticResources.DomainID, Key: rule.Key, DisplayName: rule.DisplayName, Description: rule.Description, Enabled: true, OwnerPrincipalId: semanticResources.TargetPrincipalID,
+		Trigger: &adminv1.SemanticTriggerPolicy{Events: []adminv1.SemanticTriggerEventType{
+			adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_CREATED,
+			adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_UPDATED,
+			adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_DELETED,
+		}, Debounce: rule.DirtyCooldown.String()},
+		Selector:    &adminv1.SemanticTargetSelector{Mode: "node_type", Labels: append([]string(nil), rule.TargetLabels...), MaxResults: 4096},
+		Source:      &adminv1.SemanticSourceAssemblyPolicy{Mode: rule.SourceMode, IncludeProperties: append([]string(nil), rule.IncludeProperties...), ExcludeProperties: append([]string(nil), rule.ExcludeProperties...), MinimumTextLength: int32(rule.MinimumTextLength)},
+		Embeddings:  []*adminv1.SemanticEmbeddingBinding{{Key: rule.BindingKey, Purpose: rule.Purpose, IntelligenceProfileId: semanticResources.IntelligenceProfileID, VectorStoreId: semanticResources.VectorStoreID, Enabled: true, ProviderBudget: semanticProviderBudgetPolicy(resources.semanticPlan)}},
+		Maintenance: &adminv1.SemanticMaintenancePolicy{DirtyCooldown: rule.DirtyCooldown.String(), MaxBatchSize: int32(rule.MaxBatchSize), WorkerConcurrency: int32(rule.WorkerConcurrency)},
+		Storage:     &adminv1.SemanticStoragePolicy{Searchable: true, PhysicalIndex: rule.PhysicalIndex},
+	}, nil
+}
+
 // CreateSemanticRule creates a deferred run-scoped semantic rule. Repeated calls
 // in the same run are no-ops once the rule identity is known.
 func CreateSemanticRule(ctx context.Context, admin *mycel.AdminClient, resources *ScenarioResources) error {
-	if resources == nil || resources.Semantic == nil || resources.semanticPlan == nil {
-		return errors.New("semantic resources are incomplete")
+	ruleRequest, err := semanticRuleForCreate(resources)
+	if err != nil {
+		return err
 	}
 	semanticResources := resources.Semantic
 	if semanticResources.SemanticRuleID != "" {
 		return nil
 	}
 	rule := resources.semanticPlan.Spec.Rule
-	providerBudget := semanticProviderBudgetPolicy(resources.semanticPlan)
 	if semanticResources.LiveProvider {
-		semanticResources.ExpectedProviderBudget = proto.Clone(providerBudget).(*adminv1.SemanticProviderBudgetPolicy)
+		semanticResources.ExpectedProviderBudget = proto.Clone(ruleRequest.GetEmbeddings()[0].GetProviderBudget()).(*adminv1.SemanticProviderBudgetPolicy)
 	}
 	ruleResponse, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.CreateSemanticRuleResponse, error) {
-		return admin.Semantic.CreateSemanticRule(callCtx, &adminv1.CreateSemanticRuleRequest{Rule: &adminv1.SemanticGenerationRule{
-			SpaceId: semanticResources.SpaceID, DomainId: semanticResources.DomainID, Key: rule.Key, DisplayName: rule.DisplayName, Description: rule.Description, Enabled: true, OwnerPrincipalId: semanticResources.TargetPrincipalID,
-			Trigger: &adminv1.SemanticTriggerPolicy{Events: []adminv1.SemanticTriggerEventType{
-				adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_CREATED,
-				adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_UPDATED,
-				adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_DELETED,
-			}, Debounce: rule.DirtyCooldown.String()},
-			Selector:    &adminv1.SemanticTargetSelector{Mode: "node_type", Labels: append([]string(nil), rule.TargetLabels...), MaxResults: 4096},
-			Source:      &adminv1.SemanticSourceAssemblyPolicy{Mode: rule.SourceMode, IncludeProperties: append([]string(nil), rule.IncludeProperties...), ExcludeProperties: append([]string(nil), rule.ExcludeProperties...), MinimumTextLength: int32(rule.MinimumTextLength)},
-			Embeddings:  []*adminv1.SemanticEmbeddingBinding{{Key: rule.BindingKey, Purpose: rule.Purpose, IntelligenceProfileId: semanticResources.IntelligenceProfileID, VectorStoreId: semanticResources.VectorStoreID, Enabled: true, ProviderBudget: providerBudget}},
-			Maintenance: &adminv1.SemanticMaintenancePolicy{DirtyCooldown: rule.DirtyCooldown.String(), MaxBatchSize: int32(rule.MaxBatchSize), WorkerConcurrency: int32(rule.WorkerConcurrency)},
-			Storage:     &adminv1.SemanticStoragePolicy{Searchable: true, PhysicalIndex: rule.PhysicalIndex},
-		}})
+		return admin.Semantic.CreateSemanticRule(callCtx, &adminv1.CreateSemanticRuleRequest{Rule: ruleRequest})
 	})
 	if err != nil {
 		listed, listErr := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.ListSemanticRulesResponse, error) {
@@ -343,8 +372,9 @@ func semanticBudgetStatusReaders(ctx context.Context, primary *mycel.AdminClient
 	resources := scenario.Semantic
 	request := &adminv1.GetSemanticProviderBudgetStatusRequest{SpaceId: resources.SpaceID, Selector: &adminv1.GetSemanticProviderBudgetStatusRequest_CurrentBinding{CurrentBinding: &adminv1.SemanticProviderBudgetBindingSelector{SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey}}}
 	type readinessAdmin struct {
-		addr   string
-		client *mycel.AdminClient
+		addr    string
+		client  *mycel.AdminClient
+		dialErr error
 	}
 	clients := []readinessAdmin{{addr: strings.TrimSpace(scenario.AdminAddr), client: primary}}
 	seen := map[string]struct{}{strings.TrimSpace(scenario.AdminAddr): {}}
@@ -357,19 +387,16 @@ func semanticBudgetStatusReaders(ctx context.Context, primary *mycel.AdminClient
 			continue
 		}
 		seen[addr] = struct{}{}
-		client, err := mycel.DialAdmin(ctx, mycel.Config{Addr: addr, AccessToken: primary.AccessToken(), AccessTokenExpireTime: primary.AccessTokenExpireTime(), ClientName: "mycel-lab-semantic-readiness"})
-		if err != nil {
-			for _, opened := range clients[1:] {
-				_ = opened.client.Close()
-			}
-			return nil, func() {}, fmt.Errorf("dial semantic readiness admin: %w", err)
-		}
-		clients = append(clients, readinessAdmin{addr: addr, client: client})
+		client, err := mycel.DialAdmin(ctx, mycel.Config{Addr: addr, Username: firstNonEmpty(scenario.AdminUsername, DefaultAdminUsername), Password: firstNonEmpty(scenario.AdminPassword, DefaultAdminPassword), ClientName: "mycel-lab-semantic-readiness"})
+		clients = append(clients, readinessAdmin{addr: addr, client: client, dialErr: err})
 	}
 	readers := make([]semanticBudgetStatusReader, 0, len(clients))
 	for _, entry := range clients {
 		entry := entry
 		readers = append(readers, semanticBudgetStatusReader{addr: entry.addr, read: func(readCtx context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
+			if entry.dialErr != nil {
+				return nil, fmt.Errorf("dial semantic readiness admin %s: %w", entry.addr, entry.dialErr)
+			}
 			return withAdminAuth(readCtx, entry.client, func(callCtx context.Context) (*adminv1.GetSemanticProviderBudgetStatusResponse, error) {
 				return entry.client.SemanticMaintenance.GetSemanticProviderBudgetStatus(callCtx, request)
 			})
@@ -377,14 +404,18 @@ func semanticBudgetStatusReaders(ctx context.Context, primary *mycel.AdminClient
 	}
 	return readers, func() {
 		for _, opened := range clients[1:] {
-			_ = opened.client.Close()
+			if opened.client != nil {
+				_ = opened.client.Close()
+			}
 		}
 	}, nil
 }
 
 // ReadSemanticAdminAcrossDaemons executes one authenticated, idempotent semantic
 // budget read against each daemon until the current system-Raft leader serves it.
-// It never retries mutations and never creates additional login sessions.
+// It never retries mutations. Because clustered daemons may use node-local access
+// token signing keys, each visited peer receives one bounded direct login rather
+// than reusing a token issued by another daemon.
 func ReadSemanticAdminAcrossDaemons[T any](ctx context.Context, primary *mycel.AdminClient, primaryAddr string, scenario *ScenarioResources, read func(context.Context, *mycel.AdminClient) (T, error)) (T, error) {
 	var zero T
 	if primary == nil || scenario == nil {
@@ -416,14 +447,25 @@ func ReadSemanticAdminAcrossDaemons[T any](ctx context.Context, primary *mycel.A
 	if scenario.Semantic != nil && scenario.Semantic.MaintenancePollInterval > 0 {
 		pollInterval = scenario.Semantic.MaintenancePollInterval
 	}
+	primaryAddr = strings.TrimSpace(primaryAddr)
+	clients := map[string]*mycel.AdminClient{}
+	if primaryAddr != "" {
+		clients[primaryAddr] = primary
+	}
+	defer func() {
+		for addr, client := range clients {
+			if addr != primaryAddr && client != nil {
+				_ = client.Close()
+			}
+		}
+	}()
 	var lastErr error
 	for {
 		for _, addr := range addresses {
-			client := primary
-			closeClient := false
-			if addr != strings.TrimSpace(primaryAddr) {
+			client := clients[addr]
+			if client == nil {
 				var err error
-				client, err = mycel.DialAdmin(readCtx, mycel.Config{Addr: addr, AccessToken: primary.AccessToken(), AccessTokenExpireTime: primary.AccessTokenExpireTime(), ClientName: "mycel-lab-semantic-budget-read"})
+				client, err = mycel.DialAdmin(readCtx, mycel.Config{Addr: addr, Username: firstNonEmpty(scenario.AdminUsername, DefaultAdminUsername), Password: firstNonEmpty(scenario.AdminPassword, DefaultAdminPassword), ClientName: "mycel-lab-semantic-budget-read"})
 				if err != nil {
 					if readCtx.Err() != nil {
 						return zero, fmt.Errorf("semantic provider budget read did not find the system leader: %w", errors.Join(lastErr, readCtx.Err()))
@@ -434,14 +476,11 @@ func ReadSemanticAdminAcrossDaemons[T any](ctx context.Context, primary *mycel.A
 					lastErr = err
 					continue
 				}
-				closeClient = true
+				clients[addr] = client
 			}
 			callCtx, cancel := client.AuthCallContext(readCtx)
 			result, err := read(callCtx, client)
 			cancel()
-			if closeClient {
-				_ = client.Close()
-			}
 			if err == nil {
 				scenario.AdminAddr = addr
 				return result, nil
