@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [v0.21.0] - 2026-10-27
+
 ### Added
 
 - Added the manual SGT9 OpenAI-compatible live embedding suite with authenticated semantic-budget capability discovery before credential resolution, synthetic ranking invariants, immutable daemon-attempt reconciliation, explicit third-party endpoint policy, and live-artifact sanitization (#46).
@@ -27,6 +29,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- Pinned Lab to the exact promoted Mycel Go SDK v0.21 source commit used by the coordinated release gates.
 - Compose runs now carry `--image` through the effective environment passed to driver preflight and creation, apply it as a Compose-only `MYCEL_IMAGE` override to every lifecycle command, and require one nonempty resolved image ID for every configured daemon service before capture can succeed, binding semantic acceptance artifacts to an exact-head tag without leaking Compose options into k3d runs (#46).
 - Actor-owned space and domain names now include actor-group identity, and scenario validation rejects actor-group names that normalize to the same resource scope, preventing groups that share one profile from collapsing onto the same resources; the deterministic semantic contract also uses a positive near-zero rule cooldown, an operation timeout longer than its maintenance deadline, node-bound incremental revision captures, and a forced initial backfill tied to the final pre-rule pinned snapshot revision so racing historical maintenance cannot retain an earlier same-source provenance revision (#46).
 - The SGT4 rebuild phase now creates an eligible semantic record while rebuild state is running and asserts exact pinned-target baseline, delta-record, freshness, generation, and epoch provenance (#46).
