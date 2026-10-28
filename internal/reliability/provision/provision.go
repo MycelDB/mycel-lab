@@ -26,6 +26,8 @@ type ScenarioResources struct {
 	RunID                  string                       `json:"runId"`
 	DryRun                 bool                         `json:"dryRun"`
 	AdminAddr              string                       `json:"adminAddr,omitempty"`
+	AdminUsername          string                       `json:"-"`
+	AdminPassword          string                       `json:"-"`
 	DaemonAddrs            []string                     `json:"daemonAddrs,omitempty"`
 	Principals             []Principal                  `json:"principals"`
 	Spaces                 []Space                      `json:"spaces"`
@@ -220,7 +222,7 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 	if runID == "" {
 		runID = sanitizeName(scenario.Metadata.Name)
 	}
-	resources := ScenarioResources{ScenarioName: scenario.Metadata.Name, RunID: runID, DryRun: opts.DryRun, CreatedAt: time.Now().UTC(), DaemonAddrs: append([]string(nil), opts.DaemonAddrs...)}
+	resources := ScenarioResources{ScenarioName: scenario.Metadata.Name, RunID: runID, DryRun: opts.DryRun, CreatedAt: time.Now().UTC(), DaemonAddrs: append([]string(nil), opts.DaemonAddrs...), AdminUsername: firstNonEmpty(opts.AdminUsername, DefaultAdminUsername), AdminPassword: firstNonEmpty(opts.AdminPassword, DefaultAdminPassword)}
 	if len(resources.DaemonAddrs) > 0 {
 		resources.AdminAddr = resources.DaemonAddrs[0]
 	}
@@ -408,6 +410,8 @@ func ProvisionScenario(ctx context.Context, resources *ScenarioResources, opts O
 	if resources == nil || opts.DryRun || resources.DryRun {
 		return nil
 	}
+	resources.AdminUsername = firstNonEmpty(opts.AdminUsername, resources.AdminUsername, DefaultAdminUsername)
+	resources.AdminPassword = firstNonEmpty(opts.AdminPassword, resources.AdminPassword, DefaultAdminPassword)
 	addr := resources.AdminAddr
 	if addr == "" && len(opts.DaemonAddrs) > 0 {
 		addr = opts.DaemonAddrs[0]
