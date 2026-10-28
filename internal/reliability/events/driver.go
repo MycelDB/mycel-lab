@@ -91,6 +91,7 @@ func sanitizeLiveSemanticResult(eventType string, result any) any {
 	case "semantic-unauthorized-search":
 		if value, ok := result.(SemanticAuthorizationProbeResult); ok {
 			return map[string]any{
+				"stage": value.Stage, "actorAuthenticated": value.ActorAuthenticated, "searchAttempted": value.SearchAttempted,
 				"rejected": value.Rejected, "rejectedCode": value.RejectedCode,
 				"providerBudgetObserved": value.ProviderBudgetObserved, "providerBudgetUnchanged": value.ProviderBudgetUnchanged,
 				"requests": value.Requests, "attempts": value.Attempts, "retryAttempts": value.RetryAttempts,
@@ -99,7 +100,7 @@ func sanitizeLiveSemanticResult(eventType string, result any) any {
 				"sensitiveSemanticIdentifiersRedacted": true,
 			}
 		}
-		return map[string]any{"rejected": false, "providerBudgetObserved": false, "sensitiveSemanticIdentifiersRedacted": true}
+		return map[string]any{"stage": "result-unavailable", "actorAuthenticated": false, "searchAttempted": false, "rejected": false, "providerBudgetObserved": false, "sensitiveSemanticIdentifiersRedacted": true}
 	case "semantic-rebuild":
 		return map[string]any{"completed": result != nil, "sensitiveSemanticOutputsRedacted": true}
 	case "semantic-provider-budget-reconcile":

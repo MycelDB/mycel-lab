@@ -681,14 +681,14 @@ func TestLiveSemanticResultSanitizerDropsIdentifiersAndOutputs(t *testing.T) {
 }
 
 func TestLiveSemanticAuthorizationResultRetainsSafeBudgetEvidence(t *testing.T) {
-	raw := SemanticAuthorizationProbeResult{RejectedCode: codes.Unauthenticated.String(), ProviderBudgetObserved: true, ProviderBudgetUnchanged: true, Requests: 4, Attempts: 4, BatchItems: 4, InputTokens: 32, EstimatedCostMicros: 1}
+	raw := SemanticAuthorizationProbeResult{Stage: "negative-actor-authentication", ActorAuthenticated: false, SearchAttempted: false, RejectedCode: codes.Unauthenticated.String(), ProviderBudgetObserved: true, ProviderBudgetUnchanged: true, Requests: 4, Attempts: 4, BatchItems: 4, InputTokens: 32, EstimatedCostMicros: 1}
 	sanitized := sanitizeLiveSemanticResult("semantic-unauthorized-search", raw)
 	encoded, err := json.Marshal(sanitized)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(encoded)
-	for _, want := range []string{`"rejectedCode":"Unauthenticated"`, `"providerBudgetObserved":true`, `"providerBudgetUnchanged":true`, `"requests":4`, `"inputTokens":32`} {
+	for _, want := range []string{`"stage":"negative-actor-authentication"`, `"actorAuthenticated":false`, `"searchAttempted":false`, `"rejectedCode":"Unauthenticated"`, `"providerBudgetObserved":true`, `"providerBudgetUnchanged":true`, `"requests":4`, `"inputTokens":32`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("sanitized authorization evidence %s does not contain %s", text, want)
 		}
