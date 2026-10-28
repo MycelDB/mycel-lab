@@ -14,6 +14,8 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	mycel "github.com/myceldb/mycel-go-sdk"
+	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
 )
 
 type ClusterRecoveryWaitResult struct {
@@ -26,6 +28,8 @@ type ClusterRecoveryWaitResult struct {
 	StablePolls               int                            `json:"stablePolls"`
 	RequireZeroApplyLag       bool                           `json:"requireZeroApplyLag"`
 	RequireConsistentProgress bool                           `json:"requireConsistentProgress"`
+	InspectionMode            string                         `json:"inspectionMode"`
+	ReusableEndpointSessions  int                            `json:"reusableEndpointSessions"`
 	RejectedPolls             int                            `json:"rejectedPolls"`
 	RejectionCounts           ClusterRecoveryRejectionCounts `json:"rejectionCounts"`
 	LastRejectedPoll          *ClusterRecoveryRejectedPoll   `json:"lastRejectedPoll,omitempty"`
@@ -107,7 +111,38 @@ type clusterRaftGroupsResponse struct {
 	Groups []clusterRaftGroup `json:"groups"`
 }
 
+type clusterRecoveryNodeInspector interface {
+	Inspect(context.Context, int, []string, time.Duration, map[string]any) ClusterRecoveryNodeResult
+	Close() error
+}
+
+type cliClusterRecoveryNodeInspector struct {
+	driver      env.EnvironmentDriver
+	environment env.Environment
+}
+
+func (i cliClusterRecoveryNodeInspector) Inspect(ctx context.Context, ordinal int, expectedGroupIDs []string, commandTimeout time.Duration, target map[string]any) ClusterRecoveryNodeResult {
+	return inspectClusterRecoveryNode(ctx, i.driver, i.environment, ordinal, expectedGroupIDs, commandTimeout, target)
+}
+
+func (cliClusterRecoveryNodeInspector) Close() error { return nil }
+
+type reusableClusterRecoverySession struct {
+	admin   *mycel.AdminClient
+	cluster adminv1.AdminClusterServiceClient
+}
+
+type reusableClusterRecoveryNodeInspector struct {
+	sessions map[int]reusableClusterRecoverySession
+}
+
 func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, target map[string]any) (ClusterRecoveryWaitResult, error) {
+	return executeClusterRecoveryWaitEventWithSessionFactory(ctx, driver, environment, scenario, target, newReusableClusterRecoveryNodeInspector)
+}
+
+type clusterRecoverySessionFactory func(context.Context, env.EnvironmentDriver, env.Environment, []int, time.Duration, map[string]any) (clusterRecoveryNodeInspector, error)
+
+func executeClusterRecoveryWaitEventWithSessionFactory(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, target map[string]any, sessionFactory clusterRecoverySessionFactory) (ClusterRecoveryWaitResult, error) {
 	timeout, err := targetDuration(target, "timeout")
 	if err != nil {
 		return ClusterRecoveryWaitResult{}, err
@@ -149,9 +184,22 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 	if configured := intTarget(target, "expectedGroups", expectedGroups); configured != expectedGroups {
 		return ClusterRecoveryWaitResult{}, fmt.Errorf("cluster-recovery-wait expectedGroups=%d does not match system plus %d configured partitions (%d groups)", configured, scenario.Cluster.Raft.PartitionCount, expectedGroups)
 	}
-	result := ClusterRecoveryWaitResult{Timeout: timeout.String(), Interval: interval.String(), ExpectedGroups: expectedGroups, CommandTimeout: commandTimeout.String(), MinimumStablePolls: minimumStablePolls, RequireZeroApplyLag: requireZeroApplyLag, RequireConsistentProgress: requireConsistentProgress}
+	result := ClusterRecoveryWaitResult{Timeout: timeout.String(), Interval: interval.String(), ExpectedGroups: expectedGroups, CommandTimeout: commandTimeout.String(), MinimumStablePolls: minimumStablePolls, RequireZeroApplyLag: requireZeroApplyLag, RequireConsistentProgress: requireConsistentProgress, InspectionMode: "node-cli"}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var inspector clusterRecoveryNodeInspector = cliClusterRecoveryNodeInspector{driver: driver, environment: environment}
+	if boolTarget(target, "reuseEndpointSessions", false) {
+		if sessionFactory == nil {
+			return result, errors.New("cluster-recovery-wait reusable endpoint session factory is unavailable")
+		}
+		inspector, err = sessionFactory(waitCtx, driver, environment, ordinals, commandTimeout, target)
+		if err != nil {
+			return result, fmt.Errorf("initialize cluster-recovery-wait reusable endpoint sessions: %w", err)
+		}
+		result.InspectionMode = "reusable-endpoint-session"
+		result.ReusableEndpointSessions = len(ordinals)
+	}
+	defer inspector.Close()
 	timeoutError := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -167,7 +215,7 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 			inspections.Add(1)
 			go func(index, nodeOrdinal int) {
 				defer inspections.Done()
-				result.Nodes[index] = inspectClusterRecoveryNode(waitCtx, driver, environment, nodeOrdinal, expectedGroupIDs, commandTimeout, target)
+				result.Nodes[index] = inspector.Inspect(waitCtx, nodeOrdinal, expectedGroupIDs, commandTimeout, target)
 			}(i, ordinal)
 		}
 		inspections.Wait()
@@ -217,6 +265,174 @@ func requiredRaftGroupIDs(partitionCount int) []string {
 		ids = append(ids, fmt.Sprintf("space-partition-%d", partition))
 	}
 	return ids
+}
+
+func newReusableClusterRecoveryNodeInspector(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, ordinals []int, commandTimeout time.Duration, target map[string]any) (clusterRecoveryNodeInspector, error) {
+	endpoints, err := driver.Endpoints(ctx, environment)
+	if err != nil {
+		return nil, fmt.Errorf("resolve daemon endpoints: %w", err)
+	}
+	inspector := &reusableClusterRecoveryNodeInspector{sessions: make(map[int]reusableClusterRecoverySession, len(ordinals))}
+	for _, ordinal := range ordinals {
+		endpoint, ok := clusterRecoveryEndpointForOrdinal(endpoints, ordinal)
+		if !ok || strings.TrimSpace(endpoint.DaemonAddr) == "" {
+			_ = inspector.Close()
+			return nil, fmt.Errorf("daemon endpoint for ordinal %d is unavailable", ordinal)
+		}
+		dialCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+		admin, dialErr := mycel.DialAdmin(dialCtx, mycel.Config{
+			Addr:       endpoint.DaemonAddr,
+			Username:   firstNonEmpty(stringTarget(target, "username"), provision.DefaultAdminUsername),
+			Password:   firstNonEmpty(stringTarget(target, "password"), provision.DefaultAdminPassword),
+			ClientName: "mycel-lab-cluster-recovery",
+		})
+		cancel()
+		if dialErr != nil {
+			_ = inspector.Close()
+			return nil, fmt.Errorf("authenticate daemon endpoint for ordinal %d: %w", ordinal, dialErr)
+		}
+		inspector.sessions[ordinal] = reusableClusterRecoverySession{admin: admin, cluster: adminv1.NewAdminClusterServiceClient(admin.Conn)}
+	}
+	return inspector, nil
+}
+
+func clusterRecoveryEndpointForOrdinal(endpoints []env.Endpoint, ordinal int) (env.Endpoint, bool) {
+	name := fmt.Sprintf("myceld-%d", ordinal)
+	for _, endpoint := range endpoints {
+		if endpoint.NodeName == name {
+			return endpoint, true
+		}
+	}
+	if ordinal >= 0 && ordinal < len(endpoints) {
+		return endpoints[ordinal], true
+	}
+	return env.Endpoint{}, false
+}
+
+func (i *reusableClusterRecoveryNodeInspector) Inspect(ctx context.Context, ordinal int, expectedGroupIDs []string, commandTimeout time.Duration, target map[string]any) ClusterRecoveryNodeResult {
+	result := ClusterRecoveryNodeResult{Ordinal: ordinal}
+	session, ok := i.sessions[ordinal]
+	if !ok || session.cluster == nil {
+		result.ReadinessError = "reusable endpoint session is unavailable"
+		result.RaftGroupsError = result.ReadinessError
+		result.raftInspectionFailed = true
+		return result
+	}
+
+	readinessCtx, readinessCancel := context.WithTimeout(ctx, commandTimeout)
+	status, readinessErr := session.cluster.GetClusterStatus(readinessCtx, &adminv1.GetClusterStatusRequest{})
+	readinessCancel()
+	if readinessErr != nil {
+		result.ReadinessError = bounded("get cluster status: "+readinessErr.Error(), 4096)
+	} else {
+		if encoded, marshalErr := json.Marshal(status.GetReadiness()); marshalErr == nil {
+			result.ReadinessStdout = bounded(string(encoded), 8192)
+		}
+		if validationErr := validateReusableClusterReadiness(status.GetReadiness()); validationErr != nil {
+			result.ReadinessError = bounded(validationErr.Error(), 4096)
+		} else {
+			result.ReadinessReady = true
+		}
+	}
+
+	raftCtx, raftCancel := context.WithTimeout(ctx, commandTimeout)
+	raftGroups, raftErr := session.cluster.ListRaftGroups(raftCtx, &adminv1.ListRaftGroupsRequest{})
+	raftCancel()
+	if raftErr != nil {
+		result.RaftGroupsError = bounded("list raft groups: "+raftErr.Error(), 4096)
+		result.raftInspectionFailed = true
+		return result
+	}
+	groups := make([]clusterRaftGroup, 0, len(raftGroups.GetGroups()))
+	for _, group := range raftGroups.GetGroups() {
+		if group == nil {
+			continue
+		}
+		commitIndex := group.GetCommitIndex()
+		appliedIndex := group.GetAppliedIndex()
+		groups = append(groups, clusterRaftGroup{
+			GroupID:      group.GetGroupId(),
+			LeaderNodeID: group.GetLeaderNodeId(),
+			Health:       strings.TrimPrefix(strings.ToLower(group.GetHealth().String()), "raft_group_health_"),
+			CommitIndex:  &commitIndex,
+			AppliedIndex: &appliedIndex,
+			LastIndex:    group.GetLastIndex(),
+		})
+	}
+	if encoded, marshalErr := json.Marshal(clusterRaftGroupsResponse{Groups: groups}); marshalErr == nil {
+		result.RaftGroupsStdout = bounded(string(encoded), 16384)
+	}
+	evaluateClusterRaftGroups(&result, groups, expectedGroupIDs, boolTarget(target, "requireZeroApplyLag", false), boolTarget(target, "requireConsistentProgress", false))
+	return result
+}
+
+func (i *reusableClusterRecoveryNodeInspector) Close() error {
+	if i == nil {
+		return nil
+	}
+	var closeErr error
+	for ordinal, session := range i.sessions {
+		if session.admin == nil || session.admin.Conn == nil {
+			continue
+		}
+		if err := session.admin.Conn.Close(); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close reusable endpoint session for ordinal %d: %w", ordinal, err))
+		}
+	}
+	return closeErr
+}
+
+func validateReusableClusterReadiness(readiness *adminv1.ClusterReadiness) error {
+	if readiness == nil {
+		return errors.New("cluster not ready: readiness is unavailable")
+	}
+	processReady := readiness.GetProcessReady()
+	metadataReady := readiness.GetMetadataReady()
+	raftReady := readiness.GetRaftReady()
+	readReady := readiness.GetReadReady()
+	writeReady := readiness.GetWriteReady()
+	if readiness.GetClientReady() && !processReady && !metadataReady && !raftReady && !readReady && !writeReady {
+		processReady = true
+		metadataReady = readiness.GetMetadataApplied() && readiness.GetMetadataValidated()
+		raftReady = readiness.GetPartitionGroupsStarted()
+		readReady = true
+		writeReady = true
+	}
+	blockers := append([]string(nil), readiness.GetReadinessBlockers()...)
+	if !readiness.GetClientReady() {
+		blockers = append(blockers, "client_ready=false")
+	}
+	if !processReady {
+		blockers = append(blockers, "process_ready=false")
+	}
+	if !readiness.GetMetadataApplied() {
+		blockers = append(blockers, "metadata_applied=false")
+	}
+	if !readiness.GetMetadataValidated() {
+		blockers = append(blockers, "metadata_validated=false")
+	}
+	if !metadataReady {
+		blockers = append(blockers, "metadata_ready=false")
+	}
+	if !readiness.GetPartitionGroupsStarted() {
+		blockers = append(blockers, "partition_groups_started=false")
+	}
+	if !raftReady {
+		blockers = append(blockers, "raft_ready=false")
+	}
+	if !readReady {
+		blockers = append(blockers, "read_ready=false")
+	}
+	if !writeReady {
+		blockers = append(blockers, "write_ready=false")
+	}
+	if authoritative, local := readiness.GetAuthoritativeClusterId(), readiness.GetLocalClusterId(); authoritative != "" && local != "" && authoritative != local {
+		blockers = append(blockers, fmt.Sprintf("cluster_id_mismatch authoritative=%s local=%s", authoritative, local))
+	}
+	if len(blockers) > 0 {
+		return fmt.Errorf("cluster not ready: %s", strings.Join(blockers, "; "))
+	}
+	return nil
 }
 
 func inspectClusterRecoveryNode(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, ordinal int, expectedGroupIDs []string, commandTimeout time.Duration, target map[string]any) ClusterRecoveryNodeResult {

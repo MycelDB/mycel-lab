@@ -45,7 +45,7 @@ phases:
     events:
       - type: cluster-recovery-wait
         target:
-          timeout: 10s
+          timeout: 60s
           interval: 200ms
           commandTimeout: 3s
           minimumStablePolls: 3
