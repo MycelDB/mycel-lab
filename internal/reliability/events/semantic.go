@@ -144,17 +144,26 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 	if addr == "" {
 		return nil, errors.New("semantic event requires an admin daemon address")
 	}
-	admin, err := mycel.DialAdmin(ctx, mycel.Config{Addr: addr, Username: provision.DefaultAdminUsername, Password: provision.DefaultAdminPassword, ClientName: "mycel-lab-semantic"})
+	admin, err := mycel.DialAdmin(ctx, mycel.Config{Addr: addr, Username: firstNonEmpty(resources.AdminUsername, provision.DefaultAdminUsername), Password: firstNonEmpty(resources.AdminPassword, provision.DefaultAdminPassword), ClientName: "mycel-lab-semantic"})
 	if err != nil {
 		return nil, fmt.Errorf("dial semantic admin: %w", err)
 	}
 	defer admin.Close()
-	switch eventType {
-	case "semantic-rule-create":
-		if err := provision.CreateSemanticRule(ctx, admin, resources); err != nil {
-			return nil, fmt.Errorf("create semantic rule: %w", err)
+	if eventType == "semantic-rule-create" {
+		attempts, mutationAttempted, err := executeSemanticRuleMutation(ctx, func(probeCtx context.Context) error {
+			return provision.ValidateSemanticRuleForCreate(probeCtx, admin, resources)
+		}, func(mutationCtx context.Context) error {
+			return provision.CreateSemanticRule(mutationCtx, admin, resources)
+		})
+		if err != nil {
+			if mutationAttempted {
+				return nil, fmt.Errorf("create semantic rule: %w", err)
+			}
+			return nil, fmt.Errorf("create semantic rule: %w", semanticRuleReadinessError(attempts, err))
 		}
-		return map[string]any{"semanticRuleId": resources.Semantic.SemanticRuleID, "key": resources.Semantic.SemanticRuleKey}, nil
+		return map[string]any{"semanticRuleId": resources.Semantic.SemanticRuleID, "key": resources.Semantic.SemanticRuleKey, "semanticRuleReadinessAttempts": attempts}, nil
+	}
+	switch eventType {
 	case "semantic-node-create", "semantic-node-update", "semantic-node-delete":
 		return executeSemanticGraphMutation(ctx, resources, eventType, target)
 	case "semantic-transaction-negative":

@@ -17,6 +17,7 @@ import (
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestValidateSemanticProviderBudgetStatusIdentityRejectsEveryMismatch(t *testing.T) {
@@ -913,11 +914,36 @@ func TestPlanScenarioCreatesDeterministicSafeSemanticPlan(t *testing.T) {
 			t.Fatalf("cleanup[%d]=%#v want resource %q", index, got, want)
 		}
 	}
+	first.Semantic.SpaceID = "11111111-1111-4111-8111-111111111111"
+	first.Semantic.DomainID = "22222222-2222-4222-8222-222222222222"
+	first.Semantic.TargetPrincipalID = "33333333-3333-4333-8333-333333333333"
+	first.Semantic.IntelligenceProfileID = "44444444-4444-4444-8444-444444444444"
+	first.Semantic.VectorStoreID = "55555555-5555-4555-8555-555555555555"
+	first.semanticPlan.Spec.Rule.IncludeProperties = []string{"title"}
+	validationRule, err := semanticRuleForCreate(&first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createRule, err := semanticRuleForCreate(&first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(validationRule, createRule) || validationRule == createRule {
+		t.Fatalf("validation and create payloads must be equal independent messages: validation=%#v create=%#v", validationRule, createRule)
+	}
+	validationRule.Source.IncludeProperties[0] = "mutated"
+	if got := createRule.GetSource().GetIncludeProperties(); !reflect.DeepEqual(got, []string{"title"}) {
+		t.Fatalf("semantic create payload aliases validation payload: %v", got)
+	}
+	first.AdminUsername = "operator-marker"
+	first.AdminPassword = "admin-secret-marker"
 	raw, err := json.Marshal(first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "Password") || strings.Contains(string(raw), "secretValue") {
-		t.Fatalf("semantic plan contains secret-bearing fields: %s", raw)
+	for _, prohibited := range []string{"Password", "secretValue", "operator-marker", "admin-secret-marker"} {
+		if strings.Contains(string(raw), prohibited) {
+			t.Fatalf("semantic plan contains secret-bearing field %q: %s", prohibited, raw)
+		}
 	}
 }
