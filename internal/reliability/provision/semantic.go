@@ -209,7 +209,11 @@ func CreateSemanticRule(ctx context.Context, admin *mycel.AdminClient, resources
 	ruleResponse, err := withAdminAuth(ctx, admin, func(callCtx context.Context) (*adminv1.CreateSemanticRuleResponse, error) {
 		return admin.Semantic.CreateSemanticRule(callCtx, &adminv1.CreateSemanticRuleRequest{Rule: &adminv1.SemanticGenerationRule{
 			SpaceId: semanticResources.SpaceID, DomainId: semanticResources.DomainID, Key: rule.Key, DisplayName: rule.DisplayName, Description: rule.Description, Enabled: true, OwnerPrincipalId: semanticResources.TargetPrincipalID,
-			Trigger:     &adminv1.SemanticTriggerPolicy{Events: []string{"node.created", "node.updated", "node.deleted"}, Debounce: rule.DirtyCooldown.String()},
+			Trigger: &adminv1.SemanticTriggerPolicy{Events: []adminv1.SemanticTriggerEventType{
+				adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_CREATED,
+				adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_UPDATED,
+				adminv1.SemanticTriggerEventType_SEMANTIC_TRIGGER_EVENT_TYPE_NODE_DELETED,
+			}, Debounce: rule.DirtyCooldown.String()},
 			Selector:    &adminv1.SemanticTargetSelector{Mode: "node_type", Labels: append([]string(nil), rule.TargetLabels...), MaxResults: 4096},
 			Source:      &adminv1.SemanticSourceAssemblyPolicy{Mode: rule.SourceMode, IncludeProperties: append([]string(nil), rule.IncludeProperties...), ExcludeProperties: append([]string(nil), rule.ExcludeProperties...), MinimumTextLength: int32(rule.MinimumTextLength)},
 			Embeddings:  []*adminv1.SemanticEmbeddingBinding{{Key: rule.BindingKey, Purpose: rule.Purpose, IntelligenceProfileId: semanticResources.IntelligenceProfileID, VectorStoreId: semanticResources.VectorStoreID, Enabled: true, ProviderBudget: providerBudget}},
