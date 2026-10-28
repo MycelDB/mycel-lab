@@ -41,6 +41,10 @@ func TestProcedureInferenceScenarioContractsValidate(t *testing.T) {
 						t.Fatalf("compose file %q: %v", name, err)
 					}
 				}
+				initial := scenario.Phases[0].Events[0]
+				if initial.Type != "cluster-recovery-wait" || initial.Target["timeout"] != "60s" || initial.Target["minimumStablePolls"] != 3 || initial.Target["requireZeroApplyLag"] != true || initial.Target["requireConsistentProgress"] != true || initial.Target["reuseEndpointSessions"] != true {
+					t.Fatalf("compose initial recovery fence=%+v", initial)
+				}
 			}
 		})
 	}
