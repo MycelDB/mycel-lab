@@ -165,6 +165,42 @@ func TestSemanticUnauthorizedSearchVerifiesProvisionedNodeLocalSession(t *testin
 	}
 }
 
+func TestSemanticUnauthorizedSearchWithoutBudgetScopeStillExercisesNodeLocalSession(t *testing.T) {
+	resources, controller, outsider := semanticAuthorizationProbeFixture(t, codes.PermissionDenied, false)
+	resources.Semantic.ProviderBudgetScopeID = ""
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := executeSemanticUnauthorizedSearch(ctx, resources, map[string]any{"actorGroup": "semantic-outsider"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stage != "complete" || !result.ActorAuthenticated || !result.SearchAttempted || !result.Rejected || result.RejectedCode != codes.PermissionDenied.String() || result.ProviderBudgetObserved || result.ProviderBudgetUnchanged {
+		t.Fatalf("result=%+v, want authenticated permission denial without fabricated budget evidence", result)
+	}
+	if outsider.loginCalls.Load() != 0 || outsider.whoAmICalls.Load() != 1 || outsider.searchCalls.Load() != 1 || controller.budgetCalls.Load() != 0 {
+		t.Fatalf("login=%d whoami=%d search=%d budget=%d, want 0, 1, 1, 0", outsider.loginCalls.Load(), outsider.whoAmICalls.Load(), outsider.searchCalls.Load(), controller.budgetCalls.Load())
+	}
+}
+
+func TestSemanticUnauthorizedSearchRequiredBudgetFailsClosedWhenScopeMissing(t *testing.T) {
+	resources, controller, outsider := semanticAuthorizationProbeFixture(t, codes.PermissionDenied, false)
+	resources.Semantic.ProviderBudgetScopeID = ""
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := executeSemanticUnauthorizedSearch(ctx, resources, map[string]any{"actorGroup": "semantic-outsider", "requireProviderBudgetEvidence": true})
+	if err == nil {
+		t.Fatal("expected missing required budget scope to fail")
+	}
+	if result.Stage != "budget-before" || result.ActorAuthenticated || result.SearchAttempted || result.ProviderBudgetObserved {
+		t.Fatalf("result=%+v, want budget-before failure without authentication or search", result)
+	}
+	if outsider.loginCalls.Load() != 0 || outsider.whoAmICalls.Load() != 0 || outsider.searchCalls.Load() != 0 || controller.budgetCalls.Load() != 0 {
+		t.Fatalf("login=%d whoami=%d search=%d budget=%d, want 0, 0, 0, 0", outsider.loginCalls.Load(), outsider.whoAmICalls.Load(), outsider.searchCalls.Load(), controller.budgetCalls.Load())
+	}
+}
+
 func TestSemanticUnauthorizedSearchRetainsBudgetEvidenceForUnexpectedCode(t *testing.T) {
 	resources, controller, outsider := semanticAuthorizationProbeFixture(t, codes.Unauthenticated, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
