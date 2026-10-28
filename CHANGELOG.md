@@ -10,6 +10,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - Deferred live semantic-rule creation now proves the exact payload and scoped `semantic.manage` authorization through a bounded read-only validation RPC before the single create attempt. Only transient `Unauthenticated` validation failures retry; semantic mutations are never retried.
 - Cross-daemon semantic budget reads now establish one bounded direct admin session on each visited peer instead of presenting a primary daemon's potentially node-local access token to another daemon.
+- The SGT9 unauthorized-search control now authenticates the negative actor directly against its assigned daemon, captures read-only daemon budget snapshots even for unexpected outcomes, and retains only safe aggregate usage and gRPC-category evidence.
+- Live semantic failure artifacts now retain allowlisted gRPC categories without persisting provider inputs, outputs, credentials, or raw error text.
 
 ## [v0.21.0] - 2026-10-27
 

@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -18,6 +19,8 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -674,6 +677,43 @@ func TestLiveSemanticResultSanitizerDropsIdentifiersAndOutputs(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "query-secret") || strings.Contains(string(encoded), "node-secret") {
 		t.Fatalf("sanitized result leaked semantic identifiers: %s", encoded)
+	}
+}
+
+func TestLiveSemanticAuthorizationResultRetainsSafeBudgetEvidence(t *testing.T) {
+	raw := SemanticAuthorizationProbeResult{RejectedCode: codes.Unauthenticated.String(), ProviderBudgetObserved: true, ProviderBudgetUnchanged: true, Requests: 4, Attempts: 4, BatchItems: 4, InputTokens: 32, EstimatedCostMicros: 1}
+	sanitized := sanitizeLiveSemanticResult("semantic-unauthorized-search", raw)
+	encoded, err := json.Marshal(sanitized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, want := range []string{`"rejectedCode":"Unauthenticated"`, `"providerBudgetObserved":true`, `"providerBudgetUnchanged":true`, `"requests":4`, `"inputTokens":32`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("sanitized authorization evidence %s does not contain %s", text, want)
+		}
+	}
+	for _, forbidden := range []string{"actor-secret", "space-secret", "query-secret", "credential-secret"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("sanitized authorization evidence leaked %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestLiveSemanticFailureCategoryPreservesSafeGRPCCode(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("wrapped: %w", status.Error(codes.Unauthenticated, "secret detail")), "unauthenticated"},
+		{status.Error(codes.PermissionDenied, "secret detail"), "permission_denied"},
+		{status.Error(codes.FailedPrecondition, "secret detail"), "failed_precondition"},
+		{errors.New("opaque failure"), "operation_failed"},
+	}
+	for _, test := range tests {
+		if got := liveSemanticFailureCategory(test.err); got != test.want {
+			t.Fatalf("liveSemanticFailureCategory(%v)=%q, want %q", test.err, got, test.want)
+		}
 	}
 }
 
