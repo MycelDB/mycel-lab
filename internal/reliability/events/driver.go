@@ -11,6 +11,8 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type DriverRuntime struct {
@@ -87,7 +89,17 @@ func sanitizeLiveSemanticResult(eventType string, result any) any {
 	case "semantic-reliability-assert":
 		return map[string]any{"asserted": result != nil, "sensitiveSemanticOutputsRedacted": true}
 	case "semantic-unauthorized-search":
-		return map[string]any{"rejected": result != nil, "sensitiveSemanticIdentifiersRedacted": true}
+		if value, ok := result.(SemanticAuthorizationProbeResult); ok {
+			return map[string]any{
+				"rejected": value.Rejected, "rejectedCode": value.RejectedCode,
+				"providerBudgetObserved": value.ProviderBudgetObserved, "providerBudgetUnchanged": value.ProviderBudgetUnchanged,
+				"requests": value.Requests, "attempts": value.Attempts, "retryAttempts": value.RetryAttempts,
+				"batchItems": value.BatchItems, "inputTokens": value.InputTokens, "estimatedCostMicros": value.EstimatedCostMicros,
+				"activeProviderCalls": value.ActiveProviderCalls, "ambiguousAttempts": value.AmbiguousAttempts,
+				"sensitiveSemanticIdentifiersRedacted": true,
+			}
+		}
+		return map[string]any{"rejected": false, "providerBudgetObserved": false, "sensitiveSemanticIdentifiersRedacted": true}
 	case "semantic-rebuild":
 		return map[string]any{"completed": result != nil, "sensitiveSemanticOutputsRedacted": true}
 	case "semantic-provider-budget-reconcile":
@@ -331,16 +343,42 @@ func nodeOrdinal(target map[string]any) int {
 	return nodeTargetOrdinal(target)
 }
 
+func liveSemanticFailureCategory(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	switch status.Code(err) {
+	case codes.Unauthenticated:
+		return "unauthenticated"
+	case codes.PermissionDenied:
+		return "permission_denied"
+	case codes.NotFound:
+		return "not_found"
+	case codes.FailedPrecondition:
+		return "failed_precondition"
+	case codes.Unavailable:
+		return "unavailable"
+	case codes.ResourceExhausted:
+		return "resource_exhausted"
+	case codes.InvalidArgument:
+		return "invalid_argument"
+	case codes.Aborted:
+		return "aborted"
+	case codes.Internal:
+		return "internal"
+	default:
+		return "operation_failed"
+	}
+}
+
 func (r *DriverRuntime) recordFailure(ctx context.Context, recorder Recorder, phase spec.PhaseSpec, event spec.EventSpec, eventPayload map[string]any, err error) error {
 	returnedError := err
 	payload := map[string]any{"error": err.Error(), "runtime": r.Environment.Driver}
 	if r.liveSemanticProvider() && strings.HasPrefix(event.Type, "semantic-") {
-		category := "operation_failed"
-		if errors.Is(err, context.Canceled) {
-			category = "canceled"
-		} else if errors.Is(err, context.DeadlineExceeded) {
-			category = "deadline_exceeded"
-		}
+		category := liveSemanticFailureCategory(err)
 		payload = map[string]any{"errorCategory": category, "runtime": r.Environment.Driver, "sensitiveSemanticFailureRedacted": true}
 		returnedError = fmt.Errorf("live semantic event %s failed (%s)", event.Type, category)
 	}
