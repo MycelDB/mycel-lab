@@ -11,6 +11,7 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Structured reliability harness design](docs/design/reliability-harness.md)
 - [Mycel Lab model](docs/design/model.md)
 - [Environment driver abstraction design](docs/design/environment-drivers.md)
+- [Provider profiles, budgets, and artifact safety](docs/design/provider-profiles.md)
 - [Structured reliability harness implementation plan](docs/implementation/reliability-harness-implementation-plan.md)
 - [Environment driver abstraction implementation plan](docs/implementation/environment-driver-abstraction-plan.md)
 - [MycelDB system integration migration plan](docs/implementation/system-integration-migration-plan.md)
@@ -27,6 +28,8 @@ make build-mycel-lab
 mycel-lab import --dry-run tests/reliability/
 mycel-lab run scenario example --dry-run
 mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml --dry-run
+mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml --dry-run \
+  --provider-profile tests/reliability/provider-profiles/deterministic-token-basis-v1.yaml
 mycel-lab run suite-file tests/reliability/suites/raft-baseline.yaml --dry-run
 # Non-dry runs require local k3d + kubectl and create disposable clusters.
 mycel-lab run scenario actor-noop --confirm-destructive
@@ -43,6 +46,10 @@ mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
+mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --dry-run
+mycel-lab run suite compose-procedure-inference-control-emulator --dry-run
+mycel-lab run suite k3d-procedure-inference-recovery --dry-run
+mycel-lab run suite k3d-procedure-inference-backup-restore --dry-run
 mycel-lab run suite compose-cluster-soak --dry-run
 mycel-lab run suite cluster-release-gate --dry-run
 # Compose runs require Docker Compose and a local mycel image compatible with the fixture.
@@ -53,6 +60,7 @@ mycel-lab run suite k3d-raft-disruption --confirm-destructive
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --confirm-destructive
 # Override the scenario's baseline image for candidate validation.
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --confirm-destructive --image myceldb/mycel:v0.20.0
+mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --confirm-destructive --keep-environment-on-failure
 mycel-lab run suite compose-cluster-soak --confirm-destructive
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```

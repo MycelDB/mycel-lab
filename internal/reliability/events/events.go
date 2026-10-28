@@ -35,30 +35,44 @@ type Recorder interface {
 	RecordRuntimeEvent(ctx context.Context, record Record) error
 }
 
+type OperationBudgetRecorder interface {
+	ReserveRuntimeOperation(ctx context.Context, phaseName, eventType string) (context.Context, func(), error)
+}
+
 type Runtime interface {
 	ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error
 }
 
-type LocalRuntime struct{}
+type LocalRuntime struct{ LiveSemanticProvider bool }
 
-func (LocalRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
+func (r LocalRuntime) ExecutePhaseEvents(ctx context.Context, phase spec.PhaseSpec, dryRun bool, recorder Recorder) error {
 	for _, event := range phase.Events {
-		if err := executeOne(ctx, phase, event, dryRun, recorder); err != nil {
+		if err := executeOne(ctx, phase, event, dryRun, recorder, r.LiveSemanticProvider); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec, dryRun bool, recorder Recorder) error {
+func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec, dryRun bool, recorder Recorder, liveSemanticProvider bool) error {
+	operationCtx, release, err := reserveRuntimeOperation(ctx, recorder, phase.Name, event.Type)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = operationCtx
+	target := evidenceSafeEventTarget(event)
+	if liveSemanticProvider && strings.HasPrefix(event.Type, "semantic-") {
+		target = evidenceSafeLiveSemanticEventTarget(event)
+	}
 	if recorder != nil {
-		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"dryRun": dryRun}}); err != nil {
+		if err := recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-started", PhaseName: phase.Name, EventType: event.Type, Target: target, Payload: map[string]any{"dryRun": dryRun}}); err != nil {
 			return err
 		}
 	}
 	if err := validateEvent(event); err != nil {
 		if recorder != nil {
-			_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target, Payload: map[string]any{"error": err.Error()}})
+			_ = recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-failed", PhaseName: phase.Name, EventType: event.Type, Target: target, Payload: map[string]any{"error": err.Error()}})
 		}
 		return err
 	}
@@ -72,12 +86,39 @@ func executeOne(ctx context.Context, phase spec.PhaseSpec, event spec.EventSpec,
 		}
 	}
 	if recorder != nil {
-		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: event.Target})
+		return recorder.RecordRuntimeEvent(ctx, Record{Time: time.Now().UTC(), Type: "event-completed", PhaseName: phase.Name, EventType: event.Type, Target: target, Payload: map[string]any{"dryRun": dryRun}})
 	}
 	return nil
 }
 
+func reserveRuntimeOperation(ctx context.Context, recorder Recorder, phaseName, eventType string) (context.Context, func(), error) {
+	if limiter, ok := recorder.(OperationBudgetRecorder); ok {
+		return limiter.ReserveRuntimeOperation(ctx, phaseName, eventType)
+	}
+	return ctx, func() {}, nil
+}
+
+func evidenceSafeEventTarget(event spec.EventSpec) map[string]any {
+	if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
+		return event.Target
+	}
+	out := make(map[string]any, len(event.Target))
+	for key, value := range event.Target {
+		if key != "nodeId" && key != "text" && key != "blobPayload" {
+			out[key] = value
+		}
+	}
+	out["graphContentRedacted"] = true
+	return out
+}
+
 func validateEvent(event spec.EventSpec) error {
+	if strings.HasPrefix(event.Type, "semantic-") {
+		return spec.ValidateSemanticEventTarget(event.Type, event.Target)
+	}
+	if strings.HasPrefix(event.Type, "procedure-inference-") {
+		return spec.ValidateProcedureInferenceEventTarget(event.Type, event.Target)
+	}
 	switch event.Type {
 	case "pod-stop", "pod-restart", "pod-delete":
 		if PodName(event.Target) == "" {
@@ -93,7 +134,7 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "image") == "" {
 			return fmt.Errorf("%s requires target.image", event.Type)
 		}
-	case "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent":
+	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-emulator-assert", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
 		return nil
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {
@@ -129,7 +170,7 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
 			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
 		}
-	case "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply":
+	case "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-backup-cleanup":
 		return nil
 	case "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "identity-duplicate-principal-replay":
 		return nil

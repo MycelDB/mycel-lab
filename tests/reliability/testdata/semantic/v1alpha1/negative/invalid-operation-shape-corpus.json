@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "reliability.mycel.io/semantic-corpus/v1alpha1",
+  "metadata": {
+    "name": "invalid-operation-shape",
+    "description": "Negative fixture: create-edge omits scope and endpoint fields."
+  },
+  "classification": {
+    "dataClass": "synthetic",
+    "artifactCaptureSafe": true
+  },
+  "scopes": [
+    {"key": "primary", "spaceKey": "semantic-contract", "domainKey": "documents"}
+  ],
+  "nodes": [
+    {
+      "key": "node-a",
+      "scopeKey": "primary",
+      "labels": ["Document"],
+      "properties": {"body": "axis-zero"},
+      "projection": {
+        "includedPaths": ["body"],
+        "excludedPaths": [],
+        "fixtureTokens": ["axis-0"],
+        "expectedEligible": true
+      }
+    }
+  ],
+  "mutations": [
+    {
+      "key": "invalid-edge-create",
+      "disposition": "commit",
+      "operations": [
+        {"type": "create-edge", "targetKey": "edge-a"}
+      ],
+      "expected": {
+        "graphChangedKeys": [],
+        "graphUnchangedKeys": ["node-a"],
+        "semanticChangedKeys": [],
+        "semanticUnchangedKeys": ["node-a"]
+      }
+    }
+  ],
+  "queries": [
+    {
+      "key": "baseline",
+      "scopeKey": "primary",
+      "text": "axis-zero",
+      "semanticRuleKey": "document-projection",
+      "bindingKey": "primary",
+      "limit": 1,
+      "minScore": 0.5,
+      "proofLevel": 1,
+      "expected": {
+        "orderedNodeKeys": ["node-a"],
+        "absentNodeKeys": [],
+        "requireRecordIdentity": true,
+        "requireSemanticSource": true
+      }
+    }
+  ]
+}

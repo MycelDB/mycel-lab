@@ -1,0 +1,35 @@
+apiVersion: reliability.mycel.io/v1alpha1
+kind: ProviderProfile
+metadata:
+  name: openai-compatible-procedure-emulator
+  description: Credential-free bounded OpenAI-compatible generation profile for procedure-inference acceptance.
+mode: emulator
+capabilities:
+  generation:
+    connectorType: openai-compatible
+    endpointKey: local-procedure-emulator
+    baseURL: http://mycel-provider-emulator:18080/v1
+    modelKey: emulator/procedure-generation-v1
+    providerModelName: procedure-generation-v1
+    emulatorScript:
+      version: v1
+      requireMatch: false
+      maxRequests: 128
+      entries: []
+    batching:
+      mode: single
+      maxItems: 1
+budgets:
+  enforcement: advisory
+  maxOperations: 64
+  maxRequests: 128
+  maxConcurrentOperations: 2
+  maxConcurrentRequests: 2
+  maxRetriesPerRequest: 2
+  maxInputTokens: 32768
+  maxOutputTokens: 4096
+  requestTimeout: 20m
+  totalTimeout: 45m
+artifacts:
+  captureBodies: false
+  captureHeaders: false

@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-procedure-inference-backup-restore
+  description: System backup/restore acceptance for procedure-inference ledgers, watermarks, run references, and control state.
+scenarios:
+  - path: ../scenarios/k3d-procedure-inference-backup-restore/k3d-procedure-inference-backup-restore.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

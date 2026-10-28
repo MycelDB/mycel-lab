@@ -1,0 +1,87 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-procedure-inference-recovery
+  description: Credential-free clustered procedure-inference ledger, cursor, and publication recovery acceptance.
+seed: 5051
+providerProfileRef: openai-compatible-procedure-emulator
+environment:
+  driver: k3d
+  namespace: mycel-procedure-inference-recovery
+  options:
+    clusterNamePrefix: mlab-pir
+    createArguments: [--agents, "3", --timeout, 180s]
+    consolePortBase: 20091
+    providerEmulatorImage: local/mycel-provider-emulator:dev
+  capabilities:
+    required: [per-node-endpoints, node-exec, logs, provider-emulator]
+clusterRef: raft-3-node
+clusterOverrides:
+  raft: {partitionCount: 4}
+actorGroups:
+  - name: graph-writers
+    profileRef: procedure-inference-writer
+    count: 1
+    rate: {mode: per-actor, commitsPerSecond: 1}
+  - name: inference-auditors
+    profileRef: procedure-inference-auditor
+    count: 1
+    rate: {mode: per-actor, queriesPerSecond: 1}
+    target: {actorGroups: [graph-writers]}
+procedureInference:
+  targetActorGroup: graph-writers
+  auditActorGroup: inference-auditors
+  targetLabels: [ProcedureInferenceFixture]
+phases:
+  - name: establish-durable-attempt
+    duration: 1ms
+    events:
+      - type: cluster-recovery-wait
+        target: {timeout: 2m, interval: 200ms, commandTimeout: 3s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
+      - type: procedure-inference-setup
+        target: {timeout: 30s}
+      - type: procedure-inference-node-create
+        target: {nodeId: 00000000-0000-4000-8000-000000005101, text: bounded recovery fixture, timeout: 30s}
+      - type: procedure-inference-await-terminal
+        target: {timeout: 2m, interval: 200ms, stableFor: 3s, minimumAttempts: 1, maximumAttempts: 1, requireSucceeded: true, requireChanges: true, checkpoint: pre-restart}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
+  - name: restart-with-durable-ledger
+    duration: 1ms
+    events:
+      - type: node-restart
+        target: {ordinal: 0}
+      - type: cluster-recovery-wait
+        target: {timeout: 2m, interval: 500ms, commandTimeout: 5s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
+      - type: procedure-inference-await-terminal
+        target: {timeout: 30s, interval: 200ms, stableFor: 3s, minimumAttempts: 1, maximumAttempts: 1, requireSucceeded: true, requireChanges: true, compareCheckpoint: pre-restart}
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
+  - name: prove-post-recovery-progress
+    duration: 1ms
+    events:
+      - type: procedure-inference-node-create
+        target: {nodeId: 00000000-0000-4000-8000-000000005102, text: bounded post recovery fixture, timeout: 30s}
+      - type: procedure-inference-await-terminal
+        target: {timeout: 2m, interval: 200ms, stableFor: 3s, minimumAttempts: 2, maximumAttempts: 2, requireSucceeded: true, requireChanges: true}
+      - type: procedure-inference-emulator-assert
+        target:
+          minimumRequests: 2
+          maximumRequests: 2
+          requireSingleItem: true
+          maximumAttemptsPerInput: 1
+          authorization: absent
+          expectedModels: [procedure-generation-v1]
+          minimumOutcomes: {success: 2}
+      - type: procedure-inference-capacity-diagnostics-assert
+        target: {timeout: 30s, tail: 5000, requirePressure: false}
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectKubernetesState: true
+  collectProviderEvidence: true
+  collectActorEvents: true
+  redactSecrets: true

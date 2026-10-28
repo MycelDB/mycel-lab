@@ -1,0 +1,129 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-procedure-inference-control-emulator
+  description: Credential-free procedure-inference lifecycle, polling, attribution, control-barrier, and sanitized emulator acceptance.
+seed: 5050
+providerProfileRef: openai-compatible-procedure-emulator
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/procedure-inference-ports.yml
+    projectNamePrefix: mycel-lab-procedure-inference
+    providerEmulatorImage: local/mycel-provider-emulator:dev
+    serviceNames: [myceld-a, myceld-b, myceld-c]
+    grpcPorts: [19691, 19692, 19693]
+  capabilities:
+    required: [per-node-endpoints, node-exec, logs, provider-emulator]
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: graph-writers
+    profileRef: procedure-inference-writer
+    count: 1
+    rate: {mode: per-actor, commitsPerSecond: 1}
+  - name: inference-auditors
+    profileRef: procedure-inference-auditor
+    count: 1
+    rate: {mode: per-actor, queriesPerSecond: 1}
+    target:
+      actorGroups: [graph-writers]
+procedureInference:
+  targetActorGroup: graph-writers
+  auditActorGroup: inference-auditors
+  procedureId: mycel-lab.procedure-inference
+  bindingId: mycel-lab.procedure-inference.graph-trigger
+  targetLabels: [ProcedureInferenceFixture]
+phases:
+  - name: configure-authoritative-procedure
+    duration: 1ms
+    events:
+      - type: cluster-recovery-wait
+        target:
+          timeout: 10s
+          interval: 200ms
+          commandTimeout: 3s
+          minimumStablePolls: 3
+          requireZeroApplyLag: true
+          requireConsistentProgress: true
+          reuseEndpointSessions: true
+      - type: procedure-inference-setup
+        target: {timeout: 30s}
+  - name: prove-terminal-lifecycle-and-polling
+    duration: 1ms
+    events:
+      - type: procedure-inference-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000005001
+          text: bounded fixture alpha
+          timeout: 30s
+      - type: procedure-inference-await-terminal
+        target:
+          timeout: 2m
+          interval: 200ms
+          minimumAttempts: 1
+          maximumAttempts: 1
+          requireSucceeded: true
+          requireChanges: true
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
+  - name: prove-disable-barrier-blocks-new-attempt
+    duration: 1ms
+    events:
+      - type: procedure-inference-control
+        target: {action: disable, timeout: 30s}
+      - type: procedure-inference-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000005002
+          text: bounded fixture while disabled
+          timeout: 30s
+      - type: procedure-inference-await-terminal
+        target:
+          timeout: 30s
+          interval: 200ms
+          stableFor: 3s
+          minimumAttempts: 1
+          maximumAttempts: 1
+          requireSucceeded: true
+          requireChanges: true
+      - type: procedure-inference-emulator-assert
+        target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
+  - name: prove-enable-barrier-allows-new-version-pinned-attempt
+    duration: 1ms
+    events:
+      - type: procedure-inference-control
+        target: {action: enable, timeout: 30s}
+      - type: procedure-inference-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000005003
+          text: bounded fixture after enable
+          timeout: 30s
+      - type: procedure-inference-await-terminal
+        target:
+          timeout: 2m
+          interval: 200ms
+          minimumAttempts: 2
+          maximumAttempts: 2
+          requireSucceeded: true
+          requireChanges: true
+  - name: reconcile-sanitized-emulator-evidence
+    duration: 1ms
+    events:
+      - type: procedure-inference-capacity-diagnostics-assert
+        target: {timeout: 30s, tail: 5000, requirePressure: false}
+      - type: procedure-inference-emulator-assert
+        target:
+          minimumRequests: 2
+          maximumRequests: 2
+          requireSingleItem: true
+          maximumBatchItems: 1
+          maximumAttemptsPerInput: 1
+          authorization: absent
+          expectedModels: [procedure-generation-v1]
+          minimumOutcomes: {success: 2}
+          minimumStatuses: {"200": 2}

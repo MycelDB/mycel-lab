@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-commonfolio-procedure-replay-recovery
+  description: Deterministic retained-PVC procedure.create replay negative control for MycelDB/mycel#236.
+scenarios:
+  - path: ../scenarios/k3d-commonfolio-procedure-replay-recovery/k3d-commonfolio-procedure-replay-recovery.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

@@ -14,14 +14,15 @@ type PhaseSummary struct {
 }
 
 type RunSummary struct {
-	RunID        string         `json:"runId"`
-	ScenarioName string         `json:"scenarioName"`
-	Status       string         `json:"status"`
-	StartedAt    time.Time      `json:"startedAt"`
-	FinishedAt   time.Time      `json:"finishedAt"`
-	DryRun       bool           `json:"dryRun"`
-	Phases       []PhaseSummary `json:"phases"`
-	Artifacts    []string       `json:"artifacts"`
+	RunID           string         `json:"runId"`
+	ScenarioName    string         `json:"scenarioName"`
+	Status          string         `json:"status"`
+	StartedAt       time.Time      `json:"startedAt"`
+	FinishedAt      time.Time      `json:"finishedAt"`
+	DryRun          bool           `json:"dryRun"`
+	Phases          []PhaseSummary `json:"phases"`
+	Artifacts       []string       `json:"artifacts"`
+	FailureCategory string         `json:"failureCategory,omitempty"`
 }
 
 func Markdown(summary RunSummary) string {
@@ -30,6 +31,9 @@ func Markdown(summary RunSummary) string {
 	fmt.Fprintf(&b, "- Scenario: `%s`\n", summary.ScenarioName)
 	fmt.Fprintf(&b, "- Status: `%s`\n", summary.Status)
 	fmt.Fprintf(&b, "- Dry run: `%t`\n", summary.DryRun)
+	if summary.FailureCategory != "" {
+		fmt.Fprintf(&b, "- Failure category: `%s`\n", summary.FailureCategory)
+	}
 	fmt.Fprintf(&b, "- Started: `%s`\n", summary.StartedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "- Finished: `%s`\n\n", summary.FinishedAt.Format(time.RFC3339))
 	if summary.DryRun {

@@ -1,9 +1,14 @@
 package env
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -91,7 +96,7 @@ func TestK3DPreflightRequiresConfirmation(t *testing.T) {
 	}
 }
 
-func TestK3DDriverCreateAppliesManifestsAndWaits(t *testing.T) {
+func TestK3DDriverCreateLeavesReadinessToRunner(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
 	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "Example Scenario"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns"}, Cluster: spec.ClusterSpec{Nodes: 1, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
@@ -103,9 +108,21 @@ func TestK3DDriverCreateAppliesManifestsAndWaits(t *testing.T) {
 		t.Fatalf("environment=%+v", environment)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"k3d cluster create", "docker image inspect myceldb/mycel:latest", "k3d image import myceldb/mycel:latest -c " + environment.Name, "kubectl --context " + environment.Context + " apply -f", "kubectl --context " + environment.Context + " -n test-ns rollout status statefulset/myceld", "kubectl --context " + environment.Context + " -n test-ns wait pods -l app=myceld"} {
+	for _, want := range []string{"k3d cluster create", "docker image inspect myceldb/mycel:latest", "k3d image import myceldb/mycel:latest -c " + environment.Name, "kubectl --context " + environment.Context + " apply -f"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "rollout status") || strings.Contains(joined, "wait pods") {
+		t.Fatalf("Create performed readiness checks outside the runner cleanup boundary:\n%s", joined)
+	}
+	if err := driver.WaitReady(context.Background(), environment); err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(runner.commands, "\n")
+	for _, want := range []string{"rollout status statefulset/myceld", "wait pods -l app=myceld"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("WaitReady commands missing %q\n%s", want, joined)
 		}
 	}
 }
@@ -145,6 +162,128 @@ func TestK3DDriverCaptureStateWritesArtifacts(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("capture commands missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestK3DDriverCaptureStatePersistsClosedImageResolutionEvidenceBeforeRejection(t *testing.T) {
+	const runtimeDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	tests := []struct {
+		name       string
+		runner     *composeCaptureRunner
+		wantStatus string
+	}{
+		{
+			name: "configured runtime mismatch",
+			runner: &composeCaptureRunner{
+				inspectIdentityOutput: `{}`,
+				k3dDaemonImageIDs:     "containerd://" + runtimeDigest + "\ncontainerd://" + runtimeDigest + "\ncontainerd://" + runtimeDigest + "\n",
+			},
+			wantStatus: "configured-runtime-mismatch",
+		},
+		{
+			name: "image ID unavailable",
+			runner: &composeCaptureRunner{
+				inspectIdentityOutput: `{}`,
+				k3dDaemonImageError:   errors.New("secret image command failure"),
+			},
+			wantStatus: "image-id-unavailable",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sink, err := artifacts.NewSink(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test", Metadata: map[string]string{
+				"imageOverride":          "local/mycel:head",
+				"nodeCount":              "3",
+				"requireImageProvenance": "true",
+			}}
+			err = (K3DDriver{Confirmed: true, Runner: test.runner}).CaptureState(context.Background(), environment, sink)
+			if err == nil || err.Error() != "daemon running image provenance is incomplete or heterogeneous" {
+				t.Fatalf("CaptureState() error=%v", err)
+			}
+			data, readErr := os.ReadFile(filepath.Join(sink.Root(), "environment", "daemon-image.json"))
+			if readErr != nil {
+				t.Fatalf("read daemon image evidence: %v", readErr)
+			}
+			if !bytes.Contains(data, []byte(`"resolutionStatus": "`+test.wantStatus+`"`)) || bytes.Contains(data, []byte("secret image command failure")) {
+				t.Fatalf("unsafe or incomplete image evidence: %s", data)
+			}
+		})
+	}
+}
+
+func TestK3DDriverCaptureStatePersistsConfiguredImageGraphBeforeMismatchRejection(t *testing.T) {
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const configDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	const otherRuntimeDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	runner := &composeCaptureRunner{
+		inspectIdentityOutput:         `{"id":"` + indexDigest + `","os":"linux","architecture":"arm64","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+		inspectPlatformOutputs:        map[string]string{"linux/arm64": `{"id":"` + manifestDigest + `","size":12345,"repoDigests":[]}`},
+		inspectPlatformManifestOutput: `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + configDigest + `"}}`,
+		k3dDaemonImageIDs:             "containerd://" + otherRuntimeDigest + "\ncontainerd://" + otherRuntimeDigest + "\ncontainerd://" + otherRuntimeDigest + "\n",
+	}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test", Metadata: map[string]string{
+		"imageOverride":          "local/mycel:head",
+		"nodeCount":              "3",
+		"requireImageProvenance": "true",
+	}}
+	err = (K3DDriver{Confirmed: true, Runner: runner}).CaptureState(context.Background(), environment, sink)
+	if err == nil || err.Error() != "daemon running image provenance is incomplete or heterogeneous" {
+		t.Fatalf("CaptureState() error=%v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(sink.Root(), "environment", "daemon-image.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, want := range []string{`"configuredPlatformManifestDigest": "` + manifestDigest + `"`, `"configuredConfigDigest": "` + configDigest + `"`, `"configuredPlatformSizeBytes": 12345`, `"resolutionStatus": "configured-runtime-mismatch"`} {
+		if !bytes.Contains(data, []byte(want)) {
+			t.Fatalf("configured image graph evidence missing %s: %s", want, data)
+		}
+	}
+}
+
+func TestK3DDriverCaptureStatePersistsEmulatorImageEvidenceBeforeRejection(t *testing.T) {
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const runtimeDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	runner := &composeCaptureRunner{
+		inspectIdentityOutput:  `{"id":"` + indexDigest + `","os":"linux","architecture":"arm64","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+		inspectPlatformOutputs: map[string]string{"linux/arm64": `{"id":"` + runtimeDigest + `","repoDigests":[]}`},
+		inspectOutput:          `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+		k3dDaemonImageIDs:      "containerd://" + runtimeDigest + "\ncontainerd://" + runtimeDigest + "\ncontainerd://" + runtimeDigest + "\n",
+		k3dPodNames:            "myceld-0\nmyceld-1\nmyceld-2\n",
+		k3dEmulatorImageError:  errors.New("secret emulator image command failure"),
+	}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test", Metadata: map[string]string{
+		"imageOverride":          "local/mycel:head",
+		"nodeCount":              "3",
+		"providerEmulator":       "true",
+		"providerEmulatorImage":  "local/mycel-provider-emulator:head",
+		"requireImageProvenance": "true",
+	}}
+	err = (K3DDriver{Confirmed: true, Runner: runner}).CaptureState(context.Background(), environment, sink)
+	if err == nil || err.Error() != "provider emulator running image provenance is incomplete or ambiguous" {
+		t.Fatalf("CaptureState() error=%v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(sink.Root(), "provider", "emulator-image.json"))
+	if readErr != nil {
+		t.Fatalf("read emulator image evidence: %v", readErr)
+	}
+	if !bytes.Contains(data, []byte(`"resolutionStatus": "image-id-unavailable"`)) || !bytes.Contains(data, []byte(`"expectedInstances": 1`)) || bytes.Contains(data, []byte("secret emulator image command failure")) {
+		t.Fatalf("unsafe or incomplete emulator image evidence: %s", data)
 	}
 }
 
@@ -199,10 +338,473 @@ func TestK3DDriverUpdateStatefulSetImageWaitsForRollout(t *testing.T) {
 
 type fakeRunner struct{ commands []string }
 
+type k3dListRunner struct{ output string }
+
+type k3dDeletionRunner struct {
+	commands      []string
+	clusterOutput string
+	remain        map[string]string
+}
+
+func (r *k3dDeletionRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	command := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, command)
+	if strings.Contains(command, "k3d cluster list") {
+		return executil.Result{Command: command, Stdout: r.clusterOutput}, nil
+	}
+	for key, output := range r.remain {
+		if strings.Contains(command, key) {
+			return executil.Result{Command: command, Stdout: output}, nil
+		}
+	}
+	return executil.Result{Command: command}, nil
+}
+
+type k3dDiagnosticRunner struct {
+	podNames  string
+	logOutput string
+	execError error
+}
+
+func (r k3dDiagnosticRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	command := executil.ShellCommand(name, args...)
+	if strings.Contains(command, "get pods -l app=myceld") {
+		return executil.Result{Command: command, Stdout: r.podNames}, nil
+	}
+	if strings.Contains(command, " exec ") {
+		return executil.Result{Command: command, Stdout: r.logOutput}, r.execError
+	}
+	return executil.Result{Command: command}, nil
+}
+
+func (r k3dListRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	return executil.Result{Command: executil.ShellCommand(name, args...), Stdout: r.output}, nil
+}
+
+type deletionRunner struct {
+	commands []string
+	remain   map[string]string
+}
+
+func (r *deletionRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	for kind, output := range r.remain {
+		if strings.Contains(cmd, kind) {
+			return executil.Result{Command: cmd, Stdout: output}, nil
+		}
+	}
+	return executil.Result{Command: cmd}, nil
+}
+
+type composeCaptureRunner struct {
+	commands                      []string
+	imageOutput                   string
+	imageError                    error
+	inspectOutput                 string
+	inspectIdentityOutput         string
+	inspectPlatformIdentityOutput string
+	diagnosticOutput              string
+	diagnosticError               error
+	k3dDaemonImageIDs             string
+	k3dDaemonImageError           error
+	k3dPodNames                   string
+	k3dEmulatorImageIDs           string
+	k3dEmulatorImageError         error
+	inspectPlatformOutputs        map[string]string
+	inspectPlatformManifestOutput string
+	inspectPlatformManifestError  error
+}
+
+func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, "docker image save") {
+		return executil.Result{Command: cmd, Stdout: r.inspectPlatformManifestOutput}, r.inspectPlatformManifestError
+	}
+	if strings.Contains(cmd, "get pods -l app=mycel-provider-emulator") && strings.Contains(cmd, "imageID") {
+		return executil.Result{Command: cmd, Stdout: r.k3dEmulatorImageIDs}, r.k3dEmulatorImageError
+	}
+	if strings.Contains(cmd, "get pods -l app=myceld") && strings.Contains(cmd, "imageID") {
+		return executil.Result{Command: cmd, Stdout: r.k3dDaemonImageIDs}, r.k3dDaemonImageError
+	}
+	if strings.Contains(cmd, "get pods -l app=myceld") && r.k3dPodNames != "" {
+		return executil.Result{Command: cmd, Stdout: r.k3dPodNames}, nil
+	}
+	if strings.Contains(cmd, " image inspect ") {
+		if strings.Contains(cmd, `"repoDigests"`) {
+			for platform, output := range r.inspectPlatformOutputs {
+				if strings.Contains(cmd, " --platform "+platform+" ") {
+					return executil.Result{Command: cmd, Stdout: output}, nil
+				}
+			}
+			if strings.Contains(cmd, " --platform linux/arm64 ") && r.inspectPlatformIdentityOutput != "" {
+				return executil.Result{Command: cmd, Stdout: r.inspectPlatformIdentityOutput}, nil
+			}
+			return executil.Result{Command: cmd, Stdout: r.inspectIdentityOutput}, nil
+		}
+		return executil.Result{Command: cmd, Stdout: r.inspectOutput}, nil
+	}
+	if strings.Contains(cmd, " exec -T ") && strings.Contains(cmd, "myceld.log") {
+		return executil.Result{Command: cmd, Stdout: r.diagnosticOutput}, r.diagnosticError
+	}
+	if strings.Contains(cmd, " images --format json ") {
+		if r.imageError != nil {
+			return executil.Result{Command: cmd, Stderr: r.imageError.Error()}, r.imageError
+		}
+		if r.imageOutput != "" {
+			return executil.Result{Command: cmd, Stdout: r.imageOutput}, nil
+		}
+		service := args[len(args)-1]
+		return executil.Result{Command: cmd, Stdout: `[{"ID":"sha256:` + service + `","ContainerName":"mlab-test-` + service + `-1","Repository":"local/mycel","Tag":"head"}]` + "\n"}, nil
+	}
+	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
+func TestConfiguredImageConfigDigestIsBoundedAndFailClosed(t *testing.T) {
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const configDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	for _, test := range []struct {
+		name   string
+		output string
+		err    error
+		want   string
+	}{
+		{name: "oci", output: `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + configDigest + `"}}`, want: configDigest},
+		{name: "docker v2", output: `{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"digest":"` + configDigest + `"}}`, want: configDigest},
+		{name: "index rejected", output: `{"mediaType":"application/vnd.oci.image.index.v1+json","config":{"digest":"` + configDigest + `"}}`},
+		{name: "malformed", output: `{`},
+		{name: "oversized", output: strings.Repeat("x", 1024*1024+1)},
+		{name: "producer failure", err: errors.New("secret save error")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &composeCaptureRunner{inspectPlatformManifestOutput: test.output, inspectPlatformManifestError: test.err}
+			if got := configuredImageConfigDigest(context.Background(), runner, indexDigest, manifestDigest, "linux/arm64", 1024); got != test.want {
+				t.Fatalf("configuredImageConfigDigest()=%q want %q", got, test.want)
+			}
+			if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "head -c 1048577") || !strings.Contains(commands, indexDigest) || !strings.Contains(commands, manifestDigest) {
+				t.Fatalf("config inspection was not immutable and bounded: %s", commands)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name, platform string
+		size           int64
+	}{
+		{name: "missing size", platform: "linux/arm64"},
+		{name: "oversized platform", platform: "linux/arm64", size: 512*1024*1024 + 1},
+		{name: "unsupported platform", platform: "linux/arm64/v8", size: 1024},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &composeCaptureRunner{inspectPlatformManifestOutput: `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + configDigest + `"}}`}
+			if got := configuredImageConfigDigest(context.Background(), runner, indexDigest, manifestDigest, test.platform, test.size); got != "" || len(runner.commands) != 0 {
+				t.Fatalf("unbounded config inspection was attempted: got=%q commands=%v", got, runner.commands)
+			}
+		})
+	}
+}
+
+func TestConfiguredImageConfigDigestPipelineContract(t *testing.T) {
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const configDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	blobPath := "blobs/sha256/" + strings.TrimPrefix(manifestDigest, "sha256:")
+	writeArchive := func(t *testing.T, member string, content []byte) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "image.tar")
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer := tar.NewWriter(file)
+		if err := writer.WriteHeader(&tar.Header{Name: member, Mode: 0o600, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(content); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	validManifest := []byte(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + configDigest + `"}}`)
+	for _, test := range []struct {
+		name       string
+		member     string
+		content    []byte
+		producerRC string
+		want       string
+	}{
+		{name: "selected child config", member: blobPath, content: validManifest, want: configDigest},
+		{name: "missing selected child", member: "blobs/sha256/" + strings.Repeat("d", 64), content: validManifest},
+		{name: "producer failure", member: blobPath, content: validManifest, producerRC: "7"},
+		{name: "manifest exceeds limit", member: blobPath, content: bytes.Repeat([]byte("x"), 1024*1024+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			archive := writeArchive(t, test.member, test.content)
+			binDir := t.TempDir()
+			dockerPath := filepath.Join(binDir, "docker")
+			script := "#!/bin/sh\ncat \"$FAKE_DOCKER_ARCHIVE\"\nexit \"${FAKE_DOCKER_EXIT:-0}\"\n"
+			if err := os.WriteFile(dockerPath, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FAKE_DOCKER_ARCHIVE", archive)
+			t.Setenv("FAKE_DOCKER_EXIT", test.producerRC)
+			got := configuredImageConfigDigest(context.Background(), executil.LocalRunner{}, indexDigest, manifestDigest, "linux/arm64", 10*1024*1024)
+			if got != test.want {
+				t.Fatalf("configuredImageConfigDigest()=%q want %q", got, test.want)
+			}
+		})
+	}
+	t.Run("blocking producer is cancelled", func(t *testing.T) {
+		binDir := t.TempDir()
+		dockerPath := filepath.Join(binDir, "docker")
+		if err := os.WriteFile(dockerPath, []byte("#!/bin/sh\nsleep 60\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		if got := configuredImageConfigDigest(ctx, executil.LocalRunner{}, indexDigest, manifestDigest, "linux/arm64", 10*1024*1024); got != "" {
+			t.Fatalf("blocking producer returned digest %q", got)
+		}
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("blocking image pipeline exceeded cancellation bound: %s", elapsed)
+		}
+	})
+}
+
+func TestCanonicalImagePlatformIsAllowlisted(t *testing.T) {
+	for _, test := range []struct {
+		os, architecture, want string
+	}{
+		{os: "linux", architecture: "arm64", want: "linux/arm64"},
+		{os: "LINUX", architecture: "AMD64", want: "linux/amd64"},
+		{os: "windows", architecture: "amd64"},
+		{os: "linux", architecture: "arm64/v8"},
+		{os: "linux", architecture: "unsafe value"},
+	} {
+		if got := canonicalImagePlatform(test.os, test.architecture); got != test.want {
+			t.Fatalf("canonicalImagePlatform(%q, %q)=%q want %q", test.os, test.architecture, got, test.want)
+		}
+	}
+}
+
+func TestRunningImageSourceEvidenceBindsProvenanceToEquivalentRuntimeDigest(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	const configDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	runner := &composeCaptureRunner{
+		inspectIdentityOutput: `{"id":"` + configDigest + `","os":"linux","architecture":"arm64","repoDigests":["registry.example/mycel@` + manifestDigest + `"]}`,
+		inspectOutput:         `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+	}
+	for _, runtimeID := range []string{"docker-pullable://registry.example/mycel@" + manifestDigest, "containerd://" + configDigest} {
+		evidence := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", runtimeID+"\n", nil)
+		if evidence.ID != canonicalImageDigest(runtimeID) || evidence.ConfiguredImageID != configDigest || len(evidence.RunningImageIDs) != 1 || evidence.ImageOverride != "mutable:configured" || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") || !runningImageMatchesConfigured(evidence) {
+			t.Fatalf("runtimeID=%q evidence=%+v", runtimeID, evidence)
+		}
+	}
+	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "docker image inspect "+configDigest) || strings.Count(commands, "image inspect mutable:configured") != 2 || !strings.Contains(commands, "image inspect --platform linux/arm64 "+configDigest) {
+		t.Fatalf("configured identity was not captured atomically before immutable provenance inspection: %s", commands)
+	}
+	mismatchDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	mismatch := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker-pullable://registry.example/mycel@"+mismatchDigest+"\n", nil)
+	if runningImageMatchesConfigured(mismatch) || mismatch.Provenance.CaptureStatus != "unavailable" {
+		t.Fatalf("configured/running mismatch accepted: %+v", mismatch)
+	}
+	localImport := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker-pullable://registry.example/mycel@"+mismatchDigest+"\n", map[string]string{mismatchDigest: configDigest})
+	if !runningImageMatchesConfigured(localImport) || !validImageProvenance(localImport.Provenance, "https://github.com/MycelDB/mycel") {
+		t.Fatalf("local runtime manifest was not bound through its config digest: %+v", localImport)
+	}
+	heterogeneous := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "docker://"+configDigest+"\ncontainerd://"+manifestDigest+"\n", nil)
+	if heterogeneous.ID != "" || len(heterogeneous.RunningImageIDs) != 2 || heterogeneous.Provenance.CaptureStatus != "unavailable" {
+		t.Fatalf("heterogeneous evidence accepted: %+v", heterogeneous)
+	}
+}
+
+func TestRunningImageSourceEvidenceBindsK3DPlatformManifestFromLocalOCIIndex(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	const indexDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, test := range []struct {
+		architecture           string
+		platformManifestDigest string
+		configDigest           string
+	}{
+		{architecture: "arm64", platformManifestDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", configDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+		{architecture: "amd64", platformManifestDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", configDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+	} {
+		t.Run(test.architecture, func(t *testing.T) {
+			platform := "linux/" + test.architecture
+			runner := &composeCaptureRunner{
+				inspectIdentityOutput:         `{"id":"` + indexDigest + `","os":"linux","architecture":"` + test.architecture + `","repoDigests":["local/mycel@` + indexDigest + `"]}`,
+				inspectPlatformOutputs:        map[string]string{platform: `{"id":"` + test.platformManifestDigest + `","size":12345,"repoDigests":[]}`},
+				inspectPlatformManifestOutput: `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"` + test.configDigest + `"}}`,
+				inspectOutput:                 `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+			}
+			evidence := runningImageSourceEvidence(context.Background(), runner, "local/mycel:head", "containerd://"+test.configDigest+"\n", nil)
+			if evidence.ConfiguredImageID != indexDigest || evidence.Platform != platform || len(evidence.ConfiguredDigests) != 3 || evidence.ConfiguredPlatformManifestDigest != test.platformManifestDigest || evidence.ConfiguredConfigDigest != test.configDigest || evidence.ConfiguredPlatformSizeBytes != 12345 || evidence.ID != test.configDigest || !runningImageMatchesConfigured(evidence) || !validImageProvenance(evidence.Provenance, "https://github.com/MycelDB/mycel") {
+				t.Fatalf("platform runtime manifest was not bound to configured OCI index: %+v", evidence)
+			}
+			commands := strings.Join(runner.commands, "\n")
+			if !strings.Contains(commands, "docker image inspect --platform "+platform+" "+indexDigest) || !strings.Contains(commands, "docker image save") || !strings.Contains(commands, test.platformManifestDigest) {
+				t.Fatalf("platform identity or config was not inspected: %s", commands)
+			}
+		})
+	}
+}
+
+func TestRunningImageSourceEvidenceDoesNotResolvePlatformFromMutableTagAfterIdentityFailure(t *testing.T) {
+	const platformManifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	runner := &composeCaptureRunner{
+		inspectIdentityOutput:         `{}`,
+		inspectPlatformIdentityOutput: `{"id":"` + platformManifestDigest + `","repoDigests":[]}`,
+		inspectOutput:                 `{"org.opencontainers.image.revision":"0123456789abcdef0123456789abcdef01234567","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+	}
+	evidence := runningImageSourceEvidence(context.Background(), runner, "mutable:configured", "containerd://"+platformManifestDigest+"\n", nil)
+	if evidence.ConfiguredImageID != "" || runningImageMatchesConfigured(evidence) || evidence.Provenance.CaptureStatus != "unavailable" {
+		t.Fatalf("failed configured identity was recovered through mutable tag: %+v", evidence)
+	}
+	commands := strings.Join(runner.commands, "\n")
+	if strings.Contains(commands, "--platform") || len(runner.commands) != 1 {
+		t.Fatalf("mutable tag was reinspected after identity failure: %s", commands)
+	}
+}
+
+func TestK3DRuntimeConfigDigestsResolveManifestToConfig(t *testing.T) {
+	const manifestDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const configDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	runner := &runtimeManifestRunner{manifest: `{"config":{"digest":"` + configDigest + `"}}`}
+	resolved := k3dRuntimeConfigDigests(context.Background(), runner, Environment{Name: "acceptance"}, "docker-pullable://registry.example/mycel@"+manifestDigest+"\n")
+	if resolved[manifestDigest] != configDigest {
+		t.Fatalf("resolved=%+v", resolved)
+	}
+	if !strings.Contains(strings.Join(runner.commands, "\n"), "docker exec k3d-acceptance-server-0 sh -c") || !strings.Contains(strings.Join(runner.commands, "\n"), "content get "+manifestDigest+" | head -c 1048576") {
+		t.Fatalf("commands=%v", runner.commands)
+	}
+}
+
+type runtimeManifestRunner struct {
+	manifest string
+	commands []string
+}
+
+func (r *runtimeManifestRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	return executil.Result{Command: cmd, Stdout: r.manifest}, nil
+}
+
+func TestCaptureK3DDaemonDiagnosticsIsClosedBoundedAndFailClosed(t *testing.T) {
+	outputKeyHash := strings.Repeat("a", 64)
+	raw := strings.Repeat("x", 2*1024*1024) + "\n" + `{"level":"INFO","msg":"procedure_inference_publication_stage","stage":"recovery_run_persistence","result":"failed","category":"unavailable","run_id":"secret-run","attempt_id":"secret-attempt","output_key_hash":"` + outputKeyHash + `","prompt":"secret-prompt","error":"secret-error"}`
+	environment := Environment{Context: "k3d-test", Namespace: "default", Metadata: map[string]string{"nodeCount": "2"}}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := captureK3DDaemonDiagnostics(context.Background(), k3dDiagnosticRunner{podNames: "myceld-0\nmyceld-1\n", logOutput: raw}, environment, sink); err != nil {
+		t.Fatal(err)
+	}
+	for _, pod := range []string{"myceld-0", "myceld-1"} {
+		data, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "diagnostics", pod+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		for _, required := range []string{"recovery_run_persistence", "unavailable", outputKeyHash} {
+			if !strings.Contains(text, required) {
+				t.Fatalf("diagnostic missing %q: %s", required, text)
+			}
+		}
+		for _, forbidden := range []string{"secret-run", "secret-attempt", "secret-prompt", "secret-error"} {
+			if strings.Contains(text, forbidden) {
+				t.Fatalf("diagnostic leaked %q: %s", forbidden, text)
+			}
+		}
+	}
+	failedSink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := captureK3DDaemonDiagnostics(context.Background(), k3dDiagnosticRunner{podNames: "myceld-0\nmyceld-1\n", execError: errors.New("secret command failure")}, environment, failedSink); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("unavailable capture error=%v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(failedSink.Root(), "environment", "diagnostics", "myceld-0.json"))
+	if err != nil || !strings.Contains(string(data), `"captureStatus": "unavailable"`) || strings.Contains(string(data), "secret command failure") {
+		t.Fatalf("unsafe unavailable diagnostic data=%s err=%v", data, err)
+	}
+}
+
+func TestK3DVerifyDeletedChecksClusterAndDockerResourceAbsence(t *testing.T) {
+	environment := Environment{Name: "target-cluster"}
+	runner := &k3dDeletionRunner{clusterOutput: `[{"name":"other-cluster"}]`}
+	verification, err := (K3DDriver{Runner: runner}).VerifyDeleted(context.Background(), environment)
+	if err != nil || !verification.Supported || !verification.Completed || verification.Clusters != 0 || verification.Containers != 0 || verification.Networks != 0 || verification.Volumes != 0 {
+		t.Fatalf("verification=%+v err=%v", verification, err)
+	}
+	commands := strings.Join(runner.commands, "\n")
+	for _, expected := range []string{"docker ps -aq --filter label=app=k3d --filter label=k3d.cluster=target-cluster", "docker network ls -q --filter 'name=^k3d-target-cluster$'", "docker volume ls -q --filter 'name=^k3d-target-cluster-images$'"} {
+		if !strings.Contains(commands, expected) {
+			t.Fatalf("missing %q absence check: %s", expected, commands)
+		}
+	}
+
+	tests := []struct {
+		name          string
+		clusterOutput string
+		remain        map[string]string
+		count         func(DeletionVerification) int
+	}{
+		{name: "cluster", clusterOutput: `[{"name":"target-cluster"}]`, count: func(v DeletionVerification) int { return v.Clusters }},
+		{name: "container", clusterOutput: `[]`, remain: map[string]string{" ps ": "container-id\n"}, count: func(v DeletionVerification) int { return v.Containers }},
+		{name: "network", clusterOutput: `[]`, remain: map[string]string{" network ": "network-id\n"}, count: func(v DeletionVerification) int { return v.Networks }},
+		{name: "volume", clusterOutput: `[]`, remain: map[string]string{" volume ": "volume-id\n"}, count: func(v DeletionVerification) int { return v.Volumes }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verification, err := (K3DDriver{Runner: &k3dDeletionRunner{clusterOutput: test.clusterOutput, remain: test.remain}}).VerifyDeleted(context.Background(), environment)
+			if err == nil || verification.Completed || test.count(verification) != 1 {
+				t.Fatalf("verification=%+v err=%v", verification, err)
+			}
+		})
+	}
+}
+
+func TestComposeVerifyDeletedChecksProjectResources(t *testing.T) {
+	environment := Environment{Metadata: map[string]string{"projectName": "bounded-project"}}
+	t.Run("absent", func(t *testing.T) {
+		runner := &deletionRunner{}
+		verification, err := (ComposeDriver{Runner: runner}).VerifyDeleted(context.Background(), environment)
+		if err != nil || !verification.Supported || !verification.Completed || verification.Containers != 0 || verification.Networks != 0 || verification.Volumes != 0 {
+			t.Fatalf("verification=%+v err=%v", verification, err)
+		}
+		joined := strings.Join(runner.commands, "\n")
+		if strings.Count(joined, "label=com.docker.compose.project=bounded-project") != 3 {
+			t.Fatalf("verification commands=%s", joined)
+		}
+	})
+	t.Run("remaining", func(t *testing.T) {
+		runner := &deletionRunner{remain: map[string]string{" ps ": "container-id\n"}}
+		verification, err := (ComposeDriver{Runner: runner}).VerifyDeleted(context.Background(), environment)
+		if err == nil || verification.Completed || verification.Containers != 1 {
+			t.Fatalf("verification=%+v err=%v", verification, err)
+		}
+	})
 }
 
 func TestSelectDriverValidatesRequiredCapabilities(t *testing.T) {
@@ -254,7 +856,7 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 	}
 	runner := &fakeRunner{}
 	driver := ComposeDriver{Confirmed: true, Runner: runner}
-	environmentSpec := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "projectName": "mlab-test", "serviceNames": []any{"myceld-a", "myceld-b"}, "grpcPorts": []any{19091, 19092}}}
+	environmentSpec := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "projectName": "mlab-test", "serviceNames": []any{"myceld-a", "myceld-b"}, "grpcPorts": []any{19091, 19092}, "imageOverride": "local/mycel:head"}}
 	if err := driver.Preflight(context.Background(), environmentSpec); err != nil {
 		t.Fatalf("Preflight() error=%v", err)
 	}
@@ -271,9 +873,233 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 		t.Fatalf("RestartNode() error=%v", err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"docker compose version", "docker compose -f " + composeFile + " -p mlab-test down --volumes --remove-orphans", "docker compose -f " + composeFile + " -p mlab-test up -d --wait", "docker compose -f " + composeFile + " -p mlab-test restart myceld-b"} {
+	for _, want := range []string{"docker compose version", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test down --volumes --remove-orphans", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test up -d --wait", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test restart myceld-b"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
+func TestComposeImageProvenanceIsAllowlisted(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	runner := &composeCaptureRunner{inspectOutput: `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64","unsafe":"secret"}`}
+	provenance := (ComposeDriver{Runner: runner}).imageProvenance(context.Background(), "sha256:test")
+	if provenance.CaptureStatus != "completed" || provenance.Revision != revision || provenance.ContextDigest != contextDigest || provenance.Dirty != "false" || provenance.Source != "https://github.com/MycelDB/mycel" || provenance.BuildCommand != "docker-buildx-local-linux-arm64" || !validImageProvenance(provenance, "https://github.com/MycelDB/mycel") {
+		t.Fatalf("provenance=%+v", provenance)
+	}
+	incomplete := provenance
+	incomplete.Dirty = "true"
+	if validImageProvenance(incomplete, "https://github.com/MycelDB/mycel") {
+		t.Fatalf("dirty provenance accepted: %+v", incomplete)
+	}
+	encoded, err := json.Marshal(provenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("unsafe")) || bytes.Contains(encoded, []byte("secret")) {
+		t.Fatalf("provenance leaked arbitrary labels: %s", encoded)
+	}
+}
+
+func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
+	environment := Environment{Name: "mlab-test", Driver: "compose", Metadata: map[string]string{"composeFile": "compose.yml", "projectName": "mlab-test", "serviceNames": "myceld-a,myceld-b", "imageOverride": "local/mycel:head"}}
+	for _, tc := range []struct {
+		name         string
+		imageOutput  string
+		imageError   error
+		wantError    bool
+		wantFragment string
+	}{
+		{name: "complete"},
+		{name: "command failure", imageError: errors.New("docker unavailable"), wantError: true, wantFragment: "capture compose image"},
+		{name: "malformed JSON", imageOutput: "{not-json", wantError: true, wantFragment: "parse compose image"},
+		{name: "empty output", imageOutput: " \n", wantError: true, wantFragment: "parse compose image"},
+		{name: "missing record", imageOutput: "[]\n", wantError: true, wantFragment: "image evidence"},
+		{name: "empty ID", imageOutput: `[{"ContainerName":"mlab-test-myceld-a-1"}]`, wantError: true, wantFragment: "image evidence"},
+		{name: "empty container name", imageOutput: `[{"ID":"sha256:test"}]`, wantError: true, wantFragment: "image evidence"},
+		{name: "multiple records", imageOutput: `[{"ID":"sha256:a","ContainerName":"a"},{"ID":"sha256:b","ContainerName":"b"}]`, wantError: true, wantFragment: "exactly one"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &composeCaptureRunner{imageOutput: tc.imageOutput, imageError: tc.imageError}
+			driver := ComposeDriver{Confirmed: true, Runner: runner}
+			sink, err := artifacts.NewSink(t.TempDir())
+			if err != nil {
+				t.Fatalf("NewSink() error=%v", err)
+			}
+			err = driver.CaptureState(context.Background(), environment, sink)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), tc.wantFragment) {
+					t.Fatalf("CaptureState() error=%v, want fragment %q", err, tc.wantFragment)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CaptureState() error=%v", err)
+			}
+			joinedCommands := strings.Join(runner.commands, "\n")
+			for _, service := range []string{"myceld-a", "myceld-b"} {
+				for _, want := range []string{"logs --no-color --tail=5000 " + service, "exec -T " + service + " sh -c", "tail -c 1048576"} {
+					if !strings.Contains(joinedCommands, want) {
+						t.Fatalf("CaptureState commands missing %q\n%s", want, joinedCommands)
+					}
+				}
+			}
+			data, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "compose-images.jsonl"))
+			if err != nil {
+				t.Fatalf("read compose image evidence: %v", err)
+			}
+			for _, want := range []string{"sha256:myceld-a", "sha256:myceld-b", "local/mycel:head"} {
+				if !strings.Contains(string(data), want) {
+					t.Fatalf("compose image evidence missing %q: %s", want, data)
+				}
+			}
+		})
+	}
+}
+
+func TestComposeClosedCaptureSkipsRawLogsAndFailsClosed(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	environment := Environment{Name: "mlab-test", Driver: "compose", Metadata: map[string]string{
+		"composeFile":            "compose.yml",
+		"projectName":            "mlab-test",
+		"serviceNames":           "myceld-a",
+		"imageOverride":          "local/mycel:head",
+		"requireImageProvenance": "true",
+	}}
+	outputKeyHash := strings.Repeat("a", 64)
+	runner := &composeCaptureRunner{
+		inspectOutput:    `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-arm64"}`,
+		diagnosticOutput: `{"level":"INFO","msg":"procedure_inference_publication_stage","stage":"graph_commit","result":"failed","category":"failed_precondition","output_key_hash":"` + outputKeyHash + `","prompt":"secret-prompt","error":"secret-error"}`,
+	}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (ComposeDriver{Confirmed: true, Runner: runner}).CaptureState(context.Background(), environment, sink); err != nil {
+		t.Fatal(err)
+	}
+	commands := strings.Join(runner.commands, "\n")
+	if strings.Contains(commands, " logs --no-color") || !strings.Contains(commands, "tail -c 1048576") {
+		t.Fatalf("closed capture requested raw or unbounded logs:\n%s", commands)
+	}
+	diagnostic, err := os.ReadFile(filepath.Join(sink.Root(), "environment", "logs", "myceld-a-procedure-inference.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prohibited := range []string{"secret-prompt", "secret-error", `"prompt"`, `"error"`} {
+		if bytes.Contains(diagnostic, []byte(prohibited)) {
+			t.Fatalf("closed diagnostic leaked %q: %s", prohibited, diagnostic)
+		}
+	}
+
+	failedRunner := &composeCaptureRunner{inspectOutput: runner.inspectOutput, diagnosticError: errors.New("secret diagnostic failure")}
+	failedSink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = (ComposeDriver{Confirmed: true, Runner: failedRunner}).CaptureState(context.Background(), environment, failedSink)
+	if err == nil || err.Error() != "daemon diagnostic capture is incomplete" {
+		t.Fatalf("closed diagnostic failure error=%v", err)
+	}
+	unavailable, readErr := os.ReadFile(filepath.Join(failedSink.Root(), "environment", "logs", "myceld-a-procedure-inference.json"))
+	if readErr != nil || !bytes.Contains(unavailable, []byte(`"captureStatus": "unavailable"`)) || bytes.Contains(unavailable, []byte("secret diagnostic failure")) {
+		t.Fatalf("unsafe unavailable evidence=%s err=%v", unavailable, readErr)
+	}
+}
+
+func TestComposeDeletePreservesGeneratedOverrideUntilSuccessfulRetry(t *testing.T) {
+	dir := t.TempDir()
+	generated := filepath.Join(dir, "override.yml")
+	if err := os.WriteFile(generated, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &composeDeleteRetryRunner{failures: 1}
+	driver := ComposeDriver{Runner: runner}
+	environment := Environment{Metadata: map[string]string{
+		"composeFile":                   "base.yml",
+		"composeFiles":                  strings.Join([]string{"base.yml", generated}, string(os.PathListSeparator)),
+		"projectName":                   "retry-test",
+		"generatedProviderEmulatorFile": generated,
+	}}
+	if err := driver.Delete(context.Background(), environment); err == nil {
+		t.Fatal("first delete unexpectedly succeeded")
+	}
+	if _, err := os.Stat(generated); err != nil {
+		t.Fatalf("generated override removed before successful retry: %v", err)
+	}
+	if err := driver.Delete(context.Background(), environment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(generated); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("generated override retained after successful delete: %v", err)
+	}
+	if runner.calls != 2 {
+		t.Fatalf("delete calls=%d", runner.calls)
+	}
+}
+
+type composeDeleteRetryRunner struct {
+	failures int
+	calls    int
+}
+
+func (r *composeDeleteRetryRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	if strings.Contains(cmd, " down --volumes --remove-orphans") {
+		r.calls++
+		if r.failures > 0 {
+			r.failures--
+			return executil.Result{Command: cmd}, errors.New("temporary delete failure")
+		}
+	}
+	return executil.Result{Command: cmd}, nil
+}
+
+func TestBoundedDaemonDiagnosticCommandPropagatesProducerFailure(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "myceld.log")
+	if err := os.WriteFile(input, []byte("diagnostic\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeTail := filepath.Join(dir, "tail")
+	if err := os.WriteFile(fakeTail, []byte("#!/bin/sh\nif [ \"$1\" = \"-c\" ]; then exit 7; fi\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("sh", "-c", boundedDaemonDiagnosticCommand(input))
+	command.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := command.Run(); err == nil {
+		t.Fatal("byte-bounding producer failure was masked by the line-bound stage")
+	}
+}
+
+func TestParseProcedureInferenceDaemonDiagnosticsIsClosedAndSecretFree(t *testing.T) {
+	outputKeyHash := strings.Repeat("a", 64)
+	raw := strings.Repeat("x", 2*1024*1024) + "\n" + strings.Join([]string{
+		`{"time":"2026-10-24T13:40:22.1Z","level":"INFO","msg":"procedure_inference_publication_stage","stage":"graph_commit","result":"failed","category":"failed_precondition","run_id":"run-secret","attempt_id":"attempt-secret","claim_owner_node_id":2,"claim_version":3,"authorization_revision":4,"global_authorization_revision":5,"space_authorization_revision":6,"output_key_hash":"` + outputKeyHash + `","graph_revision":7,"claim_token":"never-persist","prompt":"never-persist","error":"never-persist"}`,
+		`{"level":"WARN","msg":"automation_worker_process_pending_failed","category":"operation_failed","error":"never-persist"}`,
+		`{"level":"INFO","msg":"procedure_inference_publication_stage","stage":"raw-stage","result":"raw-result","category":"raw-category","run_id":"raw-run","attempt_id":"raw-attempt"}`,
+		`{"level":"INFO","msg":"unrelated","secret":"never-persist"}`,
+	}, "\n")
+	evidence := parseProcedureInferenceDaemonDiagnostics("myceld-a", raw)
+	if evidence.CaptureStatus != "completed" || len(evidence.Records) != 3 {
+		t.Fatalf("evidence=%+v", evidence)
+	}
+	first := evidence.Records[0]
+	if first.Stage != "graph_commit" || first.Result != "failed" || first.Category != "failed_precondition" || first.ClaimOwnerNodeID != 2 || first.ClaimVersion != 3 || first.AuthorizationRevision != 4 || first.GlobalAuthorizationRevision != 5 || first.SpaceAuthorizationRevision != 6 || first.OutputKeyHash != outputKeyHash || first.GraphRevision != 7 || len(first.RunIDHash) != 64 || len(first.AttemptIDHash) != 64 {
+		t.Fatalf("first diagnostic=%+v", first)
+	}
+	if evidence.Records[2].Stage != "invalid" || evidence.Records[2].Result != "invalid" || evidence.Records[2].Category != "invalid" {
+		t.Fatalf("unknown values were not closed: %+v", evidence.Records[2])
+	}
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prohibited := range []string{"never-persist", "run-secret", "attempt-secret", "raw-stage", "raw-result", "raw-category", "raw-run", "raw-attempt", "claim_token", "prompt", "error"} {
+		if bytes.Contains(encoded, []byte(prohibited)) {
+			t.Fatalf("diagnostic evidence leaked %q: %s", prohibited, encoded)
 		}
 	}
 }

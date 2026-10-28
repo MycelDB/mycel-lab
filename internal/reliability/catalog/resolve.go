@@ -6,12 +6,18 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"gopkg.in/yaml.v3"
 )
 
 type ResolveOptions struct {
-	ProfileDirs []string
+	ProfileDirs                 []string
+	ProviderProfileOverride     string
+	ProviderDryRun              bool
+	DeferLiveProviderValidation bool
+	ProviderManifest            provider.CapabilityManifest
+	ProviderLookupEnv           func(string) (string, bool)
 }
 
 func ResolveScenarioFile(path string, opts ResolveOptions) (spec.ResolvedScenario, error) {
@@ -82,6 +88,36 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 		return spec.ResolvedScenario{}, fmt.Errorf("resolved cluster invalid: %w", err)
 	}
 
+	selectedProviderRef := strings.TrimSpace(scenario.ProviderProfileRef)
+	selection := "scenario"
+	if override := strings.TrimSpace(opts.ProviderProfileOverride); override != "" {
+		selectedProviderRef = override
+		selection = "cli-override"
+	}
+	var resolvedProvider *provider.ResolvedProfile
+	if selectedProviderRef != "" {
+		profile, source, err := resolveProviderProfile(selectedProviderRef, scenarioDir, opts.ProfileDirs)
+		if err != nil {
+			return spec.ResolvedScenario{}, fmt.Errorf("provider profile: %w", err)
+		}
+		requiredCapabilities := []string{"embedding"}
+		if scenario.ProcedureInference != nil {
+			requiredCapabilities = []string{"generation"}
+		}
+		deferLiveValidation := opts.DeferLiveProviderValidation && profile.Mode == provider.ModeLive && scenario.Semantic != nil && scenario.ProcedureInference == nil
+		if opts.DeferLiveProviderValidation && profile.Mode == provider.ModeLive && !deferLiveValidation {
+			return spec.ResolvedScenario{}, fmt.Errorf("provider profile %q: deferred live validation is supported only for semantic embedding scenarios with authenticated completion", selectedProviderRef)
+		}
+		resolved, err := provider.Resolve(profile, source, provider.ResolveOptions{DryRun: opts.ProviderDryRun, DeferLiveProviderValidation: deferLiveValidation, Selection: selection, RequiredCapabilities: requiredCapabilities, Manifest: opts.ProviderManifest, LookupEnv: opts.ProviderLookupEnv})
+		if err != nil {
+			return spec.ResolvedScenario{}, fmt.Errorf("provider profile %q: %w", selectedProviderRef, err)
+		}
+		resolvedProvider = &resolved
+	}
+	if scenario.ProcedureInference != nil && (resolvedProvider == nil || resolvedProvider.Profile.Capabilities.Generation == nil) {
+		return spec.ResolvedScenario{}, fmt.Errorf("procedureInference requires a resolved generation capability")
+	}
+
 	groups := make([]spec.ResolvedActorGroup, 0, len(scenario.ActorGroups))
 	for _, group := range scenario.ActorGroups {
 		profile, err := resolveActorProfile(group.ProfileRef, scenarioDir, opts.ProfileDirs)
@@ -96,16 +132,20 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 	}
 
 	return spec.ResolvedScenario{
-		TypeMeta:    spec.TypeMeta{APIVersion: spec.APIVersion, Kind: "ResolvedScenario"},
-		Metadata:    scenario.Metadata,
-		Seed:        scenario.Seed,
-		Environment: scenario.Environment,
-		ClusterRef:  scenario.ClusterRef,
-		Cluster:     cluster,
-		ActorGroups: groups,
-		Phases:      scenario.Phases,
-		Assertions:  scenario.Assertions,
-		Artifacts:   scenario.Artifacts,
+		TypeMeta:           spec.TypeMeta{APIVersion: spec.APIVersion, Kind: "ResolvedScenario"},
+		Metadata:           scenario.Metadata,
+		Seed:               scenario.Seed,
+		Environment:        scenario.Environment,
+		ClusterRef:         scenario.ClusterRef,
+		Cluster:            cluster,
+		ProviderProfileRef: selectedProviderRef,
+		ProviderProfile:    resolvedProvider,
+		Semantic:           scenario.Semantic,
+		ProcedureInference: scenario.ProcedureInference,
+		ActorGroups:        groups,
+		Phases:             scenario.Phases,
+		Assertions:         scenario.Assertions,
+		Artifacts:          scenario.Artifacts,
 	}, nil
 }
 
@@ -123,6 +163,14 @@ func resolveClusterProfile(ref, scenarioDir string, profileDirs []string) (spec.
 		return spec.ClusterProfile{}, fmt.Errorf("%s is %T, want ClusterProfile", path, loaded)
 	}
 	return profile, nil
+}
+
+func resolveProviderProfile(ref, scenarioDir string, profileDirs []string) (provider.Profile, []byte, error) {
+	path, err := resolveRef(ref, scenarioDir, profileDirs, "provider-profiles")
+	if err != nil {
+		return provider.Profile{}, nil, err
+	}
+	return provider.LoadFile(path)
 }
 
 func resolveActorProfile(ref, scenarioDir string, profileDirs []string) (spec.ActorProfile, error) {

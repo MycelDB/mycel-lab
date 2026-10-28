@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: semantic-live-provider
+  description: SGT9 direct live OpenAI-compatible embedding acceptance.
+scenarios:
+  - path: ../scenarios/compose-semantic-live-provider/compose-semantic-live-provider.yaml
+execution:
+  parallelism: 1
+  stopOnFailure: true

@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-procedure-inference-recovery
+  description: Clustered restart/replay acceptance for procedure-inference ledgers and publication identity.
+scenarios:
+  - path: ../scenarios/k3d-procedure-inference-recovery/k3d-procedure-inference-recovery.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

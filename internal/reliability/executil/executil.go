@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type Result struct {
@@ -20,8 +21,15 @@ type Runner interface {
 
 type LocalRunner struct{}
 
-func (LocalRunner) Run(ctx context.Context, name string, args ...string) (Result, error) {
+func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
+	configureCommandCancellation(cmd)
+	cmd.WaitDelay = 2 * time.Second
+	return cmd
+}
+
+func (LocalRunner) Run(ctx context.Context, name string, args ...string) (Result, error) {
+	cmd := CommandContext(ctx, name, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

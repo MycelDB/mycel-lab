@@ -2,6 +2,12 @@ package events
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -11,7 +17,118 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestSemanticBudgetRetainedScopeUsesAdvertisedPageSizeAndRejectsFilterViolations(t *testing.T) {
+	if got := advertisedSemanticProviderBudgetPageSize(500); got != 500 {
+		t.Fatalf("advertised page size=%d, want 500", got)
+	}
+	if got := advertisedSemanticProviderBudgetPageSize(0); got != 100 {
+		t.Fatalf("fallback page size=%d, want 100", got)
+	}
+	now := time.Now().UTC()
+	resources := &provision.SemanticResources{SpaceID: "space-a", SemanticRuleID: "rule-a", EmbeddingBindingKey: "search", ProviderBudgetScopeID: "scope-a", ExpectedProviderBudget: &adminv1.SemanticProviderBudgetPolicy{CorrelationId: "run-a"}}
+	valid := &adminv1.SemanticProviderBudgetScopeReference{BudgetScopeId: "scope-a", SemanticRuleId: "rule-a", EmbeddingBindingKey: "search", CorrelationId: "run-a", CreatedAt: timestamppb.New(now), RetentionUntil: timestamppb.New(now.Add(time.Hour))}
+	if err := validateRetainedSemanticProviderBudgetScope(valid, resources); err != nil {
+		t.Fatalf("valid scope rejected: %v", err)
+	}
+	invalid := *valid
+	invalid.SemanticRuleId = "wrong-rule"
+	if err := validateRetainedSemanticProviderBudgetScope(&invalid, resources); err == nil {
+		t.Fatal("retained scope filter violation was accepted")
+	}
+	invalidTimestamp := *valid
+	invalidTimestamp.RetentionUntil = &timestamppb.Timestamp{Seconds: 253402300800}
+	if err := validateRetainedSemanticProviderBudgetScope(&invalidTimestamp, resources); err == nil {
+		t.Fatal("invalid retained scope timestamp was accepted")
+	}
+}
+
+func TestSemanticBudgetSnapshotCannotChangeAfterLeadingEmptyPage(t *testing.T) {
+	first := &adminv1.ListSemanticProviderBudgetAttemptEventsResponse{EarliestRetainedEventSequence: 4, SnapshotHighWaterSequence: 10, NextPageToken: "next"}
+	var earliest, snapshot uint64
+	if err := captureSemanticProviderBudgetSnapshot(0, first, &earliest, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if earliest != 4 || snapshot != 10 {
+		t.Fatalf("snapshot capture earliest=%d high-water=%d", earliest, snapshot)
+	}
+	second := &adminv1.ListSemanticProviderBudgetAttemptEventsResponse{SnapshotHighWaterSequence: 11}
+	if err := captureSemanticProviderBudgetSnapshot(1, second, &earliest, &snapshot); err == nil {
+		t.Fatal("snapshot change after leading empty page was accepted")
+	}
+}
+
+func TestSemanticBudgetEventTimestampsRejectMalformedEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	valid := &adminv1.SemanticProviderBudgetAttemptEvent{RecordedAt: timestamppb.New(now), ReservedUntil: timestamppb.New(now.Add(time.Minute))}
+	if !semanticBudgetEventTimestampsValid(valid) {
+		t.Fatal("valid event timestamps were rejected")
+	}
+	invalidRecorded := *valid
+	invalidRecorded.RecordedAt = &timestamppb.Timestamp{Seconds: 253402300800}
+	if semanticBudgetEventTimestampsValid(&invalidRecorded) {
+		t.Fatal("invalid recorded_at was accepted")
+	}
+	invalidReservation := *valid
+	invalidReservation.ReservedUntil = &timestamppb.Timestamp{Nanos: -1}
+	if semanticBudgetEventTimestampsValid(&invalidReservation) {
+		t.Fatal("invalid reserved_until was accepted")
+	}
+}
+
+func TestSemanticBudgetReconciliationRejectsUnknownEnumsAndOverflow(t *testing.T) {
+	if knownSemanticBudgetScopeState(adminv1.SemanticProviderBudgetScopeState(99)) || knownSemanticBudgetDenialReason(adminv1.SemanticProviderBudgetDenialReason(99)) || knownSemanticBudgetAttemptState(adminv1.SemanticProviderBudgetAttemptState(99)) || knownSemanticBudgetOutcome(adminv1.SemanticProviderBudgetOutcomeCategory(99)) {
+		t.Fatal("unknown semantic provider budget enum was accepted")
+	}
+	if !semanticBudgetTerminalOutcomeMatches(&adminv1.SemanticProviderBudgetAttemptEvent{State: adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_SUCCEEDED, OutcomeCategory: adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_SUCCESS, OutcomeKnown: true}) {
+		t.Fatal("valid terminal outcome pair was rejected")
+	}
+	if semanticBudgetTerminalOutcomeMatches(&adminv1.SemanticProviderBudgetAttemptEvent{State: adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_SUCCEEDED, OutcomeCategory: adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS}) {
+		t.Fatal("contradictory terminal outcome pair was accepted")
+	}
+	ambiguous := &adminv1.SemanticProviderBudgetAttemptEvent{State: adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_FAILED, OutcomeCategory: adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS, ReservedInputTokens: 10, ChargedInputTokens: 10, ReservedProviderMillis: 20, ChargedProviderMillis: 20, ReservedCostMicros: 30, ChargedCostMicros: 30}
+	if !semanticBudgetTerminalOutcomeMatches(ambiguous) || !semanticBudgetUnknownOutcomeIsConservative(ambiguous) {
+		t.Fatal("conservative transport-ambiguous failed terminal was rejected")
+	}
+	canceledAmbiguous := &adminv1.SemanticProviderBudgetAttemptEvent{State: adminv1.SemanticProviderBudgetAttemptState_SEMANTIC_PROVIDER_BUDGET_ATTEMPT_STATE_CANCELED, OutcomeCategory: adminv1.SemanticProviderBudgetOutcomeCategory_SEMANTIC_PROVIDER_BUDGET_OUTCOME_CATEGORY_AMBIGUOUS, ReservedInputTokens: 10, ChargedInputTokens: 10, ReservedProviderMillis: 20, ChargedProviderMillis: 20, ReservedCostMicros: 30, ChargedCostMicros: 30}
+	if !semanticBudgetTerminalOutcomeMatches(canceledAmbiguous) || !semanticBudgetUnknownOutcomeIsConservative(canceledAmbiguous) {
+		t.Fatal("conservative canceled-ambiguous terminal was rejected")
+	}
+	ambiguous.UsageKnown = true
+	ambiguous.ChargedInputTokens = 1
+	if semanticBudgetUnknownOutcomeIsConservative(ambiguous) {
+		t.Fatal("undercharged ambiguous terminal was accepted")
+	}
+	if value, overflow := checkedSemanticBudgetSum(math.MaxInt64, 1, false); value != math.MaxInt64 || !overflow {
+		t.Fatalf("checked sum=(%d,%t), want saturated overflow", value, overflow)
+	}
+}
+
+func TestDriverRuntimeCleansSensitiveSystemBackupHostDirectories(t *testing.T) {
+	if safeSystemBackupHostDir(string(os.PathSeparator)) {
+		t.Fatal("filesystem root accepted as backup cleanup path")
+	}
+	hostDir := t.TempDir()
+	archive := filepath.Join(hostDir, "system-backup.tar")
+	if err := os.WriteFile(archive, []byte("sensitive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewDriverRuntime(nil, env.Environment{})
+	runtime.systemBackups["default"] = SystemBackupOperationResult{HostDir: hostDir}
+	if err := runtime.CleanupSensitiveHostArtifacts(); err != nil {
+		t.Fatalf("CleanupSensitiveHostArtifacts() error=%v", err)
+	}
+	if _, err := os.Stat(hostDir); !os.IsNotExist(err) {
+		t.Fatalf("host backup directory still exists: %v", err)
+	}
+	runtime.systemBackups["unsafe"] = SystemBackupOperationResult{HostDir: string(os.PathSeparator)}
+	if err := runtime.CleanupSensitiveHostArtifacts(); err == nil {
+		t.Fatal("unsafe sensitive cleanup path did not fail closed")
+	}
+}
 
 func TestEventScheduleStartsAtPhaseBoundary(t *testing.T) {
 	phase := spec.PhaseSpec{Name: "outage", Events: []spec.EventSpec{{Type: "pod-stop", Target: map[string]any{"pod": "myceld-1"}}}}
@@ -24,6 +141,26 @@ func TestEventScheduleStartsAtPhaseBoundary(t *testing.T) {
 	}
 	if recorder.records[0].Type != "event-started" || recorder.records[0].PhaseName != "outage" || recorder.records[0].EventType != "pod-stop" {
 		t.Fatalf("first record not event-started at phase boundary: %+v", recorder.records[0])
+	}
+}
+
+func TestLiveSemanticLocalRuntimeRedactsDryRunTargets(t *testing.T) {
+	phase := spec.PhaseSpec{Name: "search", Events: []spec.EventSpec{{Type: "semantic-search-assert", Target: map[string]any{"query": "classification-sensitive-query", "expectedNodeIds": []string{"private-node-id"}, "limit": 1}}}}
+	recorder := &recordingEventRecorder{}
+	if err := (LocalRuntime{LiveSemanticProvider: true}).ExecutePhaseEvents(context.Background(), phase, true, recorder); err != nil {
+		t.Fatalf("ExecutePhaseEvents() error=%v", err)
+	}
+	encoded, err := json.Marshal(recorder.records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sensitive := range []string{"classification-sensitive-query", "private-node-id", "expectedNodeIds"} {
+		if strings.Contains(string(encoded), sensitive) {
+			t.Fatalf("dry-run records leaked %q: %s", sensitive, encoded)
+		}
+	}
+	if !strings.Contains(string(encoded), "sensitiveSemanticInputsRedacted") {
+		t.Fatalf("dry-run records lack redaction marker: %s", encoded)
 	}
 }
 
@@ -218,12 +355,166 @@ func TestClusterRecoveryRequiresExactRaftGroupIdentities(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := ClusterRecoveryNodeResult{}
-			evaluateClusterRaftGroups(&result, tc.groups, expected)
+			evaluateClusterRaftGroups(&result, tc.groups, expected, false, false)
 			if result.RaftGroupsReady || result.RaftGroupsError == "" || !tc.check(result) {
 				t.Fatalf("result=%+v, want exact identity failure", result)
 			}
 		})
 	}
+}
+
+func TestClusterRecoveryRejectsApplyLagWhenZeroLagRequired(t *testing.T) {
+	result := ClusterRecoveryNodeResult{}
+	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy", CommitIndex: recoveryUint64(10), AppliedIndex: recoveryUint64(9), LastIndex: 10}}, []string{"system"}, true, true)
+	if result.RaftGroupsReady || len(result.LaggingGroups) != 1 || result.LaggingGroups[0] != "system:1" || !strings.Contains(result.RaftGroupsError, "apply lag") {
+		t.Fatalf("result=%+v, want zero-lag rejection", result)
+	}
+}
+
+func recoveryUint64(value uint64) *uint64 {
+	return &value
+}
+
+func TestClusterRecoveryRejectsMissingCommittedProgressEvidence(t *testing.T) {
+	result := ClusterRecoveryNodeResult{}
+	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy"}}, []string{"system"}, true, true)
+	if result.RaftGroupsReady || !reflect.DeepEqual(result.MissingProgressGroups, []string{"system"}) || !strings.Contains(result.RaftGroupsError, "missing committed progress") {
+		t.Fatalf("result=%+v, want missing progress rejection", result)
+	}
+}
+
+func TestClusterRecoveryFenceRejectsHealthyGroupsWithoutProgressFields(t *testing.T) {
+	driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
+		if strings.Contains(command, "cluster readiness check") {
+			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+		}
+		return env.ExecResult{Stdout: `{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy"}]}`}, nil
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	result, err := executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{"ordinals": []any{0}, "timeout": "10ms", "interval": "1ms", "minimumStablePolls": 1, "requireZeroApplyLag": true, "requireConsistentProgress": true})
+	if err == nil || result.Ready || result.RejectionCounts.ProgressMissing == 0 || result.LastRejectedPoll == nil || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].Reasons, []string{"progress-missing"}) {
+		t.Fatalf("result=%+v error=%v, want fail-closed missing progress fence", result, err)
+	}
+}
+
+func TestClusterRecoveryRequiresConfiguredConsecutiveStablePolls(t *testing.T) {
+	raftCalls := 0
+	driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
+		if strings.Contains(command, "cluster readiness check") {
+			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+		}
+		if strings.Contains(command, "cluster raft-groups") {
+			raftCalls++
+			return env.ExecResult{Stdout: fmt.Sprintf(`{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy","commit_index":%d,"applied_index":%d,"last_index":%d}]}`, raftCalls, raftCalls, raftCalls)}, nil
+		}
+		return env.ExecResult{Stdout: `{}`}, nil
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	runtime := NewDriverRuntimeWithScenario(driver, env.Environment{Name: "test", Driver: "test"}, scenario, nil)
+	phase := spec.PhaseSpec{Name: "recovery", Events: []spec.EventSpec{{Type: "cluster-recovery-wait", Target: map[string]any{"ordinals": []any{0}, "timeout": "100ms", "interval": "1ms", "minimumStablePolls": 3, "requireZeroApplyLag": true, "requireConsistentProgress": true}}}}
+	recorder := &recordingEventRecorder{}
+	if err := runtime.ExecutePhaseEvents(context.Background(), phase, false, recorder); err != nil {
+		t.Fatal(err)
+	}
+	payload := recorder.records[1].Payload["clusterRecovery"].(ClusterRecoveryWaitResult)
+	if payload.Attempts != 3 || payload.StablePolls != 3 || payload.MinimumStablePolls != 3 || !payload.RequireZeroApplyLag || !payload.RequireConsistentProgress {
+		t.Fatalf("payload=%+v, want three consecutive stable polls", payload)
+	}
+}
+
+func TestClusterRecoveryRejectsRegressingProgress(t *testing.T) {
+	result := ClusterRecoveryNodeResult{RaftGroupsReady: true, progress: map[string]clusterRaftProgress{"system": {CommitIndex: 9, AppliedIndex: 9}}}
+	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: 10, AppliedIndex: 10}})
+	if result.RaftGroupsReady || len(result.RegressingGroups) != 1 || result.RegressingGroups[0] != "system" || !strings.Contains(result.RaftGroupsError, "regressing") {
+		t.Fatalf("result=%+v, want committed progress regression rejection", result)
+	}
+}
+
+func TestClusterRecoveryRegressionEvidencePreservesUint64Exactly(t *testing.T) {
+	const high = uint64(9007199254740994)
+	result := ClusterRecoveryNodeResult{RaftGroupsReady: true, progress: map[string]clusterRaftProgress{"system": {CommitIndex: high - 1, AppliedIndex: high - 2}}}
+	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: high, AppliedIndex: high}})
+	want := []ClusterRecoveryProgressRegression{{GroupID: "system", ObservedCommitIndex: "9007199254740993", HighWaterCommitIndex: "9007199254740994", ObservedAppliedIndex: "9007199254740992", HighWaterAppliedIndex: "9007199254740994"}}
+	if !reflect.DeepEqual(result.ProgressRegressions, want) {
+		t.Fatalf("regressions=%+v, want exact decimal evidence %+v", result.ProgressRegressions, want)
+	}
+}
+
+func TestClusterRecoveryAllowsUncommittedLastIndexRegression(t *testing.T) {
+	result := ClusterRecoveryNodeResult{}
+	evaluateClusterRaftGroups(&result, []clusterRaftGroup{{GroupID: "system", LeaderNodeID: 1, Health: "healthy", CommitIndex: recoveryUint64(10), AppliedIndex: recoveryUint64(10), LastIndex: 9}}, []string{"system"}, true, true)
+	enforceClusterProgressConsistency(&result, map[string]clusterRaftProgress{"system": {CommitIndex: 10, AppliedIndex: 10}})
+	if !result.RaftGroupsReady || len(result.RegressingGroups) != 0 {
+		t.Fatalf("result=%+v, want uncommitted last-index replacement retained as diagnostics only", result)
+	}
+}
+
+func TestClusterRecoveryAllowsLastIndexReplacementAcrossPolls(t *testing.T) {
+	raftCalls := 0
+	driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
+		if strings.Contains(command, "cluster readiness check") {
+			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+		}
+		if strings.Contains(command, "cluster raft-groups") {
+			raftCalls++
+			lastIndex := 10
+			if raftCalls > 1 {
+				lastIndex = 9
+			}
+			return env.ExecResult{Stdout: fmt.Sprintf(`{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy","commit_index":10,"applied_index":10,"last_index":%d}]}`, lastIndex)}, nil
+		}
+		return env.ExecResult{Stdout: `{}`}, nil
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	result, err := executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{"ordinals": []any{0}, "timeout": "100ms", "interval": "1ms", "minimumStablePolls": 3, "requireZeroApplyLag": true, "requireConsistentProgress": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.Attempts != 3 || result.RejectedPolls != 0 {
+		t.Fatalf("result=%+v, want last-index replacement to remain diagnostic only", result)
+	}
+}
+
+func TestClusterRecoveryProgressHighWaterCannotBeForgotten(t *testing.T) {
+	run := func(t *testing.T, sequence []int, timeout string) (ClusterRecoveryWaitResult, error) {
+		t.Helper()
+		raftCalls := 0
+		driver := &recordingDriver{execResult: func(command string) (env.ExecResult, error) {
+			if strings.Contains(command, "cluster readiness check") {
+				return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+			}
+			if strings.Contains(command, "cluster raft-groups") {
+				index := raftCalls
+				if index >= len(sequence) {
+					index = len(sequence) - 1
+				}
+				raftCalls++
+				value := sequence[index]
+				return env.ExecResult{Stdout: fmt.Sprintf(`{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy","commit_index":%d,"applied_index":%d,"last_index":%d}]}`, value, value, value)}, nil
+			}
+			return env.ExecResult{Stdout: `{}`}, nil
+		}}
+		scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+		return executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{"ordinals": []any{0}, "timeout": timeout, "interval": "1ms", "minimumStablePolls": 3, "requireConsistentProgress": true})
+	}
+	t.Run("regressed plateau times out", func(t *testing.T) {
+		result, err := run(t, []int{10, 9}, "20ms")
+		if err == nil || result.Ready {
+			t.Fatalf("result=%+v error=%v, want retained high-water timeout", result, err)
+		}
+		if result.RejectedPolls == 0 || result.RejectionCounts.ProgressRollback == 0 || result.LastRejectedPoll == nil || result.LastRejectedPoll.Attempt > result.Attempts || len(result.LastRejectedPoll.Nodes) != 1 || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].Reasons, []string{"progress-rollback"}) || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].ProgressRegressions, []ClusterRecoveryProgressRegression{{GroupID: "system", ObservedCommitIndex: "9", HighWaterCommitIndex: "10", ObservedAppliedIndex: "9", HighWaterAppliedIndex: "10"}}) {
+			t.Fatalf("result=%+v, want bounded prior-poll rollback evidence", result)
+		}
+	})
+	t.Run("recovery to high water can stabilize", func(t *testing.T) {
+		result, err := run(t, []int{10, 9, 10, 10, 10}, "100ms")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Ready || result.Attempts != 5 || result.StablePolls != 3 {
+			t.Fatalf("result=%+v, want three stable polls only after high-water recovery", result)
+		}
+	})
 }
 
 func TestDriverRuntimeRecordsPartialClusterRecoveryDiagnosticsOnFailure(t *testing.T) {
@@ -269,6 +560,42 @@ func TestClusterRecoveryTimeoutCancelsBlockedInspection(t *testing.T) {
 	}
 }
 
+func TestClusterRecoveryRejectionEvidenceDistinguishesEmptyTopology(t *testing.T) {
+	node := ClusterRecoveryNodeResult{ReadinessReady: true}
+	evaluateClusterRaftGroups(&node, nil, []string{"system"}, true, true)
+	result := ClusterRecoveryWaitResult{Attempts: 1, Nodes: []ClusterRecoveryNodeResult{node}}
+	recordClusterRecoveryRejection(&result)
+	if result.RejectionCounts.RaftInspection != 0 || result.RejectionCounts.Topology != 1 || result.LastRejectedPoll == nil || result.LastRejectedPoll.RejectedNodeCount != 1 || !reflect.DeepEqual(result.LastRejectedPoll.Nodes[0].Reasons, []string{"topology"}) {
+		t.Fatalf("result=%+v, want decoded empty topology attributed only to topology", result)
+	}
+}
+
+func TestClusterRecoveryLastRejectedPollBoundsNodeSummaries(t *testing.T) {
+	result := ClusterRecoveryWaitResult{Attempts: 1, Nodes: make([]ClusterRecoveryNodeResult, 40)}
+	for ordinal := range result.Nodes {
+		result.Nodes[ordinal].Ordinal = ordinal
+	}
+	recordClusterRecoveryRejection(&result)
+	if result.RejectionCounts.Readiness != 40 || result.LastRejectedPoll == nil || result.LastRejectedPoll.RejectedNodeCount != 40 || len(result.LastRejectedPoll.Nodes) != 32 || !result.LastRejectedPoll.NodesTruncated {
+		t.Fatalf("result=%+v, want all counters and 32 bounded node summaries", result)
+	}
+}
+
+func TestClusterRecoveryCannotSucceedAfterDeadline(t *testing.T) {
+	driver := &recordingDriver{execWithContext: func(ctx context.Context, command string) (env.ExecResult, error) {
+		if strings.Contains(command, "cluster readiness check") {
+			<-ctx.Done()
+			return env.ExecResult{Stdout: `{"client_ready":true}`}, nil
+		}
+		return env.ExecResult{Stdout: `{"groups":[{"group_id":"system","leader_node_id":1,"health":"healthy"}]}`}, nil
+	}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	result, err := executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{"ordinals": []any{0}, "timeout": "5ms", "interval": "1ms"})
+	if err == nil || result.Ready || !strings.Contains(err.Error(), "within 5ms") {
+		t.Fatalf("result=%+v error=%v, want timeout before accepting valid late output", result, err)
+	}
+}
+
 func TestDriverRuntimeSeedsCommonFolioAutomation(t *testing.T) {
 	driver := &recordingDriver{}
 	resources := &provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "graph-writers-0", GroupName: "graph-writers", BehaviorType: "graph-transaction", SpaceID: "space-1", DomainID: "11111111-1111-4111-8111-111111111111", PrincipalID: "22222222-2222-4222-8222-222222222222"}}}
@@ -282,6 +609,31 @@ func TestDriverRuntimeSeedsCommonFolioAutomation(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commonfolio seed command missing %q in:\n%s", want, joined)
 		}
+	}
+}
+
+func TestCommonFolioAutomationJSONSupportsVersionedProcedureDefinitions(t *testing.T) {
+	assignment := provision.ActorAssignment{ActorID: "graph-writers-0", SpaceID: "space-1", DomainID: "11111111-1111-4111-8111-111111111111", PrincipalID: "22222222-2222-4222-8222-222222222222"}
+	procedureJSON, bindingJSON, err := commonFolioAutomationJSON(map[string]any{
+		"procedureVersion": 2,
+		"procedurePrompt":  "Return the updated CommonFolio page summary.",
+	}, assignment)
+	if err != nil {
+		t.Fatalf("commonFolioAutomationJSON() error=%v", err)
+	}
+	var procedure map[string]any
+	if err := json.Unmarshal([]byte(procedureJSON), &procedure); err != nil {
+		t.Fatalf("decode procedure JSON: %v", err)
+	}
+	if procedure["version"] != float64(2) || procedure["prompt"] != "Return the updated CommonFolio page summary." {
+		t.Fatalf("procedure=%v, want version 2 and updated prompt", procedure)
+	}
+	var binding map[string]any
+	if err := json.Unmarshal([]byte(bindingJSON), &binding); err != nil {
+		t.Fatalf("decode binding JSON: %v", err)
+	}
+	if binding["version"] != float64(2) || binding["procedure_version"] != float64(2) {
+		t.Fatalf("binding=%v, want version 2 and procedure_version 2", binding)
 	}
 }
 
@@ -313,8 +665,21 @@ func (r *recordingEventRecorder) RecordRuntimeEvent(_ context.Context, record Re
 	return nil
 }
 
+func TestLiveSemanticResultSanitizerDropsIdentifiersAndOutputs(t *testing.T) {
+	raw := SemanticSearchEvidence{Query: "query-secret", Results: []SemanticSearchResultItem{{NodeID: "node-secret"}}}
+	sanitized := sanitizeLiveSemanticResult("semantic-search-assert", raw)
+	encoded, err := json.Marshal(sanitized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "query-secret") || strings.Contains(string(encoded), "node-secret") {
+		t.Fatalf("sanitized result leaked semantic identifiers: %s", encoded)
+	}
+}
+
 type recordingDriver struct {
 	restarted       []int
+	rollingRestarts int
 	imageUpdate     env.StatefulSetImageUpdateRequest
 	execCommands    []string
 	execResult      func(command string) (env.ExecResult, error)
@@ -352,7 +717,10 @@ func (d *recordingDriver) RestartNode(_ context.Context, _ env.Environment, node
 	d.restarted = append(d.restarted, node.Ordinal)
 	return nil
 }
-func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error { return nil }
+func (d *recordingDriver) RollingRestart(context.Context, env.Environment) error {
+	d.rollingRestarts++
+	return nil
+}
 func (d *recordingDriver) UpdateStatefulSetImage(_ context.Context, _ env.Environment, req env.StatefulSetImageUpdateRequest) (env.ExecResult, error) {
 	d.imageUpdate = req
 	return env.ExecResult{Stdout: "updated\n"}, nil

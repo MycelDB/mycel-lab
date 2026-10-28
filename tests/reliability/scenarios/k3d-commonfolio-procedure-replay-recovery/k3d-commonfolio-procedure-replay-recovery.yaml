@@ -1,0 +1,151 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-commonfolio-procedure-replay-recovery
+  description: Deterministic retained-PVC recovery after an older CommonFolio procedure.create is replayed over an updated procedure.
+seed: 23639139
+environment:
+  driver: k3d
+  namespace: mycel-commonfolio-procedure-replay
+  options:
+    clusterNamePrefix: mlab-cfpr
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
+    consolePortBase: 19731
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - node-restart
+      - logs
+clusterRef: raft-3-node
+clusterOverrides:
+  image: myceldb/mycel:v0.20.0
+  raft:
+    partitionCount: 16
+    compaction:
+      mode: off
+actorGroups:
+  - name: graph-writers
+    profileRef: commonfolio-graph-committer
+    count: 3
+    rate:
+      mode: group-total
+      commitsPerSecond: 3
+  - name: readers
+    profileRef: gql-reader
+    count: 3
+    target:
+      actorGroups:
+        - graph-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 3
+phases:
+  - name: create-procedure-a
+    duration: 4s
+    events:
+      - type: commonfolio-automation-seed
+        target:
+          writerGroup: graph-writers
+          limit: 3
+          procedureVersion: 1
+          procedurePrompt: "Summarize the CommonFolio page entry using definition A."
+          debounce: 1s
+  - name: update-procedure-b
+    duration: 4s
+    events:
+      - type: commonfolio-automation-seed
+        target:
+          writerGroup: graph-writers
+          limit: 3
+          procedureVersion: 2
+          procedurePrompt: "Summarize the CommonFolio page entry using definition B."
+          debounce: 1s
+  - name: generate-retained-procedure-state
+    duration: 20s
+    actorGroupOverrides:
+      graph-writers:
+        rate:
+          mode: group-total
+          commitsPerSecond: 12
+      readers:
+        rate:
+          mode: group-total
+          queriesPerSecond: 6
+  - name: prove-updated-procedure-before-replay
+    duration: 2s
+    events:
+      - type: commonfolio-automation-diagnostics
+        target:
+          writerGroup: graph-writers
+          limit: 3
+          runLimit: 20
+  - name: retained-pvc-procedure-recovery
+    duration: 2s
+    events:
+      - type: node-restart
+        target:
+          ordinalSequence: [0, 1]
+        repeat: 2
+        interval: 2s
+    outcome:
+      availability: expected-degradation
+  - name: wait-for-complete-cluster-recovery
+    duration: 1s
+    events:
+      - type: cluster-recovery-wait
+        target:
+          ordinals: [0, 1, 2]
+          expectedGroups: 17
+          timeout: 15m
+          interval: 5s
+          commandTimeout: 10s
+    outcome:
+      availability: expected-degradation
+  - name: post-recovery-workload
+    duration: 20s
+    actorGroupOverrides:
+      graph-writers:
+        rate:
+          mode: group-total
+          commitsPerSecond: 9
+      readers:
+        rate:
+          mode: group-total
+          queriesPerSecond: 6
+    assertions:
+      requireWorkloadProgress: true
+  - name: collect-recovery-diagnostics
+    duration: 2s
+    events:
+      - type: commonfolio-automation-diagnostics
+        target:
+          writerGroup: graph-writers
+          limit: 3
+          runLimit: 100
+      - type: log-assert-absent
+        target:
+          selector: app=myceld
+          tail: -1
+          since: 20m
+          patterns:
+            - 'procedure.create'
+            - 'already exists with different content'
+            - restore raft snapshot and replay committed entries
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 15m
+    healthConvergenceInterval: 5s
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: true
