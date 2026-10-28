@@ -8,6 +8,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The SGT9 unauthorized-search control now captures daemon-owned provider-budget evidence through one reusable, directly authenticated administrative observer instead of reusing the semantic controller actor token; the negative actor remains access-token-only with zero login or refresh calls.
 - Deferred live semantic-rule creation now proves the exact payload and scoped `semantic.manage` authorization through a bounded read-only validation RPC before the single create attempt. Only transient `Unauthenticated` validation failures retry; semantic mutations are never retried.
 - Cross-daemon semantic budget reads now establish one bounded direct admin session on each visited peer instead of presenting a primary daemon's potentially node-local access token to another daemon.
 - The SGT9 unauthorized-search control now verifies the pre-provisioned session issued on the negative actor's assigned daemon instead of creating a second Raft-backed login session, remains read-only during the probe, captures before/after daemon budget evidence on authentication and search failures when a scope is configured, explicitly requires that evidence in the live-provider scenario, and retains a safe stage discriminator with aggregate usage and gRPC-category evidence. Credential-free deterministic fixtures exercise the same node-local authorization path without fabricating an unavailable budget scope.
