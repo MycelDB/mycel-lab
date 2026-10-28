@@ -120,6 +120,7 @@ phases:
       - type: semantic-unauthorized-search
         target:
           actorGroup: semantic-outsider
+          requireProviderBudgetEvidence: true
   - name: update-delete-lifecycle
     duration: 1ms
     events:
