@@ -56,6 +56,51 @@ RELEASE_DESTRUCTIVE_RUN = re.compile(
     r"            --artifact-root \"\$ARTIFACT_ROOT\"$",
     re.MULTILINE,
 )
+MINIO_HELPER_IMAGE = "docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff"
+MC_HELPER_IMAGE = "docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0"
+
+
+def exact_block(block: str) -> re.Pattern[str]:
+    return re.compile(r"^" + re.escape(block) + r"$", re.MULTILINE)
+
+
+def helper_preflight_pattern(architecture: str) -> re.Pattern[str]:
+    label = architecture.upper()
+    block = f'''      - name: Verify immutable {label} object-store helpers
+        env:
+          MINIO_IMAGE: {MINIO_HELPER_IMAGE}
+          MINIO_MC_IMAGE: {MC_HELPER_IMAGE}
+        run: |
+          set -euo pipefail
+          docker pull "$MINIO_IMAGE"
+          docker pull "$MINIO_MC_IMAGE"
+          test "$(docker image inspect "$MINIO_IMAGE" --format '{{{{.Os}}}}/{{{{.Architecture}}}}')" = linux/{architecture}
+          test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{{{.Os}}}}/{{{{.Architecture}}}}')" = linux/{architecture}
+          test "$(docker image inspect "$MINIO_IMAGE" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')" = 07c3a429bfed433e49018cb0f78a52145d4bedeb
+          test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')" = 7394ce0dd2a80935aded936b09fa12cbb3cb8096
+          test "$(docker image inspect "$MINIO_IMAGE" --format '{{{{index .Config.Labels "io.myceldb.source.dirty"}}}}')" = false
+          test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{{{index .Config.Labels "io.myceldb.source.dirty"}}}}')" = false
+          docker run --rm "$MINIO_IMAGE" --version | grep -F 'RELEASE.2025-09-07T16-13-09Z (commit-id=07c3a429bfed433e49018cb0f78a52145d4bedeb)'
+          docker run --rm "$MINIO_MC_IMAGE" --version | grep -F 'RELEASE.2025-08-13T08-35-41Z (commit-id=7394ce0dd2a80935aded936b09fa12cbb3cb8096)'
+'''.rstrip("\n")
+    return exact_block(block)
+
+
+LIVE_HELPER_RUN_ENV = exact_block(
+    f'''        env:
+          ARTIFACT_ROOT: ${{{{ runner.temp }}}}/mycel-lab-semantic-live
+          DAEMON_IMAGE: ${{{{ inputs.daemon_image }}}}
+          MINIO_IMAGE: {MINIO_HELPER_IMAGE}
+          MINIO_MC_IMAGE: {MC_HELPER_IMAGE}
+          OPENAI_API_KEY: ${{{{ secrets.OPENAI_API_KEY }}}}'''
+)
+RELEASE_HELPER_RUN_ENV = exact_block(
+    f'''        env:
+          ARTIFACT_ROOT: ${{{{ runner.temp }}}}/mycel-lab-cluster-release-gate
+          DAEMON_IMAGE: ${{{{ inputs.daemon_image }}}}
+          MINIO_IMAGE: {MINIO_HELPER_IMAGE}
+          MINIO_MC_IMAGE: {MC_HELPER_IMAGE}'''
+)
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -100,6 +145,40 @@ def check_live_arm64_preflight(live: str, failures: list[str]) -> None:
         "semantic-live.yml: live-semantic ARM64 preflight must precede checkout/action use and secret exposure",
         failures,
     )
+
+
+def check_helper_images(
+    workflow: str,
+    job_name: str,
+    architecture: str,
+    run_env_pattern: re.Pattern[str],
+    workflow_name: str,
+    failures: list[str],
+) -> None:
+    job = job_block(workflow, job_name)
+    if job is None:
+        return
+
+    preflight = helper_preflight_pattern(architecture).search(job)
+    run_env = run_env_pattern.search(job)
+    destructive = job.find("--confirm-destructive")
+    secret = job.find(LIVE_SECRET)
+
+    require(preflight is not None, f"{workflow_name}: {job_name} requires the exact immutable {architecture} helper-image preflight", failures)
+    require(run_env is not None, f"{workflow_name}: {job_name} must pass the preflighted helper digests to the protected run step", failures)
+    require(
+        preflight is not None and destructive >= 0 and preflight.start() < destructive,
+        f"{workflow_name}: helper-image preflight must precede destructive execution",
+        failures,
+    )
+    if secret >= 0:
+        require(
+            preflight is not None and preflight.start() < secret,
+            f"{workflow_name}: helper-image preflight must precede credential exposure",
+            failures,
+        )
+    require(job.count(f"MINIO_IMAGE: {MINIO_HELPER_IMAGE}") == 2, f"{workflow_name}: MinIO helper digest must appear exactly in preflight and protected run env", failures)
+    require(job.count(f"MINIO_MC_IMAGE: {MC_HELPER_IMAGE}") == 2, f"{workflow_name}: mc helper digest must appear exactly in preflight and protected run env", failures)
 
 
 def check_release_amd64_preflight(release: str, failures: list[str]) -> None:
@@ -181,6 +260,8 @@ def main() -> int:
 
     check_live_arm64_preflight(live, failures)
     check_release_amd64_preflight(release, failures)
+    check_helper_images(live, "live-semantic", "arm64", LIVE_HELPER_RUN_ENV, "semantic-live.yml", failures)
+    check_helper_images(release, "cluster-release-gate", "amd64", RELEASE_HELPER_RUN_ENV, "release-gate.yml", failures)
     require("secrets.OPENAI_API_KEY" in live, "semantic-live.yml: protected OpenAI secret is required", failures)
     require(live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: secret must be scoped to one run step", failures)
     require("maxRequests: 128" in live and "maxInputTokens: 20000" in live and "maxEstimatedCostMicros: 1000000" in live and "totalTimeout: 5m" in live, "semantic-live.yml: fixed live ceilings are required", failures)

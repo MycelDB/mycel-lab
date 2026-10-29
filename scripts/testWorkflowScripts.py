@@ -71,6 +71,109 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("semantic-live.yml: live-semantic must use the native ARM64 hosted runner", failures)
         self.assertIn("semantic-live.yml: live-semantic requires the exact native ARM64 host preflight", failures)
 
+    def check_helper_policy(self, text: str, live: bool) -> list[str]:
+        failures: list[str] = []
+        if live:
+            checkWorkflows.check_helper_images(
+                text,
+                "live-semantic",
+                "arm64",
+                checkWorkflows.LIVE_HELPER_RUN_ENV,
+                "semantic-live.yml",
+                failures,
+            )
+        else:
+            checkWorkflows.check_helper_images(
+                text,
+                "cluster-release-gate",
+                "amd64",
+                checkWorkflows.RELEASE_HELPER_RUN_ENV,
+                "release-gate.yml",
+                failures,
+            )
+        return failures
+
+    def test_helper_preflights_are_exact_and_precede_protected_execution(self) -> None:
+        self.assertEqual(self.check_helper_policy(self.live, True), [])
+        self.assertEqual(self.check_helper_policy(self.release, False), [])
+
+    def test_removed_commented_or_mutated_helper_preflight_is_rejected(self) -> None:
+        for text, live, architecture, workflow in (
+            (self.live, True, "arm64", "semantic-live.yml"),
+            (self.release, False, "amd64", "release-gate.yml"),
+        ):
+            with self.subTest(workflow=workflow):
+                pattern = checkWorkflows.helper_preflight_pattern(architecture)
+                match = pattern.search(text)
+                self.assertIsNotNone(match)
+                assert match is not None
+                block = match.group(0)
+                removed = text[: match.start()] + text[match.end() :]
+                commented = text[: match.start()] + "\n".join(f"# {line}" for line in block.splitlines()) + text[match.end() :]
+                mutated_digest = text.replace(checkWorkflows.MINIO_HELPER_IMAGE, "docker.io/myceldb/mycel-minio-test-helper@sha256:" + "0" * 64, 1)
+                mutated_platform = block.replace(f"linux/{architecture}", "linux/ppc64le", 1)
+                mutated_platform_text = text[: match.start()] + mutated_platform + text[match.end() :]
+                message = f"{workflow}: {'live-semantic' if live else 'cluster-release-gate'} requires the exact immutable {architecture} helper-image preflight"
+                self.assertIn(message, self.check_helper_policy(removed, live))
+                self.assertIn(message, self.check_helper_policy(commented, live))
+                self.assertIn(message, self.check_helper_policy(mutated_digest, live))
+                self.assertIn(message, self.check_helper_policy(mutated_platform_text, live))
+
+    def test_late_helper_preflight_is_rejected(self) -> None:
+        for text, live, architecture, workflow in (
+            (self.live, True, "arm64", "semantic-live.yml"),
+            (self.release, False, "amd64", "release-gate.yml"),
+        ):
+            with self.subTest(workflow=workflow):
+                match = checkWorkflows.helper_preflight_pattern(architecture).search(text)
+                self.assertIsNotNone(match)
+                assert match is not None
+                block = match.group(0)
+                moved = text[: match.start()] + text[match.end() :] + "\n" + block + "\n"
+                self.assertIn(
+                    f"{workflow}: helper-image preflight must precede destructive execution",
+                    self.check_helper_policy(moved, live),
+                )
+
+    def test_helper_preflight_decoy_job_cannot_mask_protected_job(self) -> None:
+        for text, live, architecture, workflow in (
+            (self.live, True, "arm64", "semantic-live.yml"),
+            (self.release, False, "amd64", "release-gate.yml"),
+        ):
+            with self.subTest(workflow=workflow):
+                match = checkWorkflows.helper_preflight_pattern(architecture).search(text)
+                self.assertIsNotNone(match)
+                assert match is not None
+                without_real = text[: match.start()] + text[match.end() :]
+                decoy = (
+                    "jobs:\n"
+                    "  helper-preflight-decoy:\n"
+                    "    runs-on: ubuntu-24.04\n"
+                    "    steps:\n"
+                    f"{match.group(0)}\n"
+                )
+                with_decoy = without_real.replace("jobs:\n", decoy, 1)
+                self.assertIn(
+                    f"{workflow}: {'live-semantic' if live else 'cluster-release-gate'} requires the exact immutable {architecture} helper-image preflight",
+                    self.check_helper_policy(with_decoy, live),
+                )
+
+    def test_preflighted_helper_digests_must_be_bound_to_run_step(self) -> None:
+        for text, live, run_env, workflow, job in (
+            (self.live, True, checkWorkflows.LIVE_HELPER_RUN_ENV, "semantic-live.yml", "live-semantic"),
+            (self.release, False, checkWorkflows.RELEASE_HELPER_RUN_ENV, "release-gate.yml", "cluster-release-gate"),
+        ):
+            with self.subTest(workflow=workflow):
+                match = run_env.search(text)
+                self.assertIsNotNone(match)
+                assert match is not None
+                mutated = match.group(0).replace(checkWorkflows.MC_HELPER_IMAGE, "docker.io/myceldb/mycel-mc-test-helper:mutable", 1)
+                mutated_text = text[: match.start()] + mutated + text[match.end() :]
+                self.assertIn(
+                    f"{workflow}: {job} must pass the preflighted helper digests to the protected run step",
+                    self.check_helper_policy(mutated_text, live),
+                )
+
     def check_amd64_policy(self, text: str) -> list[str]:
         failures: list[str] = []
         checkWorkflows.check_release_amd64_preflight(text, failures)

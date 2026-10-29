@@ -90,6 +90,22 @@ jobs:
           test "$(docker image inspect "$DAEMON_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$DAEMON_REF"
           test "$(docker image inspect "$DAEMON_IMAGE" --format '{{index .Config.Labels "io.myceldb.source.dirty"}}')" = false
           test "$(docker image inspect "$DAEMON_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.source"}}')" = https://github.com/MycelDB/mycel
+      - name: Verify immutable AMD64 object-store helpers
+        env:
+          MINIO_IMAGE: docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff
+          MINIO_MC_IMAGE: docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0
+        run: |
+          set -euo pipefail
+          docker pull "$MINIO_IMAGE"
+          docker pull "$MINIO_MC_IMAGE"
+          test "$(docker image inspect "$MINIO_IMAGE" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          test "$(docker image inspect "$MINIO_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = 07c3a429bfed433e49018cb0f78a52145d4bedeb
+          test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = 7394ce0dd2a80935aded936b09fa12cbb3cb8096
+          test "$(docker image inspect "$MINIO_IMAGE" --format '{{index .Config.Labels "io.myceldb.source.dirty"}}')" = false
+          test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{index .Config.Labels "io.myceldb.source.dirty"}}')" = false
+          docker run --rm "$MINIO_IMAGE" --version | grep -F 'RELEASE.2025-09-07T16-13-09Z (commit-id=07c3a429bfed433e49018cb0f78a52145d4bedeb)'
+          docker run --rm "$MINIO_MC_IMAGE" --version | grep -F 'RELEASE.2025-08-13T08-35-41Z (commit-id=7394ce0dd2a80935aded936b09fa12cbb3cb8096)'
       - name: Build exact harness
         working-directory: mycel-lab
         run: go build -trimpath -buildvcs=true -o ./bin/mycel-lab ./cmd/mycel-lab
@@ -99,6 +115,8 @@ jobs:
         env:
           ARTIFACT_ROOT: ${{ runner.temp }}/mycel-lab-cluster-release-gate
           DAEMON_IMAGE: ${{ inputs.daemon_image }}
+          MINIO_IMAGE: docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff
+          MINIO_MC_IMAGE: docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0
         run: |
           set +e
           ./bin/mycel-lab run suite cluster-release-gate \
