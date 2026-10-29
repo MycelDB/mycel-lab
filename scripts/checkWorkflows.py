@@ -31,6 +31,31 @@ RELEASE_AMD64_PREFLIGHT = re.compile(
     r"          test \"\$\(docker info --format '\{\{\.Architecture\}\}'\)\" = x86_64$",
     re.MULTILINE,
 )
+RELEASE_K3D_INSTALL = re.compile(
+    r"^      - name: Install pinned k3d\n"
+    r"        run: \|\n"
+    r"          set -euo pipefail\n"
+    r"          install -d \"\$RUNNER_TEMP/bin\"\n"
+    r"          curl --fail --silent --show-error --location \\\n"
+    r"            https://github\.com/k3d-io/k3d/releases/download/v5\.9\.0/k3d-linux-amd64 \\\n"
+    r"            --output \"\$RUNNER_TEMP/bin/k3d\"\n"
+    r"          echo '06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0  k3d' \\\n"
+    r"            \| \(cd \"\$RUNNER_TEMP/bin\" && sha256sum --check --strict -\)\n"
+    r"          chmod \+x \"\$RUNNER_TEMP/bin/k3d\"\n"
+    r"          echo \"\$RUNNER_TEMP/bin\" >> \"\$GITHUB_PATH\"$",
+    re.MULTILINE,
+)
+RELEASE_IMAGE_PLATFORM_ASSERTION = re.compile(
+    r"^          test \"\$\(docker image inspect \"\$DAEMON_IMAGE\" --format '\{\{\.Os\}\}/\{\{\.Architecture\}\}'\)\" = linux/amd64$",
+    re.MULTILINE,
+)
+RELEASE_DESTRUCTIVE_RUN = re.compile(
+    r"^          \./bin/mycel-lab run suite cluster-release-gate \\\n"
+    r"            --confirm-destructive \\\n"
+    r"            --image \"\$DAEMON_IMAGE\" \\\n"
+    r"            --artifact-root \"\$ARTIFACT_ROOT\"$",
+    re.MULTILINE,
+)
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -86,6 +111,9 @@ def check_release_amd64_preflight(release: str, failures: list[str]) -> None:
     runner = RELEASE_AMD64_RUNNER.search(release_job)
     preflight = RELEASE_AMD64_PREFLIGHT.search(release_job)
     first_action = FIRST_ACTION_STEP.search(release_job)
+    k3d_install = RELEASE_K3D_INSTALL.search(release_job)
+    image_platform = RELEASE_IMAGE_PLATFORM_ASSERTION.search(release_job)
+    destructive_run = RELEASE_DESTRUCTIVE_RUN.search(release_job)
 
     require(runner is not None, "release-gate.yml: cluster-release-gate must use the native AMD64 hosted runner", failures)
     require(preflight is not None, "release-gate.yml: cluster-release-gate requires the exact native AMD64 host preflight", failures)
@@ -94,6 +122,18 @@ def check_release_amd64_preflight(release: str, failures: list[str]) -> None:
         and first_action is not None
         and preflight.start() < first_action.start(),
         "release-gate.yml: cluster-release-gate AMD64 preflight must precede checkout/action use",
+        failures,
+    )
+    require(k3d_install is not None, "release-gate.yml: cluster-release-gate requires the exact checksum-pinned AMD64 k3d install", failures)
+    require(image_platform is not None, "release-gate.yml: cluster-release-gate requires the exact linux/amd64 daemon-image assertion", failures)
+    require(destructive_run is not None, "release-gate.yml: cluster-release-gate requires the exact canonical destructive command", failures)
+    require(
+        k3d_install is not None
+        and image_platform is not None
+        and destructive_run is not None
+        and k3d_install.start() < destructive_run.start()
+        and image_platform.start() < destructive_run.start(),
+        "release-gate.yml: pinned k3d install and image-platform assertion must precede destructive execution",
         failures,
     )
 
@@ -145,10 +185,6 @@ def main() -> int:
     require(live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: secret must be scoped to one run step", failures)
     require("maxRequests: 128" in live and "maxInputTokens: 20000" in live and "maxEstimatedCostMicros: 1000000" in live and "totalTimeout: 5m" in live, "semantic-live.yml: fixed live ceilings are required", failures)
     require("secrets." not in release, "release-gate.yml: cluster gate must remain credential-free", failures)
-    require("https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64" in release, "release-gate.yml: exact AMD64 k3d release is required", failures)
-    require("06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0" in release, "release-gate.yml: pinned k3d checksum is required", failures)
-    require("{{.Os}}/{{.Architecture}}')\" = linux/amd64" in release, "release-gate.yml: selected daemon image must be verified as linux/amd64", failures)
-    require("cluster-release-gate" in release, "release-gate.yml: canonical suite is required", failures)
 
     profile = (ROOT / "tests" / "reliability" / "provider-profiles" / "openai-compatible-live.yaml").read_text(encoding="utf-8")
     for value in ("maxRequests: 128", "maxInputTokens: 20000", "maxEstimatedCostMicros: 1000000", "totalTimeout: 5m"):

@@ -119,6 +119,88 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("release-gate.yml: cluster-release-gate must use the native AMD64 hosted runner", failures)
         self.assertIn("release-gate.yml: cluster-release-gate requires the exact native AMD64 host preflight", failures)
 
+    def test_removed_k3d_url_or_checksum_is_rejected(self) -> None:
+        without_url = self.release.replace(
+            "https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64",
+            "https://github.com/k3d-io/k3d/releases/download/v5.9.0/not-k3d",
+            1,
+        )
+        without_checksum = self.release.replace(
+            "06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0",
+            "0" * 64,
+            1,
+        )
+        message = "release-gate.yml: cluster-release-gate requires the exact checksum-pinned AMD64 k3d install"
+        self.assertIn(message, self.check_amd64_policy(without_url))
+        self.assertIn(message, self.check_amd64_policy(without_checksum))
+
+    def test_commented_or_late_k3d_install_is_rejected(self) -> None:
+        match = checkWorkflows.RELEASE_K3D_INSTALL.search(self.release)
+        self.assertIsNotNone(match)
+        assert match is not None
+        block = match.group(0)
+        commented = "\n".join(f"# {line}" for line in block.splitlines())
+        commented_text = self.release[: match.start()] + commented + self.release[match.end() :]
+        self.assertIn(
+            "release-gate.yml: cluster-release-gate requires the exact checksum-pinned AMD64 k3d install",
+            self.check_amd64_policy(commented_text),
+        )
+        late_text = self.release[: match.start()] + self.release[match.end() :] + "\n" + block + "\n"
+        self.assertIn(
+            "release-gate.yml: pinned k3d install and image-platform assertion must precede destructive execution",
+            self.check_amd64_policy(late_text),
+        )
+
+    def test_removed_commented_or_late_image_platform_assertion_is_rejected(self) -> None:
+        match = checkWorkflows.RELEASE_IMAGE_PLATFORM_ASSERTION.search(self.release)
+        self.assertIsNotNone(match)
+        assert match is not None
+        line = match.group(0)
+        removed = self.release[: match.start()] + self.release[match.end() :]
+        self.assertIn(
+            "release-gate.yml: cluster-release-gate requires the exact linux/amd64 daemon-image assertion",
+            self.check_amd64_policy(removed),
+        )
+        commented = self.release[: match.start()] + "# " + line + self.release[match.end() :]
+        self.assertIn(
+            "release-gate.yml: cluster-release-gate requires the exact linux/amd64 daemon-image assertion",
+            self.check_amd64_policy(commented),
+        )
+        late = removed + "\n" + line + "\n"
+        self.assertIn(
+            "release-gate.yml: pinned k3d install and image-platform assertion must precede destructive execution",
+            self.check_amd64_policy(late),
+        )
+
+    def test_supply_chain_decoy_job_cannot_mask_noncompliant_release_job(self) -> None:
+        install = checkWorkflows.RELEASE_K3D_INSTALL.search(self.release)
+        platform = checkWorkflows.RELEASE_IMAGE_PLATFORM_ASSERTION.search(self.release)
+        self.assertIsNotNone(install)
+        self.assertIsNotNone(platform)
+        assert install is not None and platform is not None
+        real_without_controls = self.release[: install.start()] + self.release[install.end() :]
+        platform_after_install_removal = checkWorkflows.RELEASE_IMAGE_PLATFORM_ASSERTION.search(real_without_controls)
+        self.assertIsNotNone(platform_after_install_removal)
+        assert platform_after_install_removal is not None
+        real_without_controls = (
+            real_without_controls[: platform_after_install_removal.start()]
+            + real_without_controls[platform_after_install_removal.end() :]
+        )
+        decoy = (
+            "jobs:\n"
+            "  release-control-decoy:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            f"{install.group(0)}\n"
+            "      - name: Decoy image check\n"
+            "        run: |\n"
+            f"{platform.group(0)}\n"
+        )
+        text = real_without_controls.replace("jobs:\n", decoy, 1)
+        failures = self.check_amd64_policy(text)
+        self.assertIn("release-gate.yml: cluster-release-gate requires the exact checksum-pinned AMD64 k3d install", failures)
+        self.assertIn("release-gate.yml: cluster-release-gate requires the exact linux/amd64 daemon-image assertion", failures)
+
 
 class ArtifactSafetyTests(unittest.TestCase):
     def run_guard(self, root: Path) -> subprocess.CompletedProcess[str]:
