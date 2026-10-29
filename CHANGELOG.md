@@ -12,6 +12,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- K3d environment creation now waits for the Kubernetes API `/readyz` endpoint before the single manifest apply, preventing transient post-create OpenAPI EOF failures without retrying mutations.
 - Updated semantic-budget tests to clone protobuf messages without copying internal mutex state, allowing strict `go vet ./...` to pass in SGT10 CI.
 - The SGT9 unauthorized-search control now captures daemon-owned provider-budget evidence through one reusable, directly authenticated administrative observer instead of reusing the semantic controller actor token; the negative actor remains access-token-only with zero login or refresh calls.
 - Deferred live semantic-rule creation now proves the exact payload and scoped `semantic.manage` authorization through a bounded read-only validation RPC before the single create attempt. Only transient `Unauthenticated` validation failures retry; semantic mutations are never retried.

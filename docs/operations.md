@@ -99,10 +99,12 @@ mycel-lab run scenario-file tests/reliability/scenarios/compose-smoke/compose-sm
 ```
 
 Non-dry-run execution for `environment.driver: k3d` creates a disposable k3d
-cluster, applies the rendered MycelDB Kubernetes manifests, waits for the
+cluster, polls the read-only Kubernetes `/readyz` endpoint to a finite deadline,
+applies the rendered MycelDB Kubernetes manifests exactly once, waits for the
 StatefulSet pods to become ready, runs phase events through the environment
 driver, captures Kubernetes state/log artifacts, and deletes the cluster during
-cleanup. The rendered daemons run in `MYCELD_MODE=mesh` with recognized raft
+cleanup. API-readiness probes may repeat; manifest application is never
+retried. The rendered daemons run in `MYCELD_MODE=mesh` with recognized raft
 node addresses and per-pod raft local node IDs derived from StatefulSet
 ordinals.
 
