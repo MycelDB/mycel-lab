@@ -9,6 +9,7 @@ environment:
   namespace: mycel-system-backup-restore
   options:
     clusterNamePrefix: mlab-sbr
+    digestPinnedImagePolicy: node-pull
     createArguments:
       - --agents
       - "3"

@@ -9,6 +9,7 @@ environment:
   namespace: mycel-lab
   options:
     clusterNamePrefix: mycel-lab
+    digestPinnedImagePolicy: node-pull
     createArguments:
       - --agents
       - "3"

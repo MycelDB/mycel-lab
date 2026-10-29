@@ -615,6 +615,42 @@ func TestRunSuiteFileExecutesSequentialScenarios(t *testing.T) {
 	}
 }
 
+func TestClusterReleaseGateDigestOverrideUsesNodePullForEveryK3DScenario(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "cluster-release-gate.yaml")
+	image := "docker.io/myceldb/mycel@sha256:" + strings.Repeat("a", 64)
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir(), ImageOverride: image})
+	if err != nil {
+		t.Fatalf("RunSuiteFile() error=%v", err)
+	}
+	remaining := map[string]struct{}{
+		"k3d-cluster-validation":    {},
+		"k3d-system-backup-restore": {},
+	}
+	for _, scenarioResult := range result.Results {
+		if _, ok := remaining[scenarioResult.ScenarioName]; !ok {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(scenarioResult.ArtifactRoot, "resolved-scenario.json"))
+		if err != nil {
+			t.Fatalf("read %s resolved scenario: %v", scenarioResult.ScenarioName, err)
+		}
+		var resolved spec.ResolvedScenario
+		if err := json.Unmarshal(raw, &resolved); err != nil {
+			t.Fatalf("decode %s resolved scenario: %v", scenarioResult.ScenarioName, err)
+		}
+		if resolved.Cluster.Image != image {
+			t.Errorf("%s image=%q, want %q", scenarioResult.ScenarioName, resolved.Cluster.Image, image)
+		}
+		if policy := resolved.Environment.Options["digestPinnedImagePolicy"]; policy != "node-pull" {
+			t.Errorf("%s digestPinnedImagePolicy=%v, want node-pull", scenarioResult.ScenarioName, policy)
+		}
+		delete(remaining, scenarioResult.ScenarioName)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("release suite omitted expected k3d scenarios: %v", remaining)
+	}
+}
+
 func TestCleanupInvokedOnFailure(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	driver := &recordingDriver{}
