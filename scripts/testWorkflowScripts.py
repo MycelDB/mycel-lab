@@ -158,27 +158,56 @@ class WorkflowPolicyTests(unittest.TestCase):
                     self.check_helper_policy(mutated, live),
                 )
 
-    def test_bracket_form_secret_reference_outside_run_step_is_rejected(self) -> None:
+    def test_direct_and_wrapped_bracket_secret_references_outside_run_step_are_rejected(self) -> None:
         for text, live, architecture, workflow in (
             (self.live, True, "arm64", "semantic-live.yml"),
             (self.release, False, "amd64", "release-gate.yml"),
         ):
-            with self.subTest(workflow=workflow):
-                match = checkWorkflows.helper_preflight_pattern(architecture).search(text)
-                self.assertIsNotNone(match)
-                assert match is not None
-                secret_step = '''      - name: Premature secret reference
+            for expression in (
+                "${{ secrets['OPENAI_API_KEY'] }}",
+                "${{ format('{0}', secrets['OPENAI_API_KEY']) }}",
+                "${{ format('}}{0}', secrets['OPENAI_API_KEY']) }}",
+            ):
+                with self.subTest(workflow=workflow, expression=expression):
+                    match = checkWorkflows.helper_preflight_pattern(architecture).search(text)
+                    self.assertIsNotNone(match)
+                    assert match is not None
+                    secret_step = f'''      - name: Premature secret reference
         env:
-          PREMATURE_SECRET: ${{ secrets['OPENAI_API_KEY'] }}
+          PREMATURE_SECRET: {expression}
         run: test -n "$PREMATURE_SECRET"
 '''
-                mutated = text[: match.start()] + secret_step + text[match.start() :]
-                expected = (
-                    "semantic-live.yml: every secret reference must remain inside the exact protected run step after helper preflight"
-                    if live
-                    else "release-gate.yml: cluster gate must remain credential-free"
-                )
-                self.assertIn(expected, self.check_helper_policy(mutated, live))
+                    mutated = text[: match.start()] + secret_step + text[match.start() :]
+                    expected = (
+                        "semantic-live.yml: every secret reference must remain inside the exact protected run step after helper preflight"
+                        if live
+                        else "release-gate.yml: cluster gate must remain credential-free"
+                    )
+                    self.assertIn(expected, self.check_helper_policy(mutated, live))
+
+    def test_additional_unprotected_suite_run_is_rejected(self) -> None:
+        for text, live, run_step, suite_target, workflow, job in (
+            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-live-provider", "semantic-live.yml", "live-semantic"),
+            (self.release, False, checkWorkflows.RELEASE_RUN_STEP, "cluster-release-gate", "release-gate.yml", "cluster-release-gate"),
+        ):
+            for command in (
+                f'./bin/mycel-lab run suite {suite_target} --image "$DAEMON_IMAGE"',
+                './bin/mycel-lab run suite unrelated --confirm-destructive --image "$DAEMON_IMAGE"',
+            ):
+                with self.subTest(workflow=workflow, command=command):
+                    start = text.find(run_step)
+                    self.assertGreaterEqual(start, 0)
+                    extra_run = f'''      - name: Unprotected extra suite execution
+        env:
+          MINIO_IMAGE: docker.io/minio/minio:mutable
+          MINIO_MC_IMAGE: docker.io/minio/mc:mutable
+        run: {command}
+'''
+                    mutated = text[:start] + extra_run + text[start:]
+                    self.assertIn(
+                        f"{workflow}: {job} must contain exactly one protected suite execution and it must be the canonical run step",
+                        self.check_helper_policy(mutated, live),
+                    )
 
     def test_late_helper_preflight_is_rejected(self) -> None:
         for text, live, architecture, workflow in (

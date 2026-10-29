@@ -127,7 +127,11 @@ RELEASE_RUN_STEP = f'''      - name: Run approved cluster release gate once
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           exit 0'''
-SECRET_CONTEXT_REFERENCE = re.compile(r"\$\{\{\s*secrets(?:\.|\[)")
+SECRET_CONTEXT_ACCESS = re.compile(r"(?<![A-Za-z0-9_])secrets\s*(?:\.\s*|\[\s*)")
+
+
+def secret_context_references(text: str) -> list[re.Match[str]]:
+    return list(SECRET_CONTEXT_ACCESS.finditer(text))
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -198,9 +202,18 @@ def check_helper_images(
     expected_preflight = helper_preflight_block(architecture)
     preflight_indexes = [index for index, step in enumerate(steps) if step == expected_preflight]
     run_indexes = [index for index, step in enumerate(steps) if step == run_step]
+    suite_target = "semantic-live-provider" if job_name == "live-semantic" else "cluster-release-gate"
+    protected_execution_indexes = [
+        index for index, step in enumerate(steps) if f"run suite {suite_target}" in step or "--confirm-destructive" in step
+    ]
 
     require(len(preflight_indexes) == 1, f"{workflow_name}: {job_name} requires exactly one complete immutable {architecture} helper-image preflight step", failures)
     require(len(run_indexes) == 1, f"{workflow_name}: {job_name} must bind helper digests and the canonical command in one complete protected run step", failures)
+    require(
+        len(run_indexes) == 1 and protected_execution_indexes == run_indexes,
+        f"{workflow_name}: {job_name} must contain exactly one protected suite execution and it must be the canonical run step",
+        failures,
+    )
     require(
         len(preflight_indexes) == 1 and len(run_indexes) == 1 and preflight_indexes[0] < run_indexes[0],
         f"{workflow_name}: helper-image preflight must precede destructive execution",
@@ -209,7 +222,7 @@ def check_helper_images(
     require(job.count(f"MINIO_IMAGE: {MINIO_HELPER_IMAGE}") == 2, f"{workflow_name}: MinIO helper digest must appear exactly in preflight and protected run step", failures)
     require(job.count(f"MINIO_MC_IMAGE: {MC_HELPER_IMAGE}") == 2, f"{workflow_name}: mc helper digest must appear exactly in preflight and protected run step", failures)
 
-    secret_locations = [index for index, step in enumerate(steps) if SECRET_CONTEXT_REFERENCE.search(step)]
+    secret_locations = [index for index, step in enumerate(steps) if secret_context_references(step)]
     if job_name == "live-semantic":
         require(
             len(run_indexes) == 1 and secret_locations == run_indexes,
@@ -274,7 +287,7 @@ def main() -> int:
 
     ci = texts.get("ci.yml", "")
     require("pull_request:" in ci and "branches: [develop, main]" in ci, "ci.yml: PR and protected-branch triggers are required", failures)
-    require(SECRET_CONTEXT_REFERENCE.search(ci) is None, "ci.yml: default CI must not consume secrets", failures)
+    require(not secret_context_references(ci), "ci.yml: default CI must not consume secrets", failures)
     require("--dry-run" in ci and "--confirm-destructive" not in ci, "ci.yml: reliability execution must remain dry-run only", failures)
     require("compose-semantic-graph-contract" in ci, "ci.yml: deterministic semantic contract dry-run is required", failures)
     require("compose-procedure-inference-control-emulator" in ci, "ci.yml: protocol-emulator dry-run is required", failures)
@@ -302,9 +315,9 @@ def main() -> int:
     check_helper_images(live, "live-semantic", "arm64", LIVE_RUN_STEP, "semantic-live.yml", failures)
     check_helper_images(release, "cluster-release-gate", "amd64", RELEASE_RUN_STEP, "release-gate.yml", failures)
     require("secrets.OPENAI_API_KEY" in live, "semantic-live.yml: protected OpenAI secret is required", failures)
-    require(len(SECRET_CONTEXT_REFERENCE.findall(live)) == 1 and live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: exactly one secret reference is allowed in the protected run step", failures)
+    require(len(secret_context_references(live)) == 1 and live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: exactly one secret reference is allowed in the protected run step", failures)
     require("maxRequests: 128" in live and "maxInputTokens: 20000" in live and "maxEstimatedCostMicros: 1000000" in live and "totalTimeout: 5m" in live, "semantic-live.yml: fixed live ceilings are required", failures)
-    require(SECRET_CONTEXT_REFERENCE.search(release) is None, "release-gate.yml: cluster gate must remain credential-free", failures)
+    require(not secret_context_references(release), "release-gate.yml: cluster gate must remain credential-free", failures)
 
     profile = (ROOT / "tests" / "reliability" / "provider-profiles" / "openai-compatible-live.yaml").read_text(encoding="utf-8")
     for value in ("maxRequests: 128", "maxInputTokens: 20000", "maxEstimatedCostMicros: 1000000", "totalTimeout: 5m"):
