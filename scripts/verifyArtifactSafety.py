@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
-RUN_MARKERS = ("harness-build.json", "result.json")
+RUN_MARKERS = ("harness-build.json", "result.json", "redaction-scan.json")
 SENSITIVE_PATTERNS = {
     "api-key": re.compile(rb"\bsk-[A-Za-z0-9_-]{16,}\b"),
     "bearer-token": re.compile(rb"(?i)\bbearer[ \t]+[a-z0-9._~+/=-]{8,}"),

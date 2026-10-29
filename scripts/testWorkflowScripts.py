@@ -79,6 +79,21 @@ class ArtifactSafetyTests(unittest.TestCase):
             self.assertIn("scenario-incomplete/result.json", result.stderr)
             self.assertFalse((root / "artifact-upload-sha256.txt").exists())
 
+    def test_redaction_only_sibling_run_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_run(root, name="scenario-complete")
+            incomplete = root / "scenario-redaction-only"
+            incomplete.mkdir()
+            (incomplete / "redaction-scan.json").write_text(
+                json.dumps({"ok": False, "findings": [{"kind": "unscannable"}]}) + "\n",
+                encoding="utf-8",
+            )
+            result = self.run_guard(root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("scenario-redaction-only/result.json", result.stderr)
+            self.assertFalse((root / "artifact-upload-sha256.txt").exists())
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")
     def test_file_and_directory_symlinks_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
