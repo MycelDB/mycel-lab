@@ -21,6 +21,7 @@ import (
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -37,14 +38,14 @@ func TestSemanticBudgetRetainedScopeUsesAdvertisedPageSizeAndRejectsFilterViolat
 	if err := validateRetainedSemanticProviderBudgetScope(valid, resources); err != nil {
 		t.Fatalf("valid scope rejected: %v", err)
 	}
-	invalid := *valid
+	invalid := proto.Clone(valid).(*adminv1.SemanticProviderBudgetScopeReference)
 	invalid.SemanticRuleId = "wrong-rule"
-	if err := validateRetainedSemanticProviderBudgetScope(&invalid, resources); err == nil {
+	if err := validateRetainedSemanticProviderBudgetScope(invalid, resources); err == nil {
 		t.Fatal("retained scope filter violation was accepted")
 	}
-	invalidTimestamp := *valid
+	invalidTimestamp := proto.Clone(valid).(*adminv1.SemanticProviderBudgetScopeReference)
 	invalidTimestamp.RetentionUntil = &timestamppb.Timestamp{Seconds: 253402300800}
-	if err := validateRetainedSemanticProviderBudgetScope(&invalidTimestamp, resources); err == nil {
+	if err := validateRetainedSemanticProviderBudgetScope(invalidTimestamp, resources); err == nil {
 		t.Fatal("invalid retained scope timestamp was accepted")
 	}
 }
@@ -70,14 +71,14 @@ func TestSemanticBudgetEventTimestampsRejectMalformedEvidence(t *testing.T) {
 	if !semanticBudgetEventTimestampsValid(valid) {
 		t.Fatal("valid event timestamps were rejected")
 	}
-	invalidRecorded := *valid
+	invalidRecorded := proto.Clone(valid).(*adminv1.SemanticProviderBudgetAttemptEvent)
 	invalidRecorded.RecordedAt = &timestamppb.Timestamp{Seconds: 253402300800}
-	if semanticBudgetEventTimestampsValid(&invalidRecorded) {
+	if semanticBudgetEventTimestampsValid(invalidRecorded) {
 		t.Fatal("invalid recorded_at was accepted")
 	}
-	invalidReservation := *valid
+	invalidReservation := proto.Clone(valid).(*adminv1.SemanticProviderBudgetAttemptEvent)
 	invalidReservation.ReservedUntil = &timestamppb.Timestamp{Nanos: -1}
-	if semanticBudgetEventTimestampsValid(&invalidReservation) {
+	if semanticBudgetEventTimestampsValid(invalidReservation) {
 		t.Fatal("invalid reserved_until was accepted")
 	}
 }
