@@ -11,6 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 PINNED_ACTION = re.compile(r"^\s*uses:\s*[^\s@]+@([0-9a-f]{40})(?:\s+#.*)?$", re.MULTILINE)
 ANY_ACTION = re.compile(r"^\s*uses:\s*([^\s]+)", re.MULTILINE)
+LIVE_ARM64_RUNNER = re.compile(r"^    runs-on: ubuntu-24\.04-arm$", re.MULTILINE)
+LIVE_ARM64_PREFLIGHT = re.compile(
+    r"^      - name: Verify native ARM64 execution host\n"
+    r"        run: \|\n"
+    r"          set -euo pipefail\n"
+    r"          test \"\$\(uname -m\)\" = aarch64\n"
+    r"          test \"\$\(docker info --format '\{\{\.Architecture\}\}'\)\" = aarch64$",
+    re.MULTILINE,
+)
+FIRST_ACTION_STEP = re.compile(r"^\s+uses:\s*", re.MULTILINE)
+LIVE_SECRET = "${{ secrets.OPENAI_API_KEY }}"
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -20,6 +31,25 @@ def require(condition: bool, message: str, failures: list[str]) -> None:
 
 def read(name: str) -> str:
     return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def check_live_arm64_preflight(live: str, failures: list[str]) -> None:
+    runner = LIVE_ARM64_RUNNER.search(live)
+    preflight = LIVE_ARM64_PREFLIGHT.search(live)
+    first_action = FIRST_ACTION_STEP.search(live)
+    secret_position = live.find(LIVE_SECRET)
+
+    require(runner is not None, "semantic-live.yml: native ARM64 hosted runner is required", failures)
+    require(preflight is not None, "semantic-live.yml: exact native ARM64 host preflight is required", failures)
+    require(
+        preflight is not None
+        and first_action is not None
+        and secret_position >= 0
+        and preflight.start() < first_action.start()
+        and preflight.start() < secret_position,
+        "semantic-live.yml: ARM64 preflight must precede checkout/action use and secret exposure",
+        failures,
+    )
 
 
 def main() -> int:
@@ -63,8 +93,7 @@ def main() -> int:
         require("steps.safety.outputs.safe == 'true'" in text, f"{name}: uploads must be gated by artifact safety", failures)
         require("--confirm-destructive" in text, f"{name}: explicit destructive confirmation is required", failures)
 
-    require("runs-on: ubuntu-24.04-arm" in live, "semantic-live.yml: native ARM64 hosted runner is required", failures)
-    require("test \"$(uname -m)\" = aarch64" in live and "docker info --format '{{.Architecture}}'" in live, "semantic-live.yml: native ARM64 host preflight is required", failures)
+    check_live_arm64_preflight(live, failures)
     require("secrets.OPENAI_API_KEY" in live, "semantic-live.yml: protected OpenAI secret is required", failures)
     require(live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: secret must be scoped to one run step", failures)
     require("maxRequests: 128" in live and "maxInputTokens: 20000" in live and "maxEstimatedCostMicros: 1000000" in live and "totalTimeout: 5m" in live, "semantic-live.yml: fixed live ceilings are required", failures)
