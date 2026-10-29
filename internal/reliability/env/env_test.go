@@ -96,7 +96,7 @@ func TestK3DPreflightRequiresConfirmation(t *testing.T) {
 	}
 }
 
-func TestK3DDriverCreateLeavesReadinessToRunner(t *testing.T) {
+func TestK3DDriverCreateWaitsForAPIAndLeavesWorkloadReadinessToRunner(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
 	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "Example Scenario"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns"}, Cluster: spec.ClusterSpec{Nodes: 1, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
@@ -108,7 +108,7 @@ func TestK3DDriverCreateLeavesReadinessToRunner(t *testing.T) {
 		t.Fatalf("environment=%+v", environment)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"k3d cluster create", "docker image inspect myceldb/mycel:latest", "k3d image import myceldb/mycel:latest -c " + environment.Name, "kubectl --context " + environment.Context + " apply -f"} {
+	for _, want := range []string{"k3d cluster create", "docker image inspect myceldb/mycel:latest", "k3d image import myceldb/mycel:latest -c " + environment.Name, "kubectl --context " + environment.Context + " get --raw=/readyz", "kubectl --context " + environment.Context + " apply -f"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
 		}
@@ -124,6 +124,55 @@ func TestK3DDriverCreateLeavesReadinessToRunner(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("WaitReady commands missing %q\n%s", want, joined)
 		}
+	}
+}
+
+func TestK3DDriverCreateWaitsForTransientAPIReadinessBeforeSingleApply(t *testing.T) {
+	runner := &k3dAPIReadinessRunner{readinessFailures: 2}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second, apiPollInterval: time.Millisecond}
+	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "API readiness"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns"}, Cluster: spec.ClusterSpec{Nodes: 1, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
+	if _, err := driver.Create(context.Background(), scenario, scenario.Environment); err != nil {
+		t.Fatalf("Create() error=%v", err)
+	}
+	if runner.readinessProbes != 3 {
+		t.Fatalf("readiness probes=%d, want 3", runner.readinessProbes)
+	}
+	if runner.applyCalls != 1 {
+		t.Fatalf("apply calls=%d, want exactly 1", runner.applyCalls)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	readyIndex := strings.LastIndex(joined, "get --raw=/readyz")
+	applyIndex := strings.Index(joined, " apply -f ")
+	if readyIndex < 0 || applyIndex < 0 || readyIndex > applyIndex {
+		t.Fatalf("readiness did not precede apply:\n%s", joined)
+	}
+}
+
+func TestK3DDriverCreateFailsClosedWithoutApplyingWhenAPIStaysUnready(t *testing.T) {
+	runner := &k3dAPIReadinessRunner{alwaysUnready: true}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: 5 * time.Millisecond, apiPollInterval: time.Millisecond}
+	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "API readiness timeout"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns"}, Cluster: spec.ClusterSpec{Nodes: 1, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
+	_, err := driver.Create(context.Background(), scenario, scenario.Environment)
+	if err == nil || !strings.Contains(err.Error(), "kubernetes API readiness did not converge") {
+		t.Fatalf("Create() error=%v, want bounded readiness failure", err)
+	}
+	if runner.readinessProbes < 1 {
+		t.Fatal("Create() made no readiness probe")
+	}
+	if runner.applyCalls != 0 {
+		t.Fatalf("apply calls=%d, want 0", runner.applyCalls)
+	}
+}
+
+func TestK3DDriverCreateDoesNotRetryFailedApply(t *testing.T) {
+	runner := &k3dAPIReadinessRunner{applyError: errors.New("apply failed")}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second, apiPollInterval: time.Millisecond}
+	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "single apply"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns"}, Cluster: spec.ClusterSpec{Nodes: 1, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
+	if _, err := driver.Create(context.Background(), scenario, scenario.Environment); err == nil || !strings.Contains(err.Error(), "apply failed") {
+		t.Fatalf("Create() error=%v, want apply failure", err)
+	}
+	if runner.applyCalls != 1 {
+		t.Fatalf("apply calls=%d, want exactly 1", runner.applyCalls)
 	}
 }
 
@@ -338,6 +387,15 @@ func TestK3DDriverUpdateStatefulSetImageWaitsForRollout(t *testing.T) {
 
 type fakeRunner struct{ commands []string }
 
+type k3dAPIReadinessRunner struct {
+	commands          []string
+	readinessFailures int
+	alwaysUnready     bool
+	readinessProbes   int
+	applyCalls        int
+	applyError        error
+}
+
 type k3dListRunner struct{ output string }
 
 type k3dDeletionRunner struct {
@@ -465,6 +523,26 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (execut
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
+func (r *k3dAPIReadinessRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	result := executil.Result{Command: cmd, Stdout: "ok\n"}
+	if strings.Contains(cmd, "get --raw=/readyz") {
+		r.readinessProbes++
+		if r.alwaysUnready || r.readinessFailures > 0 {
+			if r.readinessFailures > 0 {
+				r.readinessFailures--
+			}
+			return result, errors.New("API unavailable")
+		}
+	}
+	if strings.Contains(cmd, " apply -f ") {
+		r.applyCalls++
+		return result, r.applyError
+	}
+	return result, nil
 }
 
 func TestConfiguredImageConfigDigestIsBoundedAndFailClosed(t *testing.T) {
