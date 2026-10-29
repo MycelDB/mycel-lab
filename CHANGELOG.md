@@ -12,6 +12,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Protected semantic and cluster release acceptance now preflight immutable, anonymously pullable multiarch MinIO and mc helper images for the native runner architecture before credentials or destructive execution, verify exact upstream source/version provenance, and pass only those preflighted digests into the harness.
 - Protected cluster release acceptance now uses a native GitHub-hosted AMD64 runner, fails before checkout unless the kernel and Docker server report AMD64, installs checksum-pinned k3d, and verifies that the immutable multiarch candidate resolves to `linux/amd64` before destructive execution.
 - Protected semantic live acceptance now uses a native GitHub-hosted ARM64 runner and fails before checkout or credential use unless both the execution host and Docker server report ARM64, preventing ARM64-only release candidates from failing on the former x64 runner.
 - K3d environment creation now waits for the Kubernetes API `/readyz` endpoint before the single manifest apply, preventing transient post-create OpenAPI EOF failures without retrying mutations.
