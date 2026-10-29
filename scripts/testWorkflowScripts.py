@@ -15,11 +15,13 @@ import checkWorkflows
 
 SCRIPT = Path(__file__).resolve().with_name("verifyArtifactSafety.py")
 SEMANTIC_LIVE = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "semantic-live.yml"
+RELEASE_GATE = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release-gate.yml"
 
 
 class WorkflowPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.live = SEMANTIC_LIVE.read_text(encoding="utf-8")
+        self.release = RELEASE_GATE.read_text(encoding="utf-8")
 
     def check_arm64_policy(self, text: str) -> list[str]:
         failures: list[str] = []
@@ -69,7 +71,53 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("semantic-live.yml: live-semantic must use the native ARM64 hosted runner", failures)
         self.assertIn("semantic-live.yml: live-semantic requires the exact native ARM64 host preflight", failures)
 
+    def check_amd64_policy(self, text: str) -> list[str]:
+        failures: list[str] = []
+        checkWorkflows.check_release_amd64_preflight(text, failures)
+        return failures
 
+    def test_native_amd64_preflight_precedes_action_use(self) -> None:
+        self.assertEqual(self.check_amd64_policy(self.release), [])
+
+    def test_amd64_preflight_after_action_use_is_rejected(self) -> None:
+        match = checkWorkflows.RELEASE_AMD64_PREFLIGHT.search(self.release)
+        self.assertIsNotNone(match)
+        assert match is not None
+        block = match.group(0)
+        moved = self.release[: match.start()] + self.release[match.end() :] + "\n" + block + "\n"
+        self.assertIn(
+            "release-gate.yml: cluster-release-gate AMD64 preflight must precede checkout/action use",
+            self.check_amd64_policy(moved),
+        )
+
+    def test_comment_only_amd64_controls_are_rejected(self) -> None:
+        match = checkWorkflows.RELEASE_AMD64_PREFLIGHT.search(self.release)
+        self.assertIsNotNone(match)
+        assert match is not None
+        commented = "\n".join(f"# {line}" for line in match.group(0).splitlines())
+        text = self.release[: match.start()] + commented + self.release[match.end() :]
+        text = text.replace("    runs-on: ubuntu-24.04", "    runs-on: ubuntu-24.04-arm\n#     runs-on: ubuntu-24.04", 1)
+        failures = self.check_amd64_policy(text)
+        self.assertIn("release-gate.yml: cluster-release-gate must use the native AMD64 hosted runner", failures)
+        self.assertIn("release-gate.yml: cluster-release-gate requires the exact native AMD64 host preflight", failures)
+
+    def test_compliant_decoy_job_cannot_mask_noncompliant_release_job(self) -> None:
+        match = checkWorkflows.RELEASE_AMD64_PREFLIGHT.search(self.release)
+        self.assertIsNotNone(match)
+        assert match is not None
+        release_without_preflight = self.release[: match.start()] + self.release[match.end() :]
+        release_without_preflight = release_without_preflight.replace("    runs-on: ubuntu-24.04", "    runs-on: ubuntu-24.04-arm", 1)
+        decoy = (
+            "jobs:\n"
+            "  architecture-decoy:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            f"{match.group(0)}\n"
+        )
+        text = release_without_preflight.replace("jobs:\n", decoy, 1)
+        failures = self.check_amd64_policy(text)
+        self.assertIn("release-gate.yml: cluster-release-gate must use the native AMD64 hosted runner", failures)
+        self.assertIn("release-gate.yml: cluster-release-gate requires the exact native AMD64 host preflight", failures)
 
 
 class ArtifactSafetyTests(unittest.TestCase):

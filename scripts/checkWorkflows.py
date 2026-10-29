@@ -22,6 +22,15 @@ LIVE_ARM64_PREFLIGHT = re.compile(
 )
 FIRST_ACTION_STEP = re.compile(r"^\s+uses:\s*", re.MULTILINE)
 LIVE_SECRET = "${{ secrets.OPENAI_API_KEY }}"
+RELEASE_AMD64_RUNNER = re.compile(r"^    runs-on: ubuntu-24\.04$", re.MULTILINE)
+RELEASE_AMD64_PREFLIGHT = re.compile(
+    r"^      - name: Verify native AMD64 execution host\n"
+    r"        run: \|\n"
+    r"          set -euo pipefail\n"
+    r"          test \"\$\(uname -m\)\" = x86_64\n"
+    r"          test \"\$\(docker info --format '\{\{\.Architecture\}\}'\)\" = x86_64$",
+    re.MULTILINE,
+)
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -68,6 +77,27 @@ def check_live_arm64_preflight(live: str, failures: list[str]) -> None:
     )
 
 
+def check_release_amd64_preflight(release: str, failures: list[str]) -> None:
+    release_job = job_block(release, "cluster-release-gate")
+    require(release_job is not None, "release-gate.yml: exactly one cluster-release-gate job is required", failures)
+    if release_job is None:
+        return
+
+    runner = RELEASE_AMD64_RUNNER.search(release_job)
+    preflight = RELEASE_AMD64_PREFLIGHT.search(release_job)
+    first_action = FIRST_ACTION_STEP.search(release_job)
+
+    require(runner is not None, "release-gate.yml: cluster-release-gate must use the native AMD64 hosted runner", failures)
+    require(preflight is not None, "release-gate.yml: cluster-release-gate requires the exact native AMD64 host preflight", failures)
+    require(
+        preflight is not None
+        and first_action is not None
+        and preflight.start() < first_action.start(),
+        "release-gate.yml: cluster-release-gate AMD64 preflight must precede checkout/action use",
+        failures,
+    )
+
+
 def main() -> int:
     failures: list[str] = []
     expected = {"ci.yml", "semantic-live.yml", "release-gate.yml"}
@@ -110,11 +140,14 @@ def main() -> int:
         require("--confirm-destructive" in text, f"{name}: explicit destructive confirmation is required", failures)
 
     check_live_arm64_preflight(live, failures)
+    check_release_amd64_preflight(release, failures)
     require("secrets.OPENAI_API_KEY" in live, "semantic-live.yml: protected OpenAI secret is required", failures)
     require(live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: secret must be scoped to one run step", failures)
     require("maxRequests: 128" in live and "maxInputTokens: 20000" in live and "maxEstimatedCostMicros: 1000000" in live and "totalTimeout: 5m" in live, "semantic-live.yml: fixed live ceilings are required", failures)
     require("secrets." not in release, "release-gate.yml: cluster gate must remain credential-free", failures)
-    require("runs-on: [self-hosted, linux, x64, mycel-reliability]" in release, "release-gate.yml: isolated reliability runner is required", failures)
+    require("https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64" in release, "release-gate.yml: exact AMD64 k3d release is required", failures)
+    require("06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0" in release, "release-gate.yml: pinned k3d checksum is required", failures)
+    require("{{.Os}}/{{.Architecture}}')\" = linux/amd64" in release, "release-gate.yml: selected daemon image must be verified as linux/amd64", failures)
     require("cluster-release-gate" in release, "release-gate.yml: canonical suite is required", failures)
 
     profile = (ROOT / "tests" / "reliability" / "provider-profiles" / "openai-compatible-live.yaml").read_text(encoding="utf-8")
