@@ -28,6 +28,8 @@ Configure these GitHub environments outside the workflow files:
   - allow only protected branches or reviewed release branches;
   - do not configure hosted-provider credentials.
 
+The protected semantic workflow uses the GitHub-hosted `ubuntu-24.04-arm` runner so the release candidate's `linux/arm64` image executes natively. Before checkout or credential use, it verifies that both the runner kernel and Docker server report ARM64. Do not substitute an x64 runner or rely on ambient emulation for an ARM64-only candidate.
+
 The release-gate workflow uses a self-hosted runner labelled `mycel-reliability`. Keep that runner ephemeral or reset it after every job. It must provide Docker with Compose, k3d, and kubectl. Do not run untrusted fork code on this runner.
 
 Repository workflow permissions remain `contents: read`. Checkout credentials are not persisted. Every referenced action is pinned to a full commit SHA.
