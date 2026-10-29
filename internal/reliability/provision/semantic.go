@@ -850,11 +850,11 @@ type semanticCleanupReference struct {
 	ID   string
 }
 
-func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, int) {
+func semanticCleanupReferences(targetResource string, err error) ([]semanticCleanupReference, string, int) {
 	if status.Code(err) != codes.FailedPrecondition {
 		return nil, "not-failed-precondition", 0
 	}
-	if references, rejectionCategory, observedReferenceCount, handled := semanticCleanupStructuredReferences(err); handled {
+	if references, rejectionCategory, observedReferenceCount, handled := semanticCleanupStructuredReferences(targetResource, err); handled {
 		return references, rejectionCategory, observedReferenceCount
 	}
 	message := status.Convert(err).Message()
@@ -879,6 +879,7 @@ func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, i
 		parseTokens = tokens[:maxCleanupReferenceEvidence]
 	}
 	references := make([]semanticCleanupReference, 0, min(len(parseTokens), maxCleanupReferenceEvidence))
+	seen := make(map[string]struct{}, min(len(parseTokens), maxCleanupReferenceEvidence))
 	for _, token := range parseTokens {
 		token = strings.TrimSpace(token)
 		matches := semanticCleanupReferencePattern.FindStringSubmatch(token)
@@ -894,6 +895,11 @@ func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, i
 			}
 			return references, "malformed-reference-list", observedReferenceCount
 		}
+		key := matches[1] + ":" + strings.ToLower(matches[2])
+		if _, exists := seen[key]; exists {
+			return references, "duplicate-reference", observedReferenceCount
+		}
+		seen[key] = struct{}{}
 		references = append(references, semanticCleanupReference{Type: matches[1], ID: strings.ToLower(matches[2])})
 	}
 	if len(references) == 0 {
@@ -905,40 +911,59 @@ func semanticCleanupReferences(err error) ([]semanticCleanupReference, string, i
 	return references, "", len(references)
 }
 
-func semanticCleanupStructuredReferences(err error) ([]semanticCleanupReference, string, int, bool) {
+func semanticCleanupStructuredReferences(targetResource string, err error) ([]semanticCleanupReference, string, int, bool) {
 	st := status.Convert(err)
 	var info *errdetails.ErrorInfo
 	var precondition *errdetails.PreconditionFailure
+	matchingInfoCount := 0
+	preconditionCount := 0
 	for _, detail := range st.Details() {
 		switch typed := detail.(type) {
 		case *errdetails.ErrorInfo:
 			if typed.GetReason() == cleanupReferenceDetailReason && typed.GetDomain() == cleanupReferenceDetailDomain {
+				matchingInfoCount++
 				info = typed
 			}
 		case *errdetails.PreconditionFailure:
+			preconditionCount++
 			precondition = typed
 		}
 	}
-	if info == nil {
+	if matchingInfoCount == 0 {
 		return nil, "", 0, false
+	}
+	if matchingInfoCount != 1 {
+		return nil, "duplicate-structured-error-info", 0, true
+	}
+	if preconditionCount != 1 {
+		return nil, "invalid-structured-precondition-count", 0, true
 	}
 	metadata := info.GetMetadata()
 	if metadata["schema_version"] != "1" {
 		return nil, "unsupported-structured-reference-schema", 0, true
 	}
-	totalCount, err := strconv.Atoi(metadata["total_reference_count"])
-	if err != nil || totalCount <= 0 {
+	expectedResource := semanticCleanupDaemonResource(targetResource)
+	if expectedResource == "" || metadata["resource"] != expectedResource {
+		return nil, "structured-resource-mismatch", 0, true
+	}
+	totalCount, err := parseCanonicalCleanupReferenceCount(metadata["total_reference_count"], false)
+	if err != nil {
 		return nil, "invalid-structured-reference-count", 0, true
 	}
-	detailCount, err := strconv.Atoi(metadata["detail_reference_count"])
-	if err != nil || detailCount < 0 {
+	detailCount, err := parseCanonicalCleanupReferenceCount(metadata["detail_reference_count"], true)
+	if err != nil {
 		return nil, "invalid-structured-detail-count", totalCount, true
 	}
-	complete, err := strconv.ParseBool(metadata["details_complete"])
-	if err != nil {
+	var complete bool
+	switch metadata["details_complete"] {
+	case "true":
+		complete = true
+	case "false":
+		complete = false
+	default:
 		return nil, "invalid-structured-completeness", totalCount, true
 	}
-	if precondition == nil || detailCount != len(precondition.GetViolations()) {
+	if detailCount != len(precondition.GetViolations()) {
 		return nil, "structured-detail-count-mismatch", totalCount, true
 	}
 	if detailCount > maxCleanupStructuredReferenceEvidence {
@@ -970,8 +995,41 @@ func semanticCleanupStructuredReferences(err error) ([]semanticCleanupReference,
 	return references, "", totalCount, true
 }
 
+func parseCanonicalCleanupReferenceCount(value string, allowZero bool) (int, error) {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || strconv.Itoa(parsed) != value || parsed < 0 || (!allowZero && parsed == 0) {
+		return 0, errors.New("noncanonical cleanup reference count")
+	}
+	return parsed, nil
+}
+
+func semanticCleanupDaemonResource(targetResource string) string {
+	switch targetResource {
+	case "access-policy":
+		return "access policy"
+	case "credential-grant":
+		return "credential grant"
+	case "credential":
+		return "credential"
+	case "intelligence-profile":
+		return "inference profile"
+	case "capability":
+		return "model endpoint capability"
+	case "semantic-rule":
+		return "semantic rule"
+	case "vector-store":
+		return "vector store"
+	case "model":
+		return "model"
+	case "endpoint":
+		return "model endpoint"
+	default:
+		return ""
+	}
+}
+
 func semanticCleanupRetainedByAudit(err error) bool {
-	_, retained := semanticCleanupDirectAuditRetention(err)
+	_, retained := semanticCleanupDirectAuditRetention("", err)
 	return retained
 }
 
@@ -980,13 +1038,13 @@ func semanticCleanupRetention(resources *ProcedureInferenceResources, targetReso
 	// catalog dependency graph. Preserve their direct immutable-audit retention
 	// classification without allowing them to establish transitive roots.
 	if targetResource == "semantic-rule" || targetResource == "vector-store" {
-		return semanticCleanupDirectAuditRetention(err)
+		return semanticCleanupDirectAuditRetention(targetResource, err)
 	}
 	return procedureInferenceCleanupRetainedByAudit(resources, targetResource, proof, err)
 }
 
-func semanticCleanupDirectAuditRetention(err error) (map[string]any, bool) {
-	references, rejectionCategory, observedReferenceCount := semanticCleanupReferences(err)
+func semanticCleanupDirectAuditRetention(targetResource string, err error) (map[string]any, bool) {
+	references, rejectionCategory, observedReferenceCount := semanticCleanupReferences(targetResource, err)
 	if rejectionCategory != "" {
 		return procedureInferenceCleanupRejectionEvidence(rejectionCategory, observedReferenceCount, procedureInferenceSafeEvidenceReferences(references)), false
 	}

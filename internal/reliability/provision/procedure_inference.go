@@ -368,7 +368,7 @@ func shouldInvalidateProcedureInferenceCleanupProof(code codes.Code) bool {
 }
 
 func procedureInferenceCleanupRetainedByAudit(resources *ProcedureInferenceResources, targetResource string, proof *procedureInferenceCleanupProof, err error) (map[string]any, bool) {
-	references, rejectionCategory, observedReferenceCount := semanticCleanupReferences(err)
+	references, rejectionCategory, observedReferenceCount := semanticCleanupReferences(targetResource, err)
 	if rejectionCategory != "" {
 		return procedureInferenceCleanupRejectionEvidence(rejectionCategory, observedReferenceCount, procedureInferenceSafeEvidenceReferences(references)), false
 	}
