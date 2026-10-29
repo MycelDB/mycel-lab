@@ -96,6 +96,18 @@ func TestK3DPreflightRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestK3DDriverValidatesDigestPinnedImagePolicy(t *testing.T) {
+	driver := K3DDriver{}
+	for _, policy := range []string{"local-import", "node-pull"} {
+		if err := driver.Validate(spec.EnvironmentSpec{Options: map[string]any{"digestPinnedImagePolicy": policy}}); err != nil {
+			t.Fatalf("Validate(%q) error=%v", policy, err)
+		}
+	}
+	if err := driver.Validate(spec.EnvironmentSpec{Options: map[string]any{"digestPinnedImagePolicy": "best-effort"}}); err == nil || !strings.Contains(err.Error(), `must be "local-import" or "node-pull"`) {
+		t.Fatalf("Validate(invalid) error=%v", err)
+	}
+}
+
 func TestK3DDriverCreateWaitsForAPIAndLeavesWorkloadReadinessToRunner(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
@@ -124,6 +136,96 @@ func TestK3DDriverCreateWaitsForAPIAndLeavesWorkloadReadinessToRunner(t *testing
 		if !strings.Contains(joined, want) {
 			t.Fatalf("WaitReady commands missing %q\n%s", want, joined)
 		}
+	}
+}
+
+func TestK3DDriverCreateLetsNodesPullDigestPinnedImage(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	image := "docker.io/myceldb/mycel@sha256:" + strings.Repeat("a", 64)
+	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "Digest pinned image"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns", Options: map[string]any{"digestPinnedImagePolicy": "node-pull"}}, Cluster: spec.ClusterSpec{Nodes: 1, Image: image, Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
+	environment, err := driver.Create(context.Background(), scenario, scenario.Environment)
+	if err != nil {
+		t.Fatalf("Create() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, unwanted := range []string{"docker image inspect " + image, "k3d image import " + image} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("digest-pinned registry image used local import command %q:\n%s", unwanted, joined)
+		}
+	}
+	for _, want := range []string{"k3d cluster create", "kubectl --context " + environment.Context + " get --raw=/readyz", "kubectl --context " + environment.Context + " apply -f"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
+func TestK3DDriverCreatePreservesDefaultLocalImportForDigestPinnedImage(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	image := "registry.example/mycel@sha256:" + strings.Repeat("c", 64)
+	scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "Private digest image"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns"}, Cluster: spec.ClusterSpec{Nodes: 1, Image: image, Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
+	if _, err := driver.Create(context.Background(), scenario, scenario.Environment); err != nil {
+		t.Fatalf("Create() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"docker image inspect " + image, "k3d image import " + image} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("default local import commands missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestK3DDriverCreateDoesNotBypassMalformedDigestReferences(t *testing.T) {
+	validDigest := strings.Repeat("d", 64)
+	for _, image := range []string{
+		"docker.io/myceldb/mycel@@sha256:" + validDigest,
+		"https://docker.io/myceldb/mycel@sha256:" + validDigest,
+		"docker.io/my cel@sha256:" + validDigest,
+		"docker.io/MycelDB/mycel@sha256:" + validDigest,
+	} {
+		t.Run(image, func(t *testing.T) {
+			runner := &fakeRunner{}
+			driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+			scenario := spec.ResolvedScenario{Metadata: spec.Metadata{Name: "Malformed digest image"}, Environment: spec.EnvironmentSpec{Namespace: "test-ns", Options: map[string]any{"digestPinnedImagePolicy": "node-pull"}}, Cluster: spec.ClusterSpec{Nodes: 1, Image: image, Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 8, ReplicaFactor: 1}}}
+			if _, err := driver.Create(context.Background(), scenario, scenario.Environment); err != nil {
+				t.Fatalf("Create() error=%v", err)
+			}
+			joined := strings.Join(runner.commands, "\n")
+			for _, command := range []string{"docker image inspect", "k3d image import"} {
+				if !strings.Contains(joined, command) || !strings.Contains(joined, image) {
+					t.Fatalf("malformed reference bypassed %q for %q:\n%s", command, image, joined)
+				}
+			}
+		})
+	}
+}
+
+func TestDigestPinnedImageReference(t *testing.T) {
+	validDigest := strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name  string
+		image string
+		want  bool
+	}{
+		{name: "registry digest", image: "docker.io/myceldb/mycel@sha256:" + validDigest, want: true},
+		{name: "trimmed registry digest", image: "  registry.example/mycel@sha256:" + validDigest + "  ", want: true},
+		{name: "tag", image: "myceldb/mycel:v0.21.0"},
+		{name: "bare digest", image: "sha256:" + validDigest},
+		{name: "missing repository", image: "@sha256:" + validDigest},
+		{name: "multiple separators", image: "myceldb/mycel@@sha256:" + validDigest},
+		{name: "URL scheme", image: "https://docker.io/myceldb/mycel@sha256:" + validDigest},
+		{name: "whitespace in repository", image: "docker.io/my cel@sha256:" + validDigest},
+		{name: "uppercase path", image: "docker.io/MycelDB/mycel@sha256:" + validDigest},
+		{name: "short digest", image: "myceldb/mycel@sha256:abc"},
+		{name: "non-hex digest", image: "myceldb/mycel@sha256:" + strings.Repeat("z", 64)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isDigestPinnedImageReference(test.image); got != test.want {
+				t.Fatalf("isDigestPinnedImageReference(%q)=%v, want %v", test.image, got, test.want)
+			}
+		})
 	}
 }
 
@@ -378,9 +480,43 @@ func TestK3DDriverUpdateStatefulSetImageWaitsForRollout(t *testing.T) {
 		t.Fatalf("UpdateStatefulSetImage() error=%v", err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"set image statefulset/myceld myceld=myceldb/mycel:v0.19.3", "rollout status statefulset/myceld --timeout=2m0s", "wait pods -l app=myceld --for=condition=Ready --timeout=2m0s"} {
+	for _, want := range []string{"docker image inspect myceldb/mycel:v0.19.3", "k3d image import myceldb/mycel:v0.19.3 -c mycel-lab-test", "set image statefulset/myceld myceld=myceldb/mycel:v0.19.3", "rollout status statefulset/myceld --timeout=2m0s", "wait pods -l app=myceld --for=condition=Ready --timeout=2m0s"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("UpdateStatefulSetImage commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
+func TestK3DDriverUpdateStatefulSetImageLetsNodesPullDigestPinnedImage(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test", Metadata: map[string]string{"digestPinnedImagePolicy": "node-pull"}}
+	image := "docker.io/myceldb/mycel@sha256:" + strings.Repeat("b", 64)
+	_, err := driver.UpdateStatefulSetImage(context.Background(), environment, StatefulSetImageUpdateRequest{Image: image, Timeout: 2 * time.Minute})
+	if err != nil {
+		t.Fatalf("UpdateStatefulSetImage() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if strings.Contains(joined, "docker image inspect "+image) || strings.Contains(joined, "k3d image import "+image) {
+		t.Fatalf("digest-pinned image used local import path:\n%s", joined)
+	}
+	if !strings.Contains(joined, "set image statefulset/myceld myceld="+image) {
+		t.Fatalf("digest-pinned image was not applied unchanged:\n%s", joined)
+	}
+}
+
+func TestK3DDriverUpdateStatefulSetImageDoesNotBypassMalformedDigestReference(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test", Metadata: map[string]string{"digestPinnedImagePolicy": "node-pull"}}
+	image := "docker.io/myceldb/mycel@@sha256:" + strings.Repeat("e", 64)
+	if _, err := driver.UpdateStatefulSetImage(context.Background(), environment, StatefulSetImageUpdateRequest{Image: image, Timeout: 2 * time.Minute}); err != nil {
+		t.Fatalf("UpdateStatefulSetImage() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"docker image inspect " + image, "k3d image import " + image} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("malformed reference bypassed command %q:\n%s", want, joined)
 		}
 	}
 }
