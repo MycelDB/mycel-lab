@@ -44,6 +44,15 @@ Protected workflows accept:
 
 Before execution, the workflow verifies the checked-out daemon commit and the image's clean-source OCI labels. The semantic workflow selects and verifies the ARM64 image while the cluster release gate selects and verifies the AMD64 image from the same immutable multiarch index. A tag-only image, missing required platform, dirty build, revision mismatch, missing source label, or mutable daemon ref fails before the harness starts.
 
+Both protected jobs also pull and preflight the exact object-store helper indexes before credential exposure or destructive execution:
+
+- MinIO `docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff`, rebuilt from upstream commit `07c3a429bfed433e49018cb0f78a52145d4bedeb` (`RELEASE.2025-09-07T16-13-09Z`);
+- mc `docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0`, rebuilt from upstream commit `7394ce0dd2a80935aded936b09fa12cbb3cb8096` (`RELEASE.2025-08-13T08-35-41Z`).
+
+The preflight requires the native job architecture, clean-source labels, exact source revisions, and exact binary version output, then binds those same digest references into the protected harness step. Mutable tags, cached-only images, architecture mismatches, or provenance mismatches fail before any live-provider credential is exposed and before the canonical destructive command.
+
+Workflow policy also locks the reviewed byte-exact contents of both protected workflow files. Any intentional workflow edit must update its reviewed SHA-256 lock together with structural policy and mutation coverage; unreviewed extra jobs, steps, or shell-equivalent executions fail closed.
+
 The live workflow additionally verifies the locked OpenAI-compatible provider-profile hash and these hard ceilings:
 
 - 128 requests and operations;
