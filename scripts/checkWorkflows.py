@@ -11,6 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 PINNED_ACTION = re.compile(r"^\s*uses:\s*[^\s@]+@([0-9a-f]{40})(?:\s+#.*)?$", re.MULTILINE)
 ANY_ACTION = re.compile(r"^\s*uses:\s*([^\s]+)", re.MULTILINE)
+LIVE_ARM64_RUNNER = re.compile(r"^    runs-on: ubuntu-24\.04-arm$", re.MULTILINE)
+LIVE_ARM64_PREFLIGHT = re.compile(
+    r"^      - name: Verify native ARM64 execution host\n"
+    r"        run: \|\n"
+    r"          set -euo pipefail\n"
+    r"          test \"\$\(uname -m\)\" = aarch64\n"
+    r"          test \"\$\(docker info --format '\{\{\.Architecture\}\}'\)\" = aarch64$",
+    re.MULTILINE,
+)
+FIRST_ACTION_STEP = re.compile(r"^\s+uses:\s*", re.MULTILINE)
+LIVE_SECRET = "${{ secrets.OPENAI_API_KEY }}"
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -20,6 +31,41 @@ def require(condition: bool, message: str, failures: list[str]) -> None:
 
 def read(name: str) -> str:
     return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def job_block(workflow: str, job_name: str) -> str | None:
+    header = re.compile(rf"^  {re.escape(job_name)}:\s*$", re.MULTILINE)
+    matches = list(header.finditer(workflow))
+    if len(matches) != 1:
+        return None
+    start = matches[0].start()
+    next_job = re.search(r"^  [A-Za-z0-9_-]+:\s*$", workflow[matches[0].end() :], re.MULTILINE)
+    end = matches[0].end() + next_job.start() if next_job else len(workflow)
+    return workflow[start:end]
+
+
+def check_live_arm64_preflight(live: str, failures: list[str]) -> None:
+    live_job = job_block(live, "live-semantic")
+    require(live_job is not None, "semantic-live.yml: exactly one live-semantic job is required", failures)
+    if live_job is None:
+        return
+
+    runner = LIVE_ARM64_RUNNER.search(live_job)
+    preflight = LIVE_ARM64_PREFLIGHT.search(live_job)
+    first_action = FIRST_ACTION_STEP.search(live_job)
+    secret_position = live_job.find(LIVE_SECRET)
+
+    require(runner is not None, "semantic-live.yml: live-semantic must use the native ARM64 hosted runner", failures)
+    require(preflight is not None, "semantic-live.yml: live-semantic requires the exact native ARM64 host preflight", failures)
+    require(
+        preflight is not None
+        and first_action is not None
+        and secret_position >= 0
+        and preflight.start() < first_action.start()
+        and preflight.start() < secret_position,
+        "semantic-live.yml: live-semantic ARM64 preflight must precede checkout/action use and secret exposure",
+        failures,
+    )
 
 
 def main() -> int:
@@ -63,6 +109,7 @@ def main() -> int:
         require("steps.safety.outputs.safe == 'true'" in text, f"{name}: uploads must be gated by artifact safety", failures)
         require("--confirm-destructive" in text, f"{name}: explicit destructive confirmation is required", failures)
 
+    check_live_arm64_preflight(live, failures)
     require("secrets.OPENAI_API_KEY" in live, "semantic-live.yml: protected OpenAI secret is required", failures)
     require(live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: secret must be scoped to one run step", failures)
     require("maxRequests: 128" in live and "maxInputTokens: 20000" in live and "maxEstimatedCostMicros: 1000000" in live and "totalTimeout: 5m" in live, "semantic-live.yml: fixed live ceilings are required", failures)

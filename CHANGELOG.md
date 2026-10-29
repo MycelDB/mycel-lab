@@ -12,6 +12,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Protected semantic live acceptance now uses a native GitHub-hosted ARM64 runner and fails before checkout or credential use unless both the execution host and Docker server report ARM64, preventing ARM64-only release candidates from failing on the former x64 runner.
 - K3d environment creation now waits for the Kubernetes API `/readyz` endpoint before the single manifest apply, preventing transient post-create OpenAPI EOF failures without retrying mutations.
 - Updated semantic-budget tests to clone protobuf messages without copying internal mutex state, allowing strict `go vet ./...` to pass in SGT10 CI.
 - The SGT9 unauthorized-search control now captures daemon-owned provider-budget evidence through one reusable, directly authenticated administrative observer instead of reusing the semantic controller actor token; the negative actor remains access-token-only with zero login or refresh calls.
