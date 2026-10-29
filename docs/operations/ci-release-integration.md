@@ -30,7 +30,7 @@ Configure these GitHub environments outside the workflow files:
 
 The protected semantic workflow uses the GitHub-hosted `ubuntu-24.04-arm` runner so the release candidate's `linux/arm64` image executes natively. Before checkout or credential use, it verifies that both the runner kernel and Docker server report ARM64. Do not substitute an x64 runner or rely on ambient emulation for an ARM64-only candidate.
 
-The release-gate workflow uses a self-hosted runner labelled `mycel-reliability`. Keep that runner ephemeral or reset it after every job. It must provide Docker with Compose, k3d, and kubectl. Do not run untrusted fork code on this runner.
+The release-gate workflow uses GitHub-hosted `ubuntu-24.04` to execute the candidate's `linux/amd64` image natively. Before checkout or action use, it verifies that both the runner kernel and Docker server report AMD64. It installs the exact k3d v5.9.0 AMD64 binary only after validating its pinned SHA-256 checksum, then verifies Docker, Compose, k3d, kubectl, and the selected daemon image's `linux/amd64` identity before destructive execution. Do not substitute ARM emulation or a self-hosted runner with an ARM64 Docker server.
 
 Repository workflow permissions remain `contents: read`. Checkout credentials are not persisted. Every referenced action is pinned to a full commit SHA.
 
@@ -42,7 +42,7 @@ Protected workflows accept:
 - a pullable daemon image reference containing `@sha256:<64 lowercase hex>`;
 - an operator-supplied approval reason.
 
-Before execution, the workflow verifies the checked-out daemon commit and the image's clean-source OCI labels. A tag-only image, dirty build, revision mismatch, missing source label, or mutable daemon ref fails before the harness starts.
+Before execution, the workflow verifies the checked-out daemon commit and the image's clean-source OCI labels. The semantic workflow selects and verifies the ARM64 image while the cluster release gate selects and verifies the AMD64 image from the same immutable multiarch index. A tag-only image, missing required platform, dirty build, revision mismatch, missing source label, or mutable daemon ref fails before the harness starts.
 
 The live workflow additionally verifies the locked OpenAI-compatible provider-profile hash and these hard ceilings:
 
