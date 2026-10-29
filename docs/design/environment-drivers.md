@@ -73,6 +73,7 @@ environment:
   namespace: mycel-lab
   options:
     clusterNamePrefix: mycel-lab
+    digestPinnedImagePolicy: node-pull
   capabilities:
     required:
       - per-node-endpoints
@@ -275,9 +276,14 @@ scenario docs should prefer logical `node-*` terminology where possible.
 ### `k3d`
 
 - Current disposable local Kubernetes path.
-- Creates a `k3d` cluster, imports local image if available, applies rendered
-  Kubernetes manifests, waits for StatefulSet/pods readiness, and deletes the
-  cluster on cleanup.
+- Creates a `k3d` cluster, imports locally tagged images when available, applies
+  rendered Kubernetes manifests, waits for StatefulSet/pods readiness, and
+  deletes the cluster on cleanup. Scenarios may explicitly set
+  `digestPinnedImagePolicy: node-pull` so digest-pinned registry references
+  bypass the host-local import path and k3d nodes pull the exact immutable
+  digest directly; this avoids k3d runtime lookup failures for multiarch index
+  references. The default `local-import` policy preserves private and local
+  image workflows.
 - Discovers nodes from pods owned by the `myceld` StatefulSet.
 - Exposes endpoints through Kubernetes port-forwards, retaining the existing
   `--console-endpoints` behavior.

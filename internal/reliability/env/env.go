@@ -22,6 +22,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/emulator"
 	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	"github.com/distribution/reference"
 )
 
 type Capability string
@@ -377,7 +378,15 @@ func (d K3DDriver) Capabilities() CapabilitySet {
 }
 
 func (d K3DDriver) Validate(environment spec.EnvironmentSpec) error {
-	return rejectUnknownOptions(environment.Options, "clusterNamePrefix", "createArguments", "consolePortBase", "providerEmulatorImage")
+	if err := rejectUnknownOptions(environment.Options, "clusterNamePrefix", "createArguments", "consolePortBase", "providerEmulatorImage", "digestPinnedImagePolicy"); err != nil {
+		return err
+	}
+	switch stringOption(environment.Options, "digestPinnedImagePolicy", "local-import") {
+	case "local-import", "node-pull":
+		return nil
+	default:
+		return errors.New(`environment option "digestPinnedImagePolicy" must be "local-import" or "node-pull"`)
+	}
 }
 
 func (d K3DDriver) Preflight(ctx context.Context, environment spec.EnvironmentSpec) error {
@@ -409,7 +418,7 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario, e
 	if namespace == "" {
 		namespace = "mycel-lab"
 	}
-	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName, Metadata: map[string]string{"nodeCount": strconv.Itoa(scenario.Cluster.Nodes), "consolePortBase": strconv.Itoa(intOption(environmentSpec.Options, "consolePortBase", DefaultConsolePortBase)), "imageOverride": strings.TrimSpace(scenario.Cluster.Image)}}
+	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName, Metadata: map[string]string{"nodeCount": strconv.Itoa(scenario.Cluster.Nodes), "consolePortBase": strconv.Itoa(intOption(environmentSpec.Options, "consolePortBase", DefaultConsolePortBase)), "imageOverride": strings.TrimSpace(scenario.Cluster.Image), "digestPinnedImagePolicy": stringOption(environmentSpec.Options, "digestPinnedImagePolicy", "local-import")}}
 	args := []string{"cluster", "create", clusterName, "--wait"}
 	args = append(args, stringSliceOption(environmentSpec.Options, "createArguments")...)
 	args = append(args, d.CreateArguments...)
@@ -490,6 +499,13 @@ func (d K3DDriver) waitForKubernetesAPI(ctx context.Context, environment Environ
 func (d K3DDriver) importLocalImageIfPresent(ctx context.Context, environment Environment, image string) error {
 	image = strings.TrimSpace(image)
 	if image == "" {
+		return nil
+	}
+	if environment.Metadata["digestPinnedImagePolicy"] == "node-pull" && isDigestPinnedImageReference(image) {
+		// k3d v5.9.0 cannot reliably resolve a multiarch index reference by
+		// digest from the host Docker image store. Explicit node-pull policy
+		// lets cluster nodes pull the exact immutable reference instead. The
+		// default local-import policy preserves private/local compatibility.
 		return nil
 	}
 	runner := d.runner()
@@ -1532,6 +1548,16 @@ func canonicalImagePlatform(osName, architecture string) string {
 	default:
 		return ""
 	}
+}
+
+func isDigestPinnedImageReference(value string) bool {
+	value = strings.TrimSpace(value)
+	named, err := reference.ParseNormalizedNamed(value)
+	if err != nil {
+		return false
+	}
+	canonical, ok := named.(reference.Canonical)
+	return ok && canonicalImageDigest(canonical.Digest().String()) != ""
 }
 
 func canonicalImageDigest(value string) string {

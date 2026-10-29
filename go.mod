@@ -3,6 +3,7 @@ module github.com/MycelDB/mycel-lab
 go 1.25.5
 
 require (
+	github.com/distribution/reference v0.6.0
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/myceldb/mycel-go-sdk v0.21.0-sgt9.1.0.20261027235911-dd8023a05c3d
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
@@ -10,6 +11,8 @@ require (
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+require github.com/opencontainers/go-digest v1.0.0 // indirect
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
