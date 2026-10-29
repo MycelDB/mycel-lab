@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
+RUN_MARKERS = ("harness-build.json", "result.json")
 SENSITIVE_PATTERNS = {
     "api-key": re.compile(rb"\bsk-[A-Za-z0-9_-]{16,}\b"),
     "bearer-token": re.compile(rb"(?i)\bbearer[ \t]+[a-z0-9._~+/=-]{8,}"),
@@ -32,21 +33,41 @@ def main() -> int:
         print("usage: verifyArtifactSafety.py <artifact-root>", file=sys.stderr)
         return 2
 
-    root = Path(sys.argv[1]).resolve()
+    requested_root = Path(sys.argv[1])
+    if requested_root.is_symlink():
+        print(f"artifact root cannot be a symlink: {requested_root}", file=sys.stderr)
+        return 1
+    root = requested_root.resolve()
     if not root.is_dir():
         print(f"artifact root does not exist: {root}", file=sys.stderr)
         return 1
 
-    results = sorted(root.rglob("result.json"))
-    if not results:
-        print("no result.json files found; refusing artifact upload", file=sys.stderr)
+    entries = sorted(root.rglob("*"))
+    failures = [
+        f"{path.relative_to(root).as_posix()}: artifact symlink is forbidden"
+        for path in entries
+        if path.is_symlink()
+    ]
+    if failures:
+        for failure in failures:
+            print(failure, file=sys.stderr)
         return 1
 
-    run_roots: list[Path] = []
-    failures: list[str] = []
-    for result_path in results:
-        run_root = result_path.parent
-        run_roots.append(run_root)
+    run_roots = sorted(
+        {
+            marker.parent
+            for marker_name in RUN_MARKERS
+            for marker in root.rglob(marker_name)
+            if marker.is_file()
+        }
+    )
+    if not run_roots:
+        print("no run markers found; refusing artifact upload", file=sys.stderr)
+        return 1
+
+    failures = []
+    for run_root in run_roots:
+        result_path = run_root / "result.json"
         redaction_path = run_root / "redaction-scan.json"
         try:
             result = load_object(result_path)
@@ -70,11 +91,11 @@ def main() -> int:
 
     inventory_path = root / "artifact-upload-sha256.txt"
     rows: list[tuple[str, str]] = []
-    for path in sorted(root.rglob("*")):
+    for path in entries:
         if path == inventory_path or path.is_dir():
             continue
         relative = path.relative_to(root).as_posix()
-        if path.is_symlink() or not path.is_file():
+        if not path.is_file():
             failures.append(f"{relative}: non-regular artifact file is forbidden")
             continue
         size = path.stat().st_size
