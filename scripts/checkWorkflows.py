@@ -64,9 +64,9 @@ def exact_block(block: str) -> re.Pattern[str]:
     return re.compile(r"^" + re.escape(block) + r"$", re.MULTILINE)
 
 
-def helper_preflight_pattern(architecture: str) -> re.Pattern[str]:
+def helper_preflight_block(architecture: str) -> str:
     label = architecture.upper()
-    block = f'''      - name: Verify immutable {label} object-store helpers
+    return f'''      - name: Verify immutable {label} object-store helpers
         env:
           MINIO_IMAGE: {MINIO_HELPER_IMAGE}
           MINIO_MC_IMAGE: {MC_HELPER_IMAGE}
@@ -78,29 +78,56 @@ def helper_preflight_pattern(architecture: str) -> re.Pattern[str]:
           test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{{{.Os}}}}/{{{{.Architecture}}}}')" = linux/{architecture}
           test "$(docker image inspect "$MINIO_IMAGE" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')" = 07c3a429bfed433e49018cb0f78a52145d4bedeb
           test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')" = 7394ce0dd2a80935aded936b09fa12cbb3cb8096
+          test "$(docker image inspect "$MINIO_IMAGE" --format '{{{{index .Config.Labels "org.opencontainers.image.source"}}}}')" = https://github.com/minio/minio
+          test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{{{index .Config.Labels "org.opencontainers.image.source"}}}}')" = https://github.com/minio/mc
           test "$(docker image inspect "$MINIO_IMAGE" --format '{{{{index .Config.Labels "io.myceldb.source.dirty"}}}}')" = false
           test "$(docker image inspect "$MINIO_MC_IMAGE" --format '{{{{index .Config.Labels "io.myceldb.source.dirty"}}}}')" = false
-          docker run --rm "$MINIO_IMAGE" --version | grep -F 'RELEASE.2025-09-07T16-13-09Z (commit-id=07c3a429bfed433e49018cb0f78a52145d4bedeb)'
-          docker run --rm "$MINIO_MC_IMAGE" --version | grep -F 'RELEASE.2025-08-13T08-35-41Z (commit-id=7394ce0dd2a80935aded936b09fa12cbb3cb8096)'
+          docker run --rm "$MINIO_IMAGE" --version | grep -Fx 'minio version RELEASE.2025-09-07T16-13-09Z (commit-id=07c3a429bfed433e49018cb0f78a52145d4bedeb)'
+          docker run --rm "$MINIO_MC_IMAGE" --version | grep -Fx 'mc version RELEASE.2025-08-13T08-35-41Z (commit-id=7394ce0dd2a80935aded936b09fa12cbb3cb8096)'
 '''.rstrip("\n")
-    return exact_block(block)
 
 
-LIVE_HELPER_RUN_ENV = exact_block(
-    f'''        env:
+def helper_preflight_pattern(architecture: str) -> re.Pattern[str]:
+    return exact_block(helper_preflight_block(architecture))
+
+
+LIVE_RUN_STEP = f'''      - name: Run approved live scenario once
+        id: live_run
+        working-directory: mycel-lab
+        env:
           ARTIFACT_ROOT: ${{{{ runner.temp }}}}/mycel-lab-semantic-live
           DAEMON_IMAGE: ${{{{ inputs.daemon_image }}}}
           MINIO_IMAGE: {MINIO_HELPER_IMAGE}
           MINIO_MC_IMAGE: {MC_HELPER_IMAGE}
-          OPENAI_API_KEY: ${{{{ secrets.OPENAI_API_KEY }}}}'''
-)
-RELEASE_HELPER_RUN_ENV = exact_block(
-    f'''        env:
+          OPENAI_API_KEY: ${{{{ secrets.OPENAI_API_KEY }}}}
+        run: |
+          set +e
+          ./bin/mycel-lab run suite semantic-live-provider \\
+            --confirm-destructive \\
+            --image "$DAEMON_IMAGE" \\
+            --provider-profile tests/reliability/provider-profiles/openai-compatible-live.yaml \\
+            --artifact-root "$ARTIFACT_ROOT"
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0'''
+RELEASE_RUN_STEP = f'''      - name: Run approved cluster release gate once
+        id: release_run
+        working-directory: mycel-lab
+        env:
           ARTIFACT_ROOT: ${{{{ runner.temp }}}}/mycel-lab-cluster-release-gate
           DAEMON_IMAGE: ${{{{ inputs.daemon_image }}}}
           MINIO_IMAGE: {MINIO_HELPER_IMAGE}
-          MINIO_MC_IMAGE: {MC_HELPER_IMAGE}'''
-)
+          MINIO_MC_IMAGE: {MC_HELPER_IMAGE}
+        run: |
+          set +e
+          ./bin/mycel-lab run suite cluster-release-gate \\
+            --confirm-destructive \\
+            --image "$DAEMON_IMAGE" \\
+            --artifact-root "$ARTIFACT_ROOT"
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0'''
+SECRET_CONTEXT_REFERENCE = re.compile(r"\$\{\{\s*secrets(?:\.|\[)")
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -121,6 +148,14 @@ def job_block(workflow: str, job_name: str) -> str | None:
     next_job = re.search(r"^  [A-Za-z0-9_-]+:\s*$", workflow[matches[0].end() :], re.MULTILINE)
     end = matches[0].end() + next_job.start() if next_job else len(workflow)
     return workflow[start:end]
+
+
+def step_blocks(job: str) -> list[str]:
+    starts = list(re.finditer(r"^      - [A-Za-z0-9_-]+:\s*", job, re.MULTILINE))
+    return [
+        job[match.start() : (starts[index + 1].start() if index + 1 < len(starts) else len(job))].rstrip("\n")
+        for index, match in enumerate(starts)
+    ]
 
 
 def check_live_arm64_preflight(live: str, failures: list[str]) -> None:
@@ -151,7 +186,7 @@ def check_helper_images(
     workflow: str,
     job_name: str,
     architecture: str,
-    run_env_pattern: re.Pattern[str],
+    run_step: str,
     workflow_name: str,
     failures: list[str],
 ) -> None:
@@ -159,26 +194,30 @@ def check_helper_images(
     if job is None:
         return
 
-    preflight = helper_preflight_pattern(architecture).search(job)
-    run_env = run_env_pattern.search(job)
-    destructive = job.find("--confirm-destructive")
-    secret = job.find(LIVE_SECRET)
+    steps = step_blocks(job)
+    expected_preflight = helper_preflight_block(architecture)
+    preflight_indexes = [index for index, step in enumerate(steps) if step == expected_preflight]
+    run_indexes = [index for index, step in enumerate(steps) if step == run_step]
 
-    require(preflight is not None, f"{workflow_name}: {job_name} requires the exact immutable {architecture} helper-image preflight", failures)
-    require(run_env is not None, f"{workflow_name}: {job_name} must pass the preflighted helper digests to the protected run step", failures)
+    require(len(preflight_indexes) == 1, f"{workflow_name}: {job_name} requires exactly one complete immutable {architecture} helper-image preflight step", failures)
+    require(len(run_indexes) == 1, f"{workflow_name}: {job_name} must bind helper digests and the canonical command in one complete protected run step", failures)
     require(
-        preflight is not None and destructive >= 0 and preflight.start() < destructive,
+        len(preflight_indexes) == 1 and len(run_indexes) == 1 and preflight_indexes[0] < run_indexes[0],
         f"{workflow_name}: helper-image preflight must precede destructive execution",
         failures,
     )
-    if secret >= 0:
+    require(job.count(f"MINIO_IMAGE: {MINIO_HELPER_IMAGE}") == 2, f"{workflow_name}: MinIO helper digest must appear exactly in preflight and protected run step", failures)
+    require(job.count(f"MINIO_MC_IMAGE: {MC_HELPER_IMAGE}") == 2, f"{workflow_name}: mc helper digest must appear exactly in preflight and protected run step", failures)
+
+    secret_locations = [index for index, step in enumerate(steps) if SECRET_CONTEXT_REFERENCE.search(step)]
+    if job_name == "live-semantic":
         require(
-            preflight is not None and preflight.start() < secret,
-            f"{workflow_name}: helper-image preflight must precede credential exposure",
+            len(run_indexes) == 1 and secret_locations == run_indexes,
+            f"{workflow_name}: every secret reference must remain inside the exact protected run step after helper preflight",
             failures,
         )
-    require(job.count(f"MINIO_IMAGE: {MINIO_HELPER_IMAGE}") == 2, f"{workflow_name}: MinIO helper digest must appear exactly in preflight and protected run env", failures)
-    require(job.count(f"MINIO_MC_IMAGE: {MC_HELPER_IMAGE}") == 2, f"{workflow_name}: mc helper digest must appear exactly in preflight and protected run env", failures)
+    else:
+        require(not secret_locations, f"{workflow_name}: cluster gate must remain credential-free", failures)
 
 
 def check_release_amd64_preflight(release: str, failures: list[str]) -> None:
@@ -235,7 +274,7 @@ def main() -> int:
 
     ci = texts.get("ci.yml", "")
     require("pull_request:" in ci and "branches: [develop, main]" in ci, "ci.yml: PR and protected-branch triggers are required", failures)
-    require("secrets." not in ci, "ci.yml: default CI must not consume secrets", failures)
+    require(SECRET_CONTEXT_REFERENCE.search(ci) is None, "ci.yml: default CI must not consume secrets", failures)
     require("--dry-run" in ci and "--confirm-destructive" not in ci, "ci.yml: reliability execution must remain dry-run only", failures)
     require("compose-semantic-graph-contract" in ci, "ci.yml: deterministic semantic contract dry-run is required", failures)
     require("compose-procedure-inference-control-emulator" in ci, "ci.yml: protocol-emulator dry-run is required", failures)
@@ -260,12 +299,12 @@ def main() -> int:
 
     check_live_arm64_preflight(live, failures)
     check_release_amd64_preflight(release, failures)
-    check_helper_images(live, "live-semantic", "arm64", LIVE_HELPER_RUN_ENV, "semantic-live.yml", failures)
-    check_helper_images(release, "cluster-release-gate", "amd64", RELEASE_HELPER_RUN_ENV, "release-gate.yml", failures)
+    check_helper_images(live, "live-semantic", "arm64", LIVE_RUN_STEP, "semantic-live.yml", failures)
+    check_helper_images(release, "cluster-release-gate", "amd64", RELEASE_RUN_STEP, "release-gate.yml", failures)
     require("secrets.OPENAI_API_KEY" in live, "semantic-live.yml: protected OpenAI secret is required", failures)
-    require(live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: secret must be scoped to one run step", failures)
+    require(len(SECRET_CONTEXT_REFERENCE.findall(live)) == 1 and live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: exactly one secret reference is allowed in the protected run step", failures)
     require("maxRequests: 128" in live and "maxInputTokens: 20000" in live and "maxEstimatedCostMicros: 1000000" in live and "totalTimeout: 5m" in live, "semantic-live.yml: fixed live ceilings are required", failures)
-    require("secrets." not in release, "release-gate.yml: cluster gate must remain credential-free", failures)
+    require(SECRET_CONTEXT_REFERENCE.search(release) is None, "release-gate.yml: cluster gate must remain credential-free", failures)
 
     profile = (ROOT / "tests" / "reliability" / "provider-profiles" / "openai-compatible-live.yaml").read_text(encoding="utf-8")
     for value in ("maxRequests: 128", "maxInputTokens: 20000", "maxEstimatedCostMicros: 1000000", "totalTimeout: 5m"):

@@ -78,7 +78,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 text,
                 "live-semantic",
                 "arm64",
-                checkWorkflows.LIVE_HELPER_RUN_ENV,
+                checkWorkflows.LIVE_RUN_STEP,
                 "semantic-live.yml",
                 failures,
             )
@@ -87,7 +87,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 text,
                 "cluster-release-gate",
                 "amd64",
-                checkWorkflows.RELEASE_HELPER_RUN_ENV,
+                checkWorkflows.RELEASE_RUN_STEP,
                 "release-gate.yml",
                 failures,
             )
@@ -113,11 +113,72 @@ class WorkflowPolicyTests(unittest.TestCase):
                 mutated_digest = text.replace(checkWorkflows.MINIO_HELPER_IMAGE, "docker.io/myceldb/mycel-minio-test-helper@sha256:" + "0" * 64, 1)
                 mutated_platform = block.replace(f"linux/{architecture}", "linux/ppc64le", 1)
                 mutated_platform_text = text[: match.start()] + mutated_platform + text[match.end() :]
-                message = f"{workflow}: {'live-semantic' if live else 'cluster-release-gate'} requires the exact immutable {architecture} helper-image preflight"
+                message = f"{workflow}: {'live-semantic' if live else 'cluster-release-gate'} requires exactly one complete immutable {architecture} helper-image preflight step"
                 self.assertIn(message, self.check_helper_policy(removed, live))
                 self.assertIn(message, self.check_helper_policy(commented, live))
                 self.assertIn(message, self.check_helper_policy(mutated_digest, live))
                 self.assertIn(message, self.check_helper_policy(mutated_platform_text, live))
+
+    def test_disabled_or_fallible_helper_preflight_is_rejected(self) -> None:
+        for text, live, architecture, workflow, job in (
+            (self.live, True, "arm64", "semantic-live.yml", "live-semantic"),
+            (self.release, False, "amd64", "release-gate.yml", "cluster-release-gate"),
+        ):
+            for extra_key in ("        if: ${{ false }}", "        continue-on-error: true"):
+                with self.subTest(workflow=workflow, key=extra_key):
+                    match = checkWorkflows.helper_preflight_pattern(architecture).search(text)
+                    self.assertIsNotNone(match)
+                    assert match is not None
+                    mutated = text[: match.end()] + "\n" + extra_key + text[match.end() :]
+                    self.assertIn(
+                        f"{workflow}: {job} requires exactly one complete immutable {architecture} helper-image preflight step",
+                        self.check_helper_policy(mutated, live),
+                    )
+
+    def test_same_job_decoy_environment_cannot_mask_mutated_run_step(self) -> None:
+        for text, live, run_step, workflow, job in (
+            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-live.yml", "live-semantic"),
+            (self.release, False, checkWorkflows.RELEASE_RUN_STEP, "release-gate.yml", "cluster-release-gate"),
+        ):
+            with self.subTest(workflow=workflow):
+                start = text.find(run_step)
+                self.assertGreaterEqual(start, 0)
+                mutated_run = run_step.replace(checkWorkflows.MINIO_HELPER_IMAGE, "docker.io/myceldb/mycel-minio-test-helper:mutable", 1)
+                mutated_run = mutated_run.replace(checkWorkflows.MC_HELPER_IMAGE, "docker.io/myceldb/mycel-mc-test-helper:mutable", 1)
+                decoy = f'''      - name: Inert helper environment decoy
+        if: ${{{{ false }}}}
+        env:
+          MINIO_IMAGE: {checkWorkflows.MINIO_HELPER_IMAGE}
+          MINIO_MC_IMAGE: {checkWorkflows.MC_HELPER_IMAGE}
+        run: echo decoy
+'''
+                mutated = text[:start] + decoy + mutated_run + text[start + len(run_step) :]
+                self.assertIn(
+                    f"{workflow}: {job} must bind helper digests and the canonical command in one complete protected run step",
+                    self.check_helper_policy(mutated, live),
+                )
+
+    def test_bracket_form_secret_reference_outside_run_step_is_rejected(self) -> None:
+        for text, live, architecture, workflow in (
+            (self.live, True, "arm64", "semantic-live.yml"),
+            (self.release, False, "amd64", "release-gate.yml"),
+        ):
+            with self.subTest(workflow=workflow):
+                match = checkWorkflows.helper_preflight_pattern(architecture).search(text)
+                self.assertIsNotNone(match)
+                assert match is not None
+                secret_step = '''      - name: Premature secret reference
+        env:
+          PREMATURE_SECRET: ${{ secrets['OPENAI_API_KEY'] }}
+        run: test -n "$PREMATURE_SECRET"
+'''
+                mutated = text[: match.start()] + secret_step + text[match.start() :]
+                expected = (
+                    "semantic-live.yml: every secret reference must remain inside the exact protected run step after helper preflight"
+                    if live
+                    else "release-gate.yml: cluster gate must remain credential-free"
+                )
+                self.assertIn(expected, self.check_helper_policy(mutated, live))
 
     def test_late_helper_preflight_is_rejected(self) -> None:
         for text, live, architecture, workflow in (
@@ -154,23 +215,22 @@ class WorkflowPolicyTests(unittest.TestCase):
                 )
                 with_decoy = without_real.replace("jobs:\n", decoy, 1)
                 self.assertIn(
-                    f"{workflow}: {'live-semantic' if live else 'cluster-release-gate'} requires the exact immutable {architecture} helper-image preflight",
+                    f"{workflow}: {'live-semantic' if live else 'cluster-release-gate'} requires exactly one complete immutable {architecture} helper-image preflight step",
                     self.check_helper_policy(with_decoy, live),
                 )
 
     def test_preflighted_helper_digests_must_be_bound_to_run_step(self) -> None:
-        for text, live, run_env, workflow, job in (
-            (self.live, True, checkWorkflows.LIVE_HELPER_RUN_ENV, "semantic-live.yml", "live-semantic"),
-            (self.release, False, checkWorkflows.RELEASE_HELPER_RUN_ENV, "release-gate.yml", "cluster-release-gate"),
+        for text, live, run_step, workflow, job in (
+            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-live.yml", "live-semantic"),
+            (self.release, False, checkWorkflows.RELEASE_RUN_STEP, "release-gate.yml", "cluster-release-gate"),
         ):
             with self.subTest(workflow=workflow):
-                match = run_env.search(text)
-                self.assertIsNotNone(match)
-                assert match is not None
-                mutated = match.group(0).replace(checkWorkflows.MC_HELPER_IMAGE, "docker.io/myceldb/mycel-mc-test-helper:mutable", 1)
-                mutated_text = text[: match.start()] + mutated + text[match.end() :]
+                start = text.find(run_step)
+                self.assertGreaterEqual(start, 0)
+                mutated = run_step.replace(checkWorkflows.MC_HELPER_IMAGE, "docker.io/myceldb/mycel-mc-test-helper:mutable", 1)
+                mutated_text = text[:start] + mutated + text[start + len(run_step) :]
                 self.assertIn(
-                    f"{workflow}: {job} must pass the preflighted helper digests to the protected run step",
+                    f"{workflow}: {job} must bind helper digests and the canonical command in one complete protected run step",
                     self.check_helper_policy(mutated_text, live),
                 )
 
