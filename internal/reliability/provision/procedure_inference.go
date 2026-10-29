@@ -456,16 +456,25 @@ func procedureInferenceCleanupReferenceEvidence(categoryKey, category string, re
 		}
 		return sorted[i].Type < sorted[j].Type
 	})
-	evidence := make([]map[string]string, 0, len(sorted))
-	for _, reference := range sorted {
+	evidenceReferences := sorted
+	if len(evidenceReferences) > maxCleanupReferenceEvidence {
+		evidenceReferences = evidenceReferences[:maxCleanupReferenceEvidence]
+	}
+	evidence := make([]map[string]string, 0, len(evidenceReferences))
+	for _, reference := range evidenceReferences {
 		digest := sha256.Sum256([]byte(reference.Type + ":" + reference.ID))
 		evidence = append(evidence, map[string]string{"type": reference.Type, "idHash": hex.EncodeToString(digest[:])})
 	}
-	return map[string]any{
+	out := map[string]any{
 		categoryKey:      category,
 		"referenceCount": len(sorted),
 		"references":     evidence,
 	}
+	if len(evidenceReferences) != len(sorted) {
+		out["evidenceReferenceCount"] = len(evidenceReferences)
+		out["referencesTruncated"] = true
+	}
+	return out
 }
 
 func procedureInferenceRunOwnedRetainedReference(resources *ProcedureInferenceResources, proof *procedureInferenceCleanupProof, reference semanticCleanupReference) (bool, bool) {

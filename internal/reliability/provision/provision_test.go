@@ -15,6 +15,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	mycel "github.com/myceldb/mycel-go-sdk"
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -415,6 +416,120 @@ func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 				t.Fatalf("semanticCleanupRetainedByAudit()=%t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func structuredCleanupReferenceError(t *testing.T, references []string, totalCount int, complete bool) error {
+	t.Helper()
+	violations := make([]*errdetails.PreconditionFailure_Violation, 0, len(references))
+	for _, reference := range references {
+		violations = append(violations, &errdetails.PreconditionFailure_Violation{Type: "mycel.io/inference-reference", Subject: reference})
+	}
+	info := &errdetails.ErrorInfo{Reason: "INFERENCE_RESOURCE_REFERENCED", Domain: "mycel.io", Metadata: map[string]string{
+		"schema_version":         "1",
+		"total_reference_count":  fmt.Sprintf("%d", totalCount),
+		"detail_reference_count": fmt.Sprintf("%d", len(references)),
+		"details_complete":       fmt.Sprintf("%t", complete),
+	}}
+	st, err := status.New(codes.FailedPrecondition, "resource is referenced by usage_event:11111111-1111-4111-8111-111111111111, ...1 more").WithDetails(info, &errdetails.PreconditionFailure{Violations: violations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Err()
+}
+
+func TestSemanticCleanupStructuredReferencesAcceptCompleteEvidenceAboveMessageBound(t *testing.T) {
+	references := make([]string, 0, 33)
+	for index := 0; index < 33; index++ {
+		references = append(references, fmt.Sprintf("policy_decision:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	details, retained := semanticCleanupDirectAuditRetention(structuredCleanupReferenceError(t, references, len(references), true))
+	if !retained || details["referenceCount"] != 33 || details["evidenceReferenceCount"] != maxCleanupReferenceEvidence || details["referencesTruncated"] != true {
+		t.Fatalf("complete structured audit evidence retained=%t details=%v", retained, details)
+	}
+	if got := len(details["references"].([]map[string]string)); got != maxCleanupReferenceEvidence {
+		t.Fatalf("bounded evidence references=%d want %d", got, maxCleanupReferenceEvidence)
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesRejectIncompleteEvidence(t *testing.T) {
+	references := make([]string, 0, maxCleanupReferenceEvidence)
+	for index := 0; index < maxCleanupReferenceEvidence; index++ {
+		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	details, retained := semanticCleanupDirectAuditRetention(structuredCleanupReferenceError(t, references, len(references)+1, false))
+	if retained || details["rejectionCategory"] != "truncated-structured-reference-list" || details["observedReferenceCount"] != len(references)+1 {
+		t.Fatalf("incomplete structured evidence retained=%t details=%v", retained, details)
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesRejectUnsupportedHiddenType(t *testing.T) {
+	references := make([]string, 0, 33)
+	for index := 0; index < 32; index++ {
+		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	references = append(references, "future_reference:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	details, retained := semanticCleanupDirectAuditRetention(structuredCleanupReferenceError(t, references, len(references), true))
+	if retained || details["rejectionCategory"] != "unsupported-reference-type" || details["observedReferenceCount"] != len(references) {
+		t.Fatalf("unsupported structured reference retained=%t details=%v", retained, details)
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesRejectDuplicatesAndMalformedSubjects(t *testing.T) {
+	const usageReference = "usage_event:11111111-1111-4111-8111-111111111111"
+	tests := []struct {
+		name       string
+		references []string
+		category   string
+	}{
+		{name: "duplicate", references: []string{usageReference, usageReference}, category: "duplicate-structured-reference"},
+		{name: "malformed", references: []string{usageReference, "usage_event:not-a-uuid"}, category: "malformed-structured-reference"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			details, retained := semanticCleanupDirectAuditRetention(structuredCleanupReferenceError(t, test.references, len(test.references), true))
+			if retained || details["rejectionCategory"] != test.category {
+				t.Fatalf("invalid structured evidence retained=%t details=%v", retained, details)
+			}
+		})
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesProveCandidate15AuditClosure(t *testing.T) {
+	const (
+		policyID     = "11111111-1111-4111-8111-111111111111"
+		grantID      = "22222222-2222-4222-8222-222222222222"
+		credentialID = "33333333-3333-4333-8333-333333333333"
+		profileID    = "44444444-4444-4444-8444-444444444444"
+		capabilityID = "55555555-5555-4555-8555-555555555555"
+		modelID      = "66666666-6666-4666-8666-666666666666"
+		endpointID   = "77777777-7777-4777-8777-777777777777"
+	)
+	resources := &ProcedureInferenceResources{AccessPolicyID: policyID, CredentialGrantID: grantID, CredentialID: credentialID, IntelligenceProfileID: profileID, CapabilityID: capabilityID, ModelID: modelID, EndpointID: endpointID}
+	proof := &procedureInferenceCleanupProof{}
+	auditReferences := make([]string, 0, 36)
+	for index := 0; index < 30; index++ {
+		auditReferences = append(auditReferences, fmt.Sprintf("policy_decision:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	for index := 0; index < 6; index++ {
+		auditReferences = append(auditReferences, fmt.Sprintf("usage_event:%08x-2222-4222-8222-%012x", index+1, index+1))
+	}
+	retain := func(resource string, references []string) {
+		t.Helper()
+		details, retained := procedureInferenceCleanupRetainedByAudit(resources, resource, proof, structuredCleanupReferenceError(t, references, len(references), true))
+		if !retained {
+			t.Fatalf("%s complete structured closure rejected: %v", resource, details)
+		}
+	}
+	retain("access-policy", auditReferences[:30])
+	retain("credential-grant", auditReferences[30:])
+	retain("credential", append([]string{"credential_grant:" + grantID}, auditReferences[30:]...))
+	retain("intelligence-profile", auditReferences[:33])
+	retain("capability", append([]string{"intelligence_profile:" + profileID}, auditReferences[:32]...))
+	retain("model", append([]string{"capability:" + capabilityID, "credential_grant:" + grantID, "intelligence_profile:" + profileID}, auditReferences[:30]...))
+	retain("endpoint", append([]string{"capability:" + capabilityID, "credential:" + credentialID, "credential_grant:" + grantID, "intelligence_profile:" + profileID}, auditReferences[:29]...))
+	if _, retained := proof.node("endpoint", endpointID); !retained {
+		t.Fatal("complete structured candidate-15 closure did not retain the endpoint proof")
 	}
 }
 
