@@ -63,6 +63,8 @@ def main() -> int:
         require("steps.safety.outputs.safe == 'true'" in text, f"{name}: uploads must be gated by artifact safety", failures)
         require("--confirm-destructive" in text, f"{name}: explicit destructive confirmation is required", failures)
 
+    require("runs-on: ubuntu-24.04-arm" in live, "semantic-live.yml: native ARM64 hosted runner is required", failures)
+    require("test \"$(uname -m)\" = aarch64" in live and "docker info --format '{{.Architecture}}'" in live, "semantic-live.yml: native ARM64 host preflight is required", failures)
     require("secrets.OPENAI_API_KEY" in live, "semantic-live.yml: protected OpenAI secret is required", failures)
     require(live.count("secrets.OPENAI_API_KEY") == 1, "semantic-live.yml: secret must be scoped to one run step", failures)
     require("maxRequests: 128" in live and "maxInputTokens: 20000" in live and "maxEstimatedCostMicros: 1000000" in live and "totalTimeout: 5m" in live, "semantic-live.yml: fixed live ceilings are required", failures)
