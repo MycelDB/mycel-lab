@@ -201,6 +201,49 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("release-gate.yml: cluster-release-gate requires the exact checksum-pinned AMD64 k3d install", failures)
         self.assertIn("release-gate.yml: cluster-release-gate requires the exact linux/amd64 daemon-image assertion", failures)
 
+    def test_removed_or_commented_canonical_destructive_command_is_rejected(self) -> None:
+        match = checkWorkflows.RELEASE_DESTRUCTIVE_RUN.search(self.release)
+        self.assertIsNotNone(match)
+        assert match is not None
+        block = match.group(0)
+        removed = self.release[: match.start()] + self.release[match.end() :]
+        commented = self.release[: match.start()] + "\n".join(f"# {line}" for line in block.splitlines()) + self.release[match.end() :]
+        message = "release-gate.yml: cluster-release-gate requires the exact canonical destructive command"
+        self.assertIn(message, self.check_amd64_policy(removed))
+        self.assertIn(message, self.check_amd64_policy(commented))
+
+    def test_canonical_destructive_step_before_controls_is_rejected(self) -> None:
+        step_start = self.release.index("      - name: Run approved cluster release gate once\n")
+        step_end = self.release.index("      - name: Verify artifacts are safe to upload\n", step_start)
+        step = self.release[step_start:step_end]
+        without_step = self.release[:step_start] + self.release[step_end:]
+        insert_at = without_step.index("      - name: Check out Mycel Lab\n")
+        moved = without_step[:insert_at] + step + without_step[insert_at:]
+        self.assertIn(
+            "release-gate.yml: pinned k3d install and image-platform assertion must precede destructive execution",
+            self.check_amd64_policy(moved),
+        )
+
+    def test_destructive_command_decoy_job_cannot_mask_missing_real_command(self) -> None:
+        match = checkWorkflows.RELEASE_DESTRUCTIVE_RUN.search(self.release)
+        self.assertIsNotNone(match)
+        assert match is not None
+        without_real = self.release[: match.start()] + self.release[match.end() :]
+        decoy = (
+            "jobs:\n"
+            "  destructive-command-decoy:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            "      - name: Decoy destructive command\n"
+            "        run: |\n"
+            f"{match.group(0)}\n"
+        )
+        text = without_real.replace("jobs:\n", decoy, 1)
+        self.assertIn(
+            "release-gate.yml: cluster-release-gate requires the exact canonical destructive command",
+            self.check_amd64_policy(text),
+        )
+
 
 class ArtifactSafetyTests(unittest.TestCase):
     def run_guard(self, root: Path) -> subprocess.CompletedProcess[str]:
