@@ -1,4 +1,4 @@
-.PHONY: test build build-mycel-lab build-provider-emulator fmt check-docs
+.PHONY: test build build-mycel-lab build-provider-emulator fmt check-docs check-workflows
 
 PROVIDER_EMULATOR_IMAGE ?= local/mycel-provider-emulator:dev
 
@@ -18,3 +18,7 @@ fmt:
 
 check-docs:
 	python3 scripts/checkDocs.py docs/ tests/reliability/
+
+check-workflows:
+	python3 scripts/checkWorkflows.py
+	python3 scripts/testWorkflowScripts.py

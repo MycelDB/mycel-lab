@@ -18,6 +18,7 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [MycelDB system integration migration inventory](docs/implementation/system-integration-migration-inventory.md)
 - [Native wrapper transition inventory](docs/implementation/native-wrapper-transition-inventory.md)
 - [Operations guide](docs/operations.md)
+- [CI and protected reliability execution](docs/operations/ci-release-integration.md)
 
 ## Current commands
 
