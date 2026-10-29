@@ -367,6 +367,7 @@ type K3DDriver struct {
 	CreateArguments []string
 	nodeCount       int
 	portBase        int
+	apiPollInterval time.Duration
 }
 
 func (d K3DDriver) Name() string { return "k3d" }
@@ -441,10 +442,49 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario, e
 		return environment, err
 	}
 	defer os.Remove(manifestPath)
+	if err := d.waitForKubernetesAPI(ctx, environment); err != nil {
+		return environment, err
+	}
 	if _, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "apply", "-f", manifestPath); err != nil {
 		return environment, err
 	}
 	return environment, nil
+}
+
+func (d K3DDriver) waitForKubernetesAPI(ctx context.Context, environment Environment) error {
+	timeout := d.WaitTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	pollInterval := d.apiPollInterval
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	attempts := 0
+	var lastErr error
+	for {
+		attempts++
+		result, err := d.runner().Run(waitCtx, "kubectl", "--context", environment.Context, "get", "--raw=/readyz")
+		if err == nil && strings.TrimSpace(result.Stdout) == "ok" {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("unexpected readiness response %q", strings.TrimSpace(result.Stdout))
+		}
+
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return fmt.Errorf("kubernetes API readiness did not converge after %d attempts: %w (last probe: %v)", attempts, waitCtx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
 }
 
 func (d K3DDriver) importLocalImageIfPresent(ctx context.Context, environment Environment, image string) error {
