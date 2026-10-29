@@ -6,8 +6,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Added SGT10 CI/release integration with credential-free pull-request checks, deterministic/emulator/live-profile dry-runs, protected exact-candidate live and cluster release-gate workflows, immutable action/image inputs, serialized destructive execution, fail-closed sanitized artifact uploads, and credential incident-response guidance (#46).
+
 ### Fixed
 
+- Updated semantic-budget tests to clone protobuf messages without copying internal mutex state, allowing strict `go vet ./...` to pass in SGT10 CI.
 - The SGT9 unauthorized-search control now captures daemon-owned provider-budget evidence through one reusable, directly authenticated administrative observer instead of reusing the semantic controller actor token; the negative actor remains access-token-only with zero login or refresh calls.
 - Deferred live semantic-rule creation now proves the exact payload and scoped `semantic.manage` authorization through a bounded read-only validation RPC before the single create attempt. Only transient `Unauthenticated` validation failures retry; semantic mutations are never retried.
 - Cross-daemon semantic budget reads now establish one bounded direct admin session on each visited peer instead of presenting a primary daemon's potentially node-local access token to another daemon.

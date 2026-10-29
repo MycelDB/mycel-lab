@@ -5,6 +5,10 @@ current implementation supports local dry-run execution, catalog persistence in
 Postgres, filesystem artifacts, baseline scenarios, metrics summaries, and run
 listing/show/compare commands.
 
+CI, protected hosted-provider execution, exact-candidate release gating, artifact
+upload controls, and credential incident response are documented in
+[CI and protected reliability execution](operations/ci-release-integration.md).
+
 ## Database setup
 
 Catalog and run history commands require Postgres. Provide the database URL with

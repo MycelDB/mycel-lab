@@ -1,6 +1,6 @@
 # Provider-Neutral Semantic Graph Index Testing Implementation Plan
 
-Status: SGT0–SGT8 accepted for supported capabilities; SGT9 direct OpenAI-compatible embedding implementation complete but live execution remains approval- and credential-gated; SGT10 pending.
+Status: SGT0–SGT9 implemented for supported capabilities; SGT10 CI/release integration candidate implemented, with repository promotion, protected-environment configuration, and exact-candidate gate execution remaining separately controlled.
 Tracking issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 Primary repository: `mycel-lab`
 Related repositories: `mycel-api`, `mycel-go-sdk`, `mycel`
@@ -895,6 +895,17 @@ Acceptance:
 
 Repository: `mycel-lab`
 Risk: medium
+Implementation status: candidate implemented on `feature/46-sgt10-ci-release-integration`; promotion and protected-environment execution remain separate approval boundaries.
+
+The implementation adds:
+
+- credential-free pull-request and protected-branch checks for tests, races, vet, documentation, workflow policy, and exact harness builds;
+- Tier 0, Tier 1, recovery, backup/restore, and live-profile dry-run planning with sanitized evidence uploads;
+- a protected `workflow_dispatch` live semantic workflow with immutable candidate inputs and fixed request, token, duration, and cost ceilings;
+- a protected exact-candidate cluster release-gate workflow on an isolated reliability runner;
+- full action commit pins, read-only workflow permissions, non-persisted checkout credentials, serialized destructive execution, and non-cancelling destructive jobs;
+- fail-closed artifact upload verification and a SHA-256 upload inventory;
+- operator documentation for protected environments, fork isolation, exact-candidate provenance, promotion, and credential incident response.
 
 Keep capability tier, execution environment, and gating status as separate dimensions.
 
@@ -919,6 +930,17 @@ Before Tier 2:
 - record daemon, harness, provider-profile, corpus, emulator, and workflow identities.
 
 Promotion to required CI needs a measured reliability window, documented provider quota/cost ceiling, and explicit maintainer approval. A hosted-provider outage must not be silently reclassified as product success.
+
+Acceptance:
+
+- default CI has no provider credential and cannot execute a destructive or live run;
+- every third-party action is pinned to a full commit and workflow permissions are read-only;
+- protected workflows accept only a full daemon commit and digest-pinned image, then verify clean OCI provenance before execution;
+- the live credential is scoped to one protected run step under the locked SGT9 ceilings;
+- destructive live and release-gate jobs share serialized, non-cancelling concurrency;
+- artifacts upload only after terminal redaction reports pass with zero findings;
+- failed but sanitized evidence remains uploadable, while missing or unsafe redaction evidence fails closed;
+- workflow policy, artifact-safety behavior, documentation, and all existing Lab tests pass.
 
 ## 7. Scenario-to-tranche traceability
 

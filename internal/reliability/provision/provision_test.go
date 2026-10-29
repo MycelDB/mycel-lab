@@ -38,9 +38,9 @@ func TestValidateSemanticProviderBudgetStatusIdentityRejectsEveryMismatch(t *tes
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			candidate := valid
-			tc.mutate(&candidate)
-			if err := ValidateSemanticProviderBudgetStatusIdentity(&candidate, resources); err == nil {
+			candidate := proto.Clone(&valid).(*adminv1.SemanticProviderBudgetStatus)
+			tc.mutate(candidate)
+			if err := ValidateSemanticProviderBudgetStatusIdentity(candidate, resources); err == nil {
 				t.Fatal("identity mismatch was accepted")
 			}
 		})

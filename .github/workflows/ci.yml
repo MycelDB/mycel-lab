@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mycel-lab-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  quality:
+    name: Unit, race, vet, docs, and workflow policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out Mycel Lab
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: mycel-lab
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: mycel-lab/go.mod
+          cache-dependency-path: mycel-lab/go.sum
+      - name: Test
+        working-directory: mycel-lab
+        run: go test -count=1 ./...
+      - name: Race test
+        working-directory: mycel-lab
+        run: go test -race -count=1 ./...
+      - name: Vet
+        working-directory: mycel-lab
+        run: go vet ./...
+      - name: Check documentation and SGT10 workflow policy
+        working-directory: mycel-lab
+        run: |
+          make check-docs
+          make check-workflows
+      - name: Build exact harness
+        working-directory: mycel-lab
+        run: go build -trimpath -o ./bin/mycel-lab ./cmd/mycel-lab
+
+  semantic-dry-run:
+    name: Deterministic and emulator planning
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out Mycel Lab
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: mycel-lab
+          persist-credentials: false
+      - name: Check out the pinned daemon scenario source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: MycelDB/mycel
+          ref: 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+          path: mycel
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: mycel-lab/go.mod
+          cache-dependency-path: mycel-lab/go.sum
+      - name: Verify pinned daemon identity
+        working-directory: mycel
+        run: test "$(git rev-parse HEAD)" = 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+      - name: Build exact harness
+        working-directory: mycel-lab
+        run: go build -trimpath -o ./bin/mycel-lab ./cmd/mycel-lab
+      - name: Dry-run Tier 0, Tier 1, and live-profile planning
+        working-directory: mycel-lab
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/mycel-lab-sgt10-dry-runs
+        run: |
+          set -euo pipefail
+          ./bin/mycel-lab run suite compose-semantic-graph-contract \
+            --dry-run \
+            --image local/mycel:sgt10-ci-dry-run \
+            --artifact-root "$ARTIFACT_ROOT/semantic-contract"
+          ./bin/mycel-lab run suite compose-procedure-inference-control-emulator \
+            --dry-run \
+            --image local/mycel:sgt10-ci-dry-run \
+            --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
+            --artifact-root "$ARTIFACT_ROOT/protocol-emulator"
+          ./bin/mycel-lab run suite k3d-procedure-inference-recovery \
+            --dry-run \
+            --image local/mycel:sgt10-ci-dry-run \
+            --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
+            --artifact-root "$ARTIFACT_ROOT/recovery"
+          ./bin/mycel-lab run suite k3d-procedure-inference-backup-restore \
+            --dry-run \
+            --image local/mycel:sgt10-ci-dry-run \
+            --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
+            --artifact-root "$ARTIFACT_ROOT/backup-restore"
+          ./bin/mycel-lab run suite semantic-live-provider \
+            --dry-run \
+            --image local/mycel:sgt10-ci-dry-run \
+            --artifact-root "$ARTIFACT_ROOT/live-profile"
+      - name: Verify artifacts are safe to upload
+        working-directory: mycel-lab
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/mycel-lab-sgt10-dry-runs
+        run: python3 scripts/verifyArtifactSafety.py "$ARTIFACT_ROOT"
+      - name: Upload sanitized dry-run evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semantic-dry-run-${{ github.sha }}
+          path: ${{ runner.temp }}/mycel-lab-sgt10-dry-runs
+          if-no-files-found: error
+          retention-days: 14
