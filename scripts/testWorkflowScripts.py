@@ -167,6 +167,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 "${{ secrets['OPENAI_API_KEY'] }}",
                 "${{ format('{0}', secrets['OPENAI_API_KEY']) }}",
                 "${{ format('}}{0}', secrets['OPENAI_API_KEY']) }}",
+                "${{ toJSON(secrets) }}",
             ):
                 with self.subTest(workflow=workflow, expression=expression):
                     match = checkWorkflows.helper_preflight_pattern(architecture).search(text)
@@ -208,6 +209,43 @@ class WorkflowPolicyTests(unittest.TestCase):
                         f"{workflow}: {job} must contain exactly one protected suite execution and it must be the canonical run step",
                         self.check_helper_policy(mutated, live),
                     )
+
+    def test_extra_protected_execution_in_decoy_job_is_rejected(self) -> None:
+        for text, live, suite_target, workflow, job in (
+            (self.live, True, "semantic-live-provider", "semantic-live.yml", "live-semantic"),
+            (self.release, False, "cluster-release-gate", "release-gate.yml", "cluster-release-gate"),
+        ):
+            with self.subTest(workflow=workflow):
+                decoy = f'''jobs:
+  unprotected-execution-decoy:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Unprotected protected-suite execution
+        run: ./bin/mycel-lab run suite {suite_target} --confirm-destructive
+'''
+                mutated = text.replace("jobs:\n", decoy, 1)
+                self.assertIn(
+                    f"{workflow}: {job} must contain exactly one protected suite execution and it must be the canonical run step",
+                    self.check_helper_policy(mutated, live),
+                )
+
+    def test_leading_comment_cannot_hide_extra_protected_execution_step(self) -> None:
+        for text, live, run_step, suite_target, workflow, job in (
+            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-live-provider", "semantic-live.yml", "live-semantic"),
+            (self.release, False, checkWorkflows.RELEASE_RUN_STEP, "cluster-release-gate", "release-gate.yml", "cluster-release-gate"),
+        ):
+            with self.subTest(workflow=workflow):
+                start = text.find(run_step)
+                self.assertGreaterEqual(start, 0)
+                hidden = f'''      - # leading comment before the first mapping key
+        name: Hidden extra execution
+        run: ./bin/mycel-lab run suite {suite_target} --confirm-destructive
+'''
+                mutated = text[:start] + hidden + text[start:]
+                self.assertIn(
+                    f"{workflow}: {job} must contain exactly one protected suite execution and it must be the canonical run step",
+                    self.check_helper_policy(mutated, live),
+                )
 
     def test_late_helper_preflight_is_rejected(self) -> None:
         for text, live, architecture, workflow in (

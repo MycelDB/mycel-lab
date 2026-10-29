@@ -127,11 +127,11 @@ RELEASE_RUN_STEP = f'''      - name: Run approved cluster release gate once
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           exit 0'''
-SECRET_CONTEXT_ACCESS = re.compile(r"(?<![A-Za-z0-9_])secrets\s*(?:\.\s*|\[\s*)")
+SECRET_CONTEXT_IDENTIFIER = re.compile(r"(?<![A-Za-z0-9_])secrets(?![A-Za-z0-9_])")
 
 
 def secret_context_references(text: str) -> list[re.Match[str]]:
-    return list(SECRET_CONTEXT_ACCESS.finditer(text))
+    return list(SECRET_CONTEXT_IDENTIFIER.finditer(text))
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -155,7 +155,7 @@ def job_block(workflow: str, job_name: str) -> str | None:
 
 
 def step_blocks(job: str) -> list[str]:
-    starts = list(re.finditer(r"^      - [A-Za-z0-9_-]+:\s*", job, re.MULTILINE))
+    starts = list(re.finditer(r"^      -(?:\s|$)", job, re.MULTILINE))
     return [
         job[match.start() : (starts[index + 1].start() if index + 1 < len(starts) else len(job))].rstrip("\n")
         for index, match in enumerate(starts)
@@ -203,14 +203,13 @@ def check_helper_images(
     preflight_indexes = [index for index, step in enumerate(steps) if step == expected_preflight]
     run_indexes = [index for index, step in enumerate(steps) if step == run_step]
     suite_target = "semantic-live-provider" if job_name == "live-semantic" else "cluster-release-gate"
-    protected_execution_indexes = [
-        index for index, step in enumerate(steps) if f"run suite {suite_target}" in step or "--confirm-destructive" in step
-    ]
+    protected_suite_invocations = workflow.count(f"run suite {suite_target}")
+    destructive_confirmations = workflow.count("--confirm-destructive")
 
     require(len(preflight_indexes) == 1, f"{workflow_name}: {job_name} requires exactly one complete immutable {architecture} helper-image preflight step", failures)
     require(len(run_indexes) == 1, f"{workflow_name}: {job_name} must bind helper digests and the canonical command in one complete protected run step", failures)
     require(
-        len(run_indexes) == 1 and protected_execution_indexes == run_indexes,
+        len(run_indexes) == 1 and protected_suite_invocations == 1 and destructive_confirmations == 1,
         f"{workflow_name}: {job_name} must contain exactly one protected suite execution and it must be the canonical run step",
         failures,
     )
