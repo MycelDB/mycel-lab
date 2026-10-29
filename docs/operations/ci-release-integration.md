@@ -51,6 +51,8 @@ Both protected jobs also pull and preflight the exact object-store helper indexe
 
 The preflight requires the native job architecture, clean-source labels, exact source revisions, and exact binary version output, then binds those same digest references into the protected harness step. Mutable tags, cached-only images, architecture mismatches, or provenance mismatches fail before any live-provider credential is exposed and before the canonical destructive command.
 
+Workflow policy also locks the reviewed byte-exact contents of both protected workflow files. Any intentional workflow edit must update its reviewed SHA-256 lock together with structural policy and mutation coverage; unreviewed extra jobs, steps, or shell-equivalent executions fail closed.
+
 The live workflow additionally verifies the locked OpenAI-compatible provider-profile hash and these hard ceilings:
 
 - 128 requests and operations;

@@ -194,6 +194,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             for command in (
                 f'./bin/mycel-lab run suite {suite_target} --image "$DAEMON_IMAGE"',
                 './bin/mycel-lab run suite unrelated --confirm-destructive --image "$DAEMON_IMAGE"',
+                f'./bin/mycel-lab run  suite {suite_target} --confirm-"destructive" --image "$DAEMON_IMAGE"',
             ):
                 with self.subTest(workflow=workflow, command=command):
                     start = text.find(run_step)
@@ -244,6 +245,28 @@ class WorkflowPolicyTests(unittest.TestCase):
                 mutated = text[:start] + hidden + text[start:]
                 self.assertIn(
                     f"{workflow}: {job} must contain exactly one protected suite execution and it must be the canonical run step",
+                    self.check_helper_policy(mutated, live),
+                )
+
+    def test_exact_content_lock_rejects_variable_constructed_extra_execution(self) -> None:
+        for text, live, run_step, prefix, suffix, workflow in (
+            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-live", "provider", "semantic-live.yml"),
+            (self.release, False, checkWorkflows.RELEASE_RUN_STEP, "cluster-release", "gate", "release-gate.yml"),
+        ):
+            with self.subTest(workflow=workflow):
+                start = text.find(run_step)
+                self.assertGreaterEqual(start, 0)
+                hidden = f'''      - name: Variable-constructed extra execution
+        run: |
+          suffix={suffix}
+          target={prefix}-$suffix
+          mode=destructive
+          confirmation=--confirm-$mode
+          ./bin/mycel-lab run suite "$target" "$confirmation"
+'''
+                mutated = text[:start] + hidden + text[start:]
+                self.assertIn(
+                    f"{workflow}: protected workflow must match the reviewed exact-content lock",
                     self.check_helper_policy(mutated, live),
                 )
 

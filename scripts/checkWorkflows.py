@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -58,6 +59,10 @@ RELEASE_DESTRUCTIVE_RUN = re.compile(
 )
 MINIO_HELPER_IMAGE = "docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff"
 MC_HELPER_IMAGE = "docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0"
+PROTECTED_WORKFLOW_SHA256 = {
+    "semantic-live.yml": "d1e1d5383374909989f390e4ea02d883d0ab51df1c16bedfb45115979d1ead05",
+    "release-gate.yml": "2b9d5a680243617db7c4a78f4f85009762f0adc663c87fd639061438b6fbc8ca",
+}
 
 
 def exact_block(block: str) -> re.Pattern[str]:
@@ -134,6 +139,12 @@ def secret_context_references(text: str) -> list[re.Match[str]]:
     return list(SECRET_CONTEXT_IDENTIFIER.finditer(text))
 
 
+def normalize_shell_equivalent(text: str) -> str:
+    without_continuations = re.sub(r"\\\s*\n\s*", " ", text)
+    without_quotes = without_continuations.translate(str.maketrans("", "", "'\""))
+    return " ".join(without_quotes.split())
+
+
 def require(condition: bool, message: str, failures: list[str]) -> None:
     if not condition:
         failures.append(message)
@@ -198,13 +209,19 @@ def check_helper_images(
     if job is None:
         return
 
+    require(
+        hashlib.sha256(workflow.encode("utf-8")).hexdigest() == PROTECTED_WORKFLOW_SHA256[workflow_name],
+        f"{workflow_name}: protected workflow must match the reviewed exact-content lock",
+        failures,
+    )
     steps = step_blocks(job)
     expected_preflight = helper_preflight_block(architecture)
     preflight_indexes = [index for index, step in enumerate(steps) if step == expected_preflight]
     run_indexes = [index for index, step in enumerate(steps) if step == run_step]
     suite_target = "semantic-live-provider" if job_name == "live-semantic" else "cluster-release-gate"
-    protected_suite_invocations = workflow.count(f"run suite {suite_target}")
-    destructive_confirmations = workflow.count("--confirm-destructive")
+    normalized_workflow = normalize_shell_equivalent(workflow)
+    protected_suite_invocations = normalized_workflow.count(f"./bin/mycel-lab run suite {suite_target}")
+    destructive_confirmations = normalized_workflow.count("--confirm-destructive")
 
     require(len(preflight_indexes) == 1, f"{workflow_name}: {job_name} requires exactly one complete immutable {architecture} helper-image preflight step", failures)
     require(len(run_indexes) == 1, f"{workflow_name}: {job_name} must bind helper digests and the canonical command in one complete protected run step", failures)
