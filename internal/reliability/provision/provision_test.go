@@ -15,6 +15,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	mycel "github.com/myceldb/mycel-go-sdk"
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -399,6 +400,7 @@ func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 		{name: "usage events", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", "+usageTwo), want: true},
 		{name: "policy decisions with truncated tail", err: status.Error(codes.FailedPrecondition, "access policy is referenced by "+decisionOne+", ...6 more")},
 		{name: "mixed audit types", err: status.Error(codes.FailedPrecondition, "resource is referenced by "+usageOne+", "+decisionOne), want: true},
+		{name: "duplicate audit reference", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", "+usageOne)},
 		{name: "mixed reference types", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+", credential_grant:44444444-4444-4444-8444-444444444444")},
 		{name: "audit token with trailing reference", err: status.Error(codes.FailedPrecondition, "credential is referenced by "+usageOne+" credential_grant:44444444-4444-4444-8444-444444444444")},
 		{name: "empty audit id", err: status.Error(codes.FailedPrecondition, "credential is referenced by usage_event:")},
@@ -415,6 +417,226 @@ func TestSemanticCleanupRetainedByAuditFailsClosed(t *testing.T) {
 				t.Fatalf("semanticCleanupRetainedByAudit()=%t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func structuredCleanupReferenceError(t *testing.T, targetResource string, references []string, totalCount int, complete bool) error {
+	t.Helper()
+	violations := make([]*errdetails.PreconditionFailure_Violation, 0, len(references))
+	for _, reference := range references {
+		violations = append(violations, &errdetails.PreconditionFailure_Violation{Type: "mycel.io/inference-reference", Subject: reference})
+	}
+	info := &errdetails.ErrorInfo{Reason: "INFERENCE_RESOURCE_REFERENCED", Domain: "mycel.io", Metadata: map[string]string{
+		"resource":               semanticCleanupDaemonResource(targetResource),
+		"schema_version":         "1",
+		"total_reference_count":  fmt.Sprintf("%d", totalCount),
+		"detail_reference_count": fmt.Sprintf("%d", len(references)),
+		"details_complete":       fmt.Sprintf("%t", complete),
+	}}
+	st, err := status.New(codes.FailedPrecondition, "resource is referenced by usage_event:11111111-1111-4111-8111-111111111111, ...1 more").WithDetails(info, &errdetails.PreconditionFailure{Violations: violations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Err()
+}
+
+func TestSemanticCleanupStructuredReferencesAcceptCompleteEvidenceAboveMessageBound(t *testing.T) {
+	references := make([]string, 0, 33)
+	for index := 0; index < 33; index++ {
+		references = append(references, fmt.Sprintf("policy_decision:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	details, retained := semanticCleanupDirectAuditRetention("access-policy", structuredCleanupReferenceError(t, "access-policy", references, len(references), true))
+	if !retained || details["referenceCount"] != 33 || details["evidenceReferenceCount"] != maxCleanupReferenceEvidence || details["referencesTruncated"] != true {
+		t.Fatalf("complete structured audit evidence retained=%t details=%v", retained, details)
+	}
+	if got := len(details["references"].([]map[string]string)); got != maxCleanupReferenceEvidence {
+		t.Fatalf("bounded evidence references=%d want %d", got, maxCleanupReferenceEvidence)
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesRejectIncompleteEvidence(t *testing.T) {
+	references := make([]string, 0, maxCleanupReferenceEvidence)
+	for index := 0; index < maxCleanupReferenceEvidence; index++ {
+		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	details, retained := semanticCleanupDirectAuditRetention("credential", structuredCleanupReferenceError(t, "credential", references, len(references)+1, false))
+	if retained || details["rejectionCategory"] != "truncated-structured-reference-list" || details["observedReferenceCount"] != len(references)+1 {
+		t.Fatalf("incomplete structured evidence retained=%t details=%v", retained, details)
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesRejectUnsupportedHiddenType(t *testing.T) {
+	references := make([]string, 0, 33)
+	for index := 0; index < 32; index++ {
+		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	references = append(references, "future_reference:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	details, retained := semanticCleanupDirectAuditRetention("credential", structuredCleanupReferenceError(t, "credential", references, len(references), true))
+	if retained || details["rejectionCategory"] != "unsupported-reference-type" || details["observedReferenceCount"] != len(references) {
+		t.Fatalf("unsupported structured reference retained=%t details=%v", retained, details)
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesRejectDuplicatesAndMalformedSubjects(t *testing.T) {
+	const usageReference = "usage_event:11111111-1111-4111-8111-111111111111"
+	tests := []struct {
+		name       string
+		references []string
+		category   string
+	}{
+		{name: "duplicate", references: []string{usageReference, usageReference}, category: "duplicate-structured-reference"},
+		{name: "malformed", references: []string{usageReference, "usage_event:not-a-uuid"}, category: "malformed-structured-reference"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			details, retained := semanticCleanupDirectAuditRetention("credential", structuredCleanupReferenceError(t, "credential", test.references, len(test.references), true))
+			if retained || details["rejectionCategory"] != test.category {
+				t.Fatalf("invalid structured evidence retained=%t details=%v", retained, details)
+			}
+		})
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesBindResourceAndRejectDuplicateEnvelopes(t *testing.T) {
+	const reference = "usage_event:11111111-1111-4111-8111-111111111111"
+	baseErr := structuredCleanupReferenceError(t, "credential", []string{reference}, 1, true)
+	if details, retained := semanticCleanupDirectAuditRetention("model", baseErr); retained || details["rejectionCategory"] != "structured-resource-mismatch" {
+		t.Fatalf("resource-mismatched evidence retained=%t details=%v", retained, details)
+	}
+
+	baseStatus := status.Convert(baseErr)
+	var info *errdetails.ErrorInfo
+	var precondition *errdetails.PreconditionFailure
+	for _, detail := range baseStatus.Details() {
+		switch typed := detail.(type) {
+		case *errdetails.ErrorInfo:
+			info = typed
+		case *errdetails.PreconditionFailure:
+			precondition = typed
+		}
+	}
+	for _, test := range []struct {
+		name     string
+		build    func(*errdetails.ErrorInfo, *errdetails.PreconditionFailure) (*status.Status, error)
+		category string
+	}{
+		{name: "duplicate error info", build: func(info *errdetails.ErrorInfo, precondition *errdetails.PreconditionFailure) (*status.Status, error) {
+			return status.New(codes.FailedPrecondition, baseStatus.Message()).WithDetails(info, proto.Clone(info).(*errdetails.ErrorInfo), precondition)
+		}, category: "duplicate-structured-error-info"},
+		{name: "duplicate precondition", build: func(info *errdetails.ErrorInfo, precondition *errdetails.PreconditionFailure) (*status.Status, error) {
+			return status.New(codes.FailedPrecondition, baseStatus.Message()).WithDetails(info, precondition, proto.Clone(precondition).(*errdetails.PreconditionFailure))
+		}, category: "invalid-structured-precondition-count"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			withDetails, err := test.build(info, precondition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			details, retained := semanticCleanupDirectAuditRetention("credential", withDetails.Err())
+			if retained || details["rejectionCategory"] != test.category {
+				t.Fatalf("duplicate envelope retained=%t details=%v", retained, details)
+			}
+		})
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesRequireCanonicalMetadata(t *testing.T) {
+	const reference = "usage_event:11111111-1111-4111-8111-111111111111"
+	baseInfo := func() *errdetails.ErrorInfo {
+		return &errdetails.ErrorInfo{Reason: cleanupReferenceDetailReason, Domain: cleanupReferenceDetailDomain, Metadata: map[string]string{
+			"resource": "credential", "schema_version": "1", "total_reference_count": "1", "detail_reference_count": "1", "details_complete": "true",
+		}}
+	}
+	basePrecondition := func() *errdetails.PreconditionFailure {
+		return &errdetails.PreconditionFailure{Violations: []*errdetails.PreconditionFailure_Violation{{Type: cleanupReferenceDetailType, Subject: reference}}}
+	}
+	tests := []struct {
+		name       string
+		mutateInfo func(*errdetails.ErrorInfo)
+		mutatePre  func(*errdetails.PreconditionFailure)
+		category   string
+	}{
+		{name: "unsupported schema", mutateInfo: func(info *errdetails.ErrorInfo) { info.Metadata["schema_version"] = "2" }, category: "unsupported-structured-reference-schema"},
+		{name: "signed total", mutateInfo: func(info *errdetails.ErrorInfo) { info.Metadata["total_reference_count"] = "+1" }, category: "invalid-structured-reference-count"},
+		{name: "leading-zero total", mutateInfo: func(info *errdetails.ErrorInfo) { info.Metadata["total_reference_count"] = "01" }, category: "invalid-structured-reference-count"},
+		{name: "zero total", mutateInfo: func(info *errdetails.ErrorInfo) { info.Metadata["total_reference_count"] = "0" }, category: "invalid-structured-reference-count"},
+		{name: "leading-zero detail", mutateInfo: func(info *errdetails.ErrorInfo) { info.Metadata["detail_reference_count"] = "01" }, category: "invalid-structured-detail-count"},
+		{name: "uppercase complete", mutateInfo: func(info *errdetails.ErrorInfo) { info.Metadata["details_complete"] = "TRUE" }, category: "invalid-structured-completeness"},
+		{name: "numeric complete", mutateInfo: func(info *errdetails.ErrorInfo) { info.Metadata["details_complete"] = "1" }, category: "invalid-structured-completeness"},
+		{name: "detail count mismatch", mutateInfo: func(info *errdetails.ErrorInfo) { info.Metadata["detail_reference_count"] = "2" }, category: "structured-detail-count-mismatch"},
+		{name: "wrong violation type", mutatePre: func(pre *errdetails.PreconditionFailure) { pre.Violations[0].Type = "future/type" }, category: "unsupported-structured-reference-type"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			info := baseInfo()
+			precondition := basePrecondition()
+			if test.mutateInfo != nil {
+				test.mutateInfo(info)
+			}
+			if test.mutatePre != nil {
+				test.mutatePre(precondition)
+			}
+			st, err := status.New(codes.FailedPrecondition, "credential is referenced").WithDetails(info, precondition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			details, retained := semanticCleanupDirectAuditRetention("credential", st.Err())
+			if retained || details["rejectionCategory"] != test.category {
+				t.Fatalf("noncanonical metadata retained=%t details=%v", retained, details)
+			}
+		})
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesEnforceExactBound(t *testing.T) {
+	references := make([]string, 0, maxCleanupStructuredReferenceEvidence)
+	for index := 0; index < maxCleanupStructuredReferenceEvidence; index++ {
+		references = append(references, fmt.Sprintf("usage_event:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	if details, retained := semanticCleanupDirectAuditRetention("credential", structuredCleanupReferenceError(t, "credential", references, len(references), true)); !retained || details["referenceCount"] != maxCleanupStructuredReferenceEvidence {
+		t.Fatalf("exact structured bound retained=%t details=%v", retained, details)
+	}
+	references = append(references, "usage_event:ffffffff-ffff-4fff-8fff-ffffffffffff")
+	if details, retained := semanticCleanupDirectAuditRetention("credential", structuredCleanupReferenceError(t, "credential", references, len(references), true)); retained || details["rejectionCategory"] != "structured-reference-list-too-large" {
+		t.Fatalf("oversized structured evidence retained=%t details=%v", retained, details)
+	}
+}
+
+func TestSemanticCleanupStructuredReferencesProveCandidate15AuditClosure(t *testing.T) {
+	const (
+		policyID     = "11111111-1111-4111-8111-111111111111"
+		grantID      = "22222222-2222-4222-8222-222222222222"
+		credentialID = "33333333-3333-4333-8333-333333333333"
+		profileID    = "44444444-4444-4444-8444-444444444444"
+		capabilityID = "55555555-5555-4555-8555-555555555555"
+		modelID      = "66666666-6666-4666-8666-666666666666"
+		endpointID   = "77777777-7777-4777-8777-777777777777"
+	)
+	resources := &ProcedureInferenceResources{AccessPolicyID: policyID, CredentialGrantID: grantID, CredentialID: credentialID, IntelligenceProfileID: profileID, CapabilityID: capabilityID, ModelID: modelID, EndpointID: endpointID}
+	proof := &procedureInferenceCleanupProof{}
+	auditReferences := make([]string, 0, 36)
+	for index := 0; index < 30; index++ {
+		auditReferences = append(auditReferences, fmt.Sprintf("policy_decision:%08x-1111-4111-8111-%012x", index+1, index+1))
+	}
+	for index := 0; index < 6; index++ {
+		auditReferences = append(auditReferences, fmt.Sprintf("usage_event:%08x-2222-4222-8222-%012x", index+1, index+1))
+	}
+	retain := func(resource string, references []string) {
+		t.Helper()
+		details, retained := procedureInferenceCleanupRetainedByAudit(resources, resource, proof, structuredCleanupReferenceError(t, resource, references, len(references), true))
+		if !retained {
+			t.Fatalf("%s complete structured closure rejected: %v", resource, details)
+		}
+	}
+	retain("access-policy", auditReferences[:30])
+	retain("credential-grant", auditReferences[30:])
+	retain("credential", append([]string{"credential_grant:" + grantID}, auditReferences[30:]...))
+	retain("intelligence-profile", auditReferences[:33])
+	retain("capability", append([]string{"intelligence_profile:" + profileID}, auditReferences[:32]...))
+	retain("model", append([]string{"capability:" + capabilityID, "credential_grant:" + grantID, "intelligence_profile:" + profileID}, auditReferences[:30]...))
+	retain("endpoint", append([]string{"capability:" + capabilityID, "credential:" + credentialID, "credential_grant:" + grantID, "intelligence_profile:" + profileID}, auditReferences[:29]...))
+	if _, retained := proof.node("endpoint", endpointID); !retained {
+		t.Fatal("complete structured candidate-15 closure did not retain the endpoint proof")
 	}
 }
 
