@@ -33,21 +33,37 @@ def read(name: str) -> str:
     return (WORKFLOWS / name).read_text(encoding="utf-8")
 
 
-def check_live_arm64_preflight(live: str, failures: list[str]) -> None:
-    runner = LIVE_ARM64_RUNNER.search(live)
-    preflight = LIVE_ARM64_PREFLIGHT.search(live)
-    first_action = FIRST_ACTION_STEP.search(live)
-    secret_position = live.find(LIVE_SECRET)
+def job_block(workflow: str, job_name: str) -> str | None:
+    header = re.compile(rf"^  {re.escape(job_name)}:\s*$", re.MULTILINE)
+    matches = list(header.finditer(workflow))
+    if len(matches) != 1:
+        return None
+    start = matches[0].start()
+    next_job = re.search(r"^  [A-Za-z0-9_-]+:\s*$", workflow[matches[0].end() :], re.MULTILINE)
+    end = matches[0].end() + next_job.start() if next_job else len(workflow)
+    return workflow[start:end]
 
-    require(runner is not None, "semantic-live.yml: native ARM64 hosted runner is required", failures)
-    require(preflight is not None, "semantic-live.yml: exact native ARM64 host preflight is required", failures)
+
+def check_live_arm64_preflight(live: str, failures: list[str]) -> None:
+    live_job = job_block(live, "live-semantic")
+    require(live_job is not None, "semantic-live.yml: exactly one live-semantic job is required", failures)
+    if live_job is None:
+        return
+
+    runner = LIVE_ARM64_RUNNER.search(live_job)
+    preflight = LIVE_ARM64_PREFLIGHT.search(live_job)
+    first_action = FIRST_ACTION_STEP.search(live_job)
+    secret_position = live_job.find(LIVE_SECRET)
+
+    require(runner is not None, "semantic-live.yml: live-semantic must use the native ARM64 hosted runner", failures)
+    require(preflight is not None, "semantic-live.yml: live-semantic requires the exact native ARM64 host preflight", failures)
     require(
         preflight is not None
         and first_action is not None
         and secret_position >= 0
         and preflight.start() < first_action.start()
         and preflight.start() < secret_position,
-        "semantic-live.yml: ARM64 preflight must precede checkout/action use and secret exposure",
+        "semantic-live.yml: live-semantic ARM64 preflight must precede checkout/action use and secret exposure",
         failures,
     )
 

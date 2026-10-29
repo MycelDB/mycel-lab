@@ -36,7 +36,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         block = match.group(0)
         moved = self.live[: match.start()] + self.live[match.end() :] + "\n" + block + "\n"
         self.assertIn(
-            "semantic-live.yml: ARM64 preflight must precede checkout/action use and secret exposure",
+            "semantic-live.yml: live-semantic ARM64 preflight must precede checkout/action use and secret exposure",
             self.check_arm64_policy(moved),
         )
 
@@ -48,8 +48,26 @@ class WorkflowPolicyTests(unittest.TestCase):
         text = self.live[: match.start()] + commented + self.live[match.end() :]
         text = text.replace("    runs-on: ubuntu-24.04-arm", "    runs-on: ubuntu-24.04\n#     runs-on: ubuntu-24.04-arm")
         failures = self.check_arm64_policy(text)
-        self.assertIn("semantic-live.yml: native ARM64 hosted runner is required", failures)
-        self.assertIn("semantic-live.yml: exact native ARM64 host preflight is required", failures)
+        self.assertIn("semantic-live.yml: live-semantic must use the native ARM64 hosted runner", failures)
+        self.assertIn("semantic-live.yml: live-semantic requires the exact native ARM64 host preflight", failures)
+
+    def test_compliant_decoy_job_cannot_mask_noncompliant_live_job(self) -> None:
+        match = checkWorkflows.LIVE_ARM64_PREFLIGHT.search(self.live)
+        self.assertIsNotNone(match)
+        assert match is not None
+        live_without_preflight = self.live[: match.start()] + self.live[match.end() :]
+        live_without_preflight = live_without_preflight.replace("    runs-on: ubuntu-24.04-arm", "    runs-on: ubuntu-24.04", 1)
+        decoy = (
+            "jobs:\n"
+            "  architecture-decoy:\n"
+            "    runs-on: ubuntu-24.04-arm\n"
+            "    steps:\n"
+            f"{match.group(0)}\n"
+        )
+        text = live_without_preflight.replace("jobs:\n", decoy, 1)
+        failures = self.check_arm64_policy(text)
+        self.assertIn("semantic-live.yml: live-semantic must use the native ARM64 hosted runner", failures)
+        self.assertIn("semantic-live.yml: live-semantic requires the exact native ARM64 host preflight", failures)
 
 
 
