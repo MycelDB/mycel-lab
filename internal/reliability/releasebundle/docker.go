@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,10 @@ import (
 
 type CommandRunner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
+}
+
+type environmentCommandRunner interface {
+	RunWithEnv(context.Context, []string, string, ...string) ([]byte, error)
 }
 
 type DockerInspector struct {
@@ -40,7 +45,14 @@ func NewDockerInspectorWithToolPaths(runner CommandRunner, dockerPath, buildxPat
 type commandRunner struct{}
 
 func (commandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return commandRunner{}.RunWithEnv(ctx, nil, name, args...)
+}
+
+func (commandRunner) RunWithEnv(ctx context.Context, environment []string, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
+	if len(environment) > 0 {
+		command.Env = append(os.Environ(), environment...)
+	}
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return output, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
@@ -116,7 +128,7 @@ func (d *DockerInspector) inspectRegistry(ctx context.Context, image ImageIdenti
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte("{}\n"), 0o600); err != nil {
 		return ResolvedImage{}, err
 	}
-	base := []string{"--config", configDir, "buildx", "imagetools", "inspect"}
+	base := []string{"imagetools", "inspect"}
 	if d.buildxPath != "" {
 		output, verifyErr := d.runner.Run(ctx, d.dockerPath, "info", "--format", "{{range .ClientInfo.Plugins}}{{if eq .Name \"buildx\"}}{{.Path}}{{end}}{{end}}")
 		if verifyErr != nil {
@@ -127,7 +139,7 @@ func (d *DockerInspector) inspectRegistry(ctx context.Context, image ImageIdenti
 			return ResolvedImage{}, fmt.Errorf("selected buildx plugin %q does not equal bound executable %q", selected, d.buildxPath)
 		}
 	}
-	raw, err := d.runner.Run(ctx, d.dockerPath, append(base, "--raw", image.Reference)...)
+	raw, err := d.runBuildx(ctx, configDir, append(base, "--raw", image.Reference)...)
 	if err != nil {
 		return ResolvedImage{}, fmt.Errorf("anonymous pullability/manifest inspection failed for %s: %w", image.Reference, err)
 	}
@@ -173,7 +185,7 @@ func (d *DockerInspector) inspectRegistry(ctx context.Context, image ImageIdenti
 			continue
 		}
 		manifestReference := strings.SplitN(image.Reference, "@", 2)[0] + "@" + manifest.Digest
-		componentRaw, err := d.runner.Run(ctx, d.dockerPath, append(base, "--raw", manifestReference)...)
+		componentRaw, err := d.runBuildx(ctx, configDir, append(base, "--raw", manifestReference)...)
 		if err != nil {
 			return ResolvedImage{}, fmt.Errorf("inspect platform manifest %s: %w", manifestReference, err)
 		}
@@ -200,9 +212,20 @@ func (d *DockerInspector) inspectRegistry(ctx context.Context, image ImageIdenti
 	return resolved, nil
 }
 
+func (d *DockerInspector) runBuildx(ctx context.Context, configDir string, args ...string) ([]byte, error) {
+	if d.buildxPath == "" {
+		return d.runner.Run(ctx, d.dockerPath, append([]string{"--config", configDir, "buildx"}, args...)...)
+	}
+	runner, ok := d.runner.(environmentCommandRunner)
+	if !ok {
+		return nil, errors.New("exact Buildx execution requires an environment-capable command runner")
+	}
+	return runner.RunWithEnv(ctx, []string{"DOCKER_CONFIG=" + configDir}, d.buildxPath, args...)
+}
+
 func (d *DockerInspector) inspectRemoteConfig(ctx context.Context, configDir, reference string) (map[string]string, string, string, error) {
 	format := "{{json .Image}}"
-	output, err := d.runner.Run(ctx, d.dockerPath, "--config", configDir, "buildx", "imagetools", "inspect", reference, "--format", format)
+	output, err := d.runBuildx(ctx, configDir, "imagetools", "inspect", reference, "--format", format)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("inspect remote image config %s: %w", reference, err)
 	}
