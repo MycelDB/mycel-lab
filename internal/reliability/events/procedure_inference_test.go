@@ -136,7 +136,7 @@ func TestProcedureInferenceCapacityDiagnosticsReadsBoundedComposeDaemonFiles(t *
 	}
 	for index, service := range []string{"myceld-a", "myceld-b", "myceld-c"} {
 		call := calls[index]
-		for _, required := range []string{"docker compose -f base.yml -f override.yml -p bounded-project exec -T " + service + " sh -c", "/data/mycel/log/myceld.log", "tail -c 1048576", "tail -n 123"} {
+		for _, required := range []string{"docker-compose -f base.yml -f override.yml -p bounded-project exec -T " + service + " sh -c", "/data/mycel/log/myceld.log", "tail -c 1048576", "tail -n 123"} {
 			if !strings.Contains(call, required) {
 				t.Fatalf("call[%d]=%q, want %q", index, call, required)
 			}

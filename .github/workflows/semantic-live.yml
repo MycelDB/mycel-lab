@@ -11,6 +11,10 @@ on:
         description: Pullable daemon image pinned with @sha256 digest
         required: true
         type: string
+      candidate_id:
+        description: Immutable candidate identity approved for this one-shot run
+        required: true
+        type: string
       reason:
         description: Approved release-candidate or scheduled-run reason
         required: true
@@ -27,7 +31,7 @@ jobs:
   live-semantic:
     name: Bounded live semantic acceptance
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    timeout-minutes: 90
     environment: semantic-live
     steps:
       - name: Verify native ARM64 execution host
@@ -44,11 +48,13 @@ jobs:
         env:
           DAEMON_REF: ${{ inputs.daemon_ref }}
           DAEMON_IMAGE: ${{ inputs.daemon_image }}
+          CANDIDATE_ID: ${{ inputs.candidate_id }}
           RUN_REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
           [[ "$DAEMON_REF" =~ ^[0-9a-f]{40}$ ]]
           [[ "$DAEMON_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
+          [[ "$CANDIDATE_ID" =~ ^([a-z0-9]|[a-z0-9][a-z0-9-]{0,30}[a-z0-9])$ ]]
           [[ -n "$RUN_REASON" ]]
       - name: Check out exact daemon scenario source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -101,24 +107,34 @@ jobs:
           grep -Fx '  maxInputTokens: 20000' tests/reliability/provider-profiles/openai-compatible-live.yaml
           grep -Fx '    maxEstimatedCostMicros: 1000000' tests/reliability/provider-profiles/openai-compatible-live.yaml
           grep -Fx '  totalTimeout: 5m' tests/reliability/provider-profiles/openai-compatible-live.yaml
-      - name: Build exact harness
+      - name: Build exact harness outside source checkout
         working-directory: mycel-lab
-        run: go build -trimpath -buildvcs=true -o ./bin/mycel-lab ./cmd/mycel-lab
+        run: |
+          install -d "$RUNNER_TEMP/bin"
+          go build -trimpath -buildvcs=true -o "$RUNNER_TEMP/bin/mycel-lab" ./cmd/mycel-lab
+      - name: Construct authoritative release bundle
+        env:
+          DAEMON_IMAGE: ${{ inputs.daemon_image }}
+          CANDIDATE_ID: ${{ inputs.candidate_id }}
+        run: |
+          set -euo pipefail
+          cp mycel-lab/tests/reliability/release-bundles/semantic-live-provider.draft.yaml.tmpl release-bundle-draft.yaml
+          "$RUNNER_TEMP/bin/mycel-lab" release-bundle build release-bundle-draft.yaml release-bundle.yaml \
+            --daemon-image "$DAEMON_IMAGE" \
+            --candidate-id "$CANDIDATE_ID"
       - name: Run approved live scenario once
         id: live_run
         working-directory: mycel-lab
         env:
           ARTIFACT_ROOT: ${{ runner.temp }}/mycel-lab-semantic-live
-          DAEMON_IMAGE: ${{ inputs.daemon_image }}
           MINIO_IMAGE: docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff
           MINIO_MC_IMAGE: docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set +e
-          ./bin/mycel-lab run suite semantic-live-provider \
+          "$RUNNER_TEMP/bin/mycel-lab" run suite semantic-live-provider \
             --confirm-destructive \
-            --image "$DAEMON_IMAGE" \
-            --provider-profile tests/reliability/provider-profiles/openai-compatible-live.yaml \
+            --release-bundle ../release-bundle.yaml \
             --artifact-root "$ARTIFACT_ROOT"
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"

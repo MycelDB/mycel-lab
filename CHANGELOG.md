@@ -8,6 +8,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added strict hermetic release execution bundles and maintained protected-gate draft templates that bind clean source trees, harness/tool binaries (including exact Buildx and Compose plugins), registry and local image identities, native and side manifests, provenance evidence, selected configuration files, resource allocation, and outer/finalization bounds; `release-bundle build` captures a reproducible authoritative bundle, protected gates consume it directly with collision-resistant bounded K3d allocation names, and candidate preflight rejects mismatches and mutable/default provider-emulator identities before environment provisioning (#88).
 - Added a pre-candidate graph-commit restart qualification suite and policy requiring repeated fresh credential-free k3d clusters, one digest-pinned provenance-validated daemon identity, and zero unresolved ambiguous commits before assigning another candidate identity.
 - Added SGT10 CI/release integration with credential-free pull-request checks, deterministic/emulator/live-profile dry-runs, protected exact-candidate live and cluster release-gate workflows, immutable action/image inputs, serialized destructive execution, fail-closed sanitized artifact uploads, and credential incident-response guidance (#46).
 

@@ -51,17 +51,17 @@ RELEASE_IMAGE_PLATFORM_ASSERTION = re.compile(
     re.MULTILINE,
 )
 RELEASE_DESTRUCTIVE_RUN = re.compile(
-    r"^          \./bin/mycel-lab run suite cluster-release-gate \\\n"
+    r"^          \"\$RUNNER_TEMP/bin/mycel-lab\" run suite cluster-release-gate \\\n"
     r"            --confirm-destructive \\\n"
-    r"            --image \"\$DAEMON_IMAGE\" \\\n"
+    r"            --release-bundle \..\/release-bundle\.yaml \\\n"
     r"            --artifact-root \"\$ARTIFACT_ROOT\"$",
     re.MULTILINE,
 )
 MINIO_HELPER_IMAGE = "docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff"
 MC_HELPER_IMAGE = "docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0"
 PROTECTED_WORKFLOW_SHA256 = {
-    "semantic-live.yml": "d1e1d5383374909989f390e4ea02d883d0ab51df1c16bedfb45115979d1ead05",
-    "release-gate.yml": "2b9d5a680243617db7c4a78f4f85009762f0adc663c87fd639061438b6fbc8ca",
+    "semantic-live.yml": "8c8e0417aa473aabd2d2dfafb2c775bea136dfa26c40d8ab5255abf8b9d4f3fe",
+    "release-gate.yml": "cbd5267f13753955e8e157596640cab73154ffff9e7fcd6e9f4abc85bf997829",
 }
 
 
@@ -101,16 +101,14 @@ LIVE_RUN_STEP = f'''      - name: Run approved live scenario once
         working-directory: mycel-lab
         env:
           ARTIFACT_ROOT: ${{{{ runner.temp }}}}/mycel-lab-semantic-live
-          DAEMON_IMAGE: ${{{{ inputs.daemon_image }}}}
           MINIO_IMAGE: {MINIO_HELPER_IMAGE}
           MINIO_MC_IMAGE: {MC_HELPER_IMAGE}
           OPENAI_API_KEY: ${{{{ secrets.OPENAI_API_KEY }}}}
         run: |
           set +e
-          ./bin/mycel-lab run suite semantic-live-provider \\
+          "$RUNNER_TEMP/bin/mycel-lab" run suite semantic-live-provider \\
             --confirm-destructive \\
-            --image "$DAEMON_IMAGE" \\
-            --provider-profile tests/reliability/provider-profiles/openai-compatible-live.yaml \\
+            --release-bundle ../release-bundle.yaml \\
             --artifact-root "$ARTIFACT_ROOT"
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
@@ -120,14 +118,13 @@ RELEASE_RUN_STEP = f'''      - name: Run approved cluster release gate once
         working-directory: mycel-lab
         env:
           ARTIFACT_ROOT: ${{{{ runner.temp }}}}/mycel-lab-cluster-release-gate
-          DAEMON_IMAGE: ${{{{ inputs.daemon_image }}}}
           MINIO_IMAGE: {MINIO_HELPER_IMAGE}
           MINIO_MC_IMAGE: {MC_HELPER_IMAGE}
         run: |
           set +e
-          ./bin/mycel-lab run suite cluster-release-gate \\
+          "$RUNNER_TEMP/bin/mycel-lab" run suite cluster-release-gate \\
             --confirm-destructive \\
-            --image "$DAEMON_IMAGE" \\
+            --release-bundle ../release-bundle.yaml \\
             --artifact-root "$ARTIFACT_ROOT"
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
@@ -220,7 +217,7 @@ def check_helper_images(
     run_indexes = [index for index, step in enumerate(steps) if step == run_step]
     suite_target = "semantic-live-provider" if job_name == "live-semantic" else "cluster-release-gate"
     normalized_workflow = normalize_shell_equivalent(workflow)
-    protected_suite_invocations = normalized_workflow.count(f"./bin/mycel-lab run suite {suite_target}")
+    protected_suite_invocations = normalized_workflow.count(f"bin/mycel-lab run suite {suite_target}")
     destructive_confirmations = normalized_workflow.count("--confirm-destructive")
 
     require(len(preflight_indexes) == 1, f"{workflow_name}: {job_name} requires exactly one complete immutable {architecture} helper-image preflight step", failures)

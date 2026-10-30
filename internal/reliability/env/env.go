@@ -1108,7 +1108,7 @@ func (d ComposeDriver) Preflight(ctx context.Context, environment spec.Environme
 	if !d.Confirmed {
 		return RequireDestructiveConfirmation(Options{})
 	}
-	if _, err := d.runner().Run(ctx, "docker", "compose", "version"); err != nil {
+	if _, err := d.runner().Run(ctx, "docker-compose", "version"); err != nil {
 		return fmt.Errorf("docker compose preflight failed: %w", err)
 	}
 	composeFiles := composeFileOptions(environment)
@@ -2097,11 +2097,10 @@ func (d ComposeDriver) compose(ctx context.Context, environment Environment, arg
 		base = append(base, "-p", project)
 	}
 	base = append(base, args...)
-	dockerArgs := append([]string{"compose"}, base...)
 	if image := strings.TrimSpace(environment.Metadata["imageOverride"]); image != "" {
-		return d.runner().Run(ctx, "env", append([]string{"MYCEL_IMAGE=" + image, "docker"}, dockerArgs...)...)
+		return d.runner().Run(ctx, "env", append([]string{"MYCEL_IMAGE=" + image, "docker-compose"}, base...)...)
 	}
-	return d.runner().Run(ctx, "docker", dockerArgs...)
+	return d.runner().Run(ctx, "docker-compose", base...)
 }
 
 func (d ComposeDriver) runner() executil.Runner {
@@ -2333,14 +2332,25 @@ func k3dClusterName(name, prefix string) string {
 		return trimNamePart(prefix+"-"+base+"-"+stamp, k3dClusterNameMaxLength)
 	}
 	if len(prefix)+len(base) > nameBudget {
-		baseBudget := nameBudget - len(prefix)
-		if baseBudget < 3 {
-			baseBudget = 3
-			prefix = trimNamePart(prefix, nameBudget-baseBudget)
-		}
+		baseBudget := 3
+		prefixBudget := nameBudget - baseBudget
+		prefix = hashedNamePart(prefix+"\x00"+base, prefix, prefixBudget)
 		base = trimNamePart(base, baseBudget)
 	}
 	return prefix + "-" + base + "-" + stamp
+}
+
+func hashedNamePart(identity, readable string, maxLength int) string {
+	digest := sha256.Sum256([]byte(identity))
+	hash := hex.EncodeToString(digest[:])[:8]
+	if maxLength <= len(hash) {
+		return hash[:maxLength]
+	}
+	readable = trimNamePart(readable, maxLength-len(hash)-1)
+	if readable == "" {
+		return hash
+	}
+	return readable + "-" + hash
 }
 
 func trimNamePart(value string, maxLength int) string {

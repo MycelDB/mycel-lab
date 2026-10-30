@@ -83,6 +83,21 @@ Live profiles resolve credentials only for non-dry-runs. Required provider-owned
 
 The resolved redacted profile and exact source SHA-256 are written under `provider/`. Finalization always writes `redaction-scan.json`; any prohibited-value finding or scan failure fails the run. See [Provider profiles, budgets, and artifact safety](design/provider-profiles.md).
 
+Release-candidate gates consume one hermetic bundle instead of independent image, profile, or environment overrides. Start from a maintained draft template located above the clean `mycel-lab` and `mycel` source directories, build the harness outside those checkouts, capture exact identities without provisioning, validate it before candidate numbering, then pass the same immutable file to the gate:
+
+```sh
+mycel-lab release-bundle build /candidate/release-bundle-draft.yaml /candidate/release-execution-bundle.yaml \
+  --daemon-image 'docker.io/myceldb/mycel@sha256:<64-hex-digest>' \
+  --candidate-id '<approved-candidate-id>'
+mycel-lab release-bundle validate /candidate/release-execution-bundle.yaml
+mycel-lab run suite k3d-procedure-inference-recovery \
+  --release-bundle /candidate/release-execution-bundle.yaml \
+  --confirm-destructive \
+  --artifact-root /candidate/evidence/recovery
+```
+
+The canonical schema, construction lifecycle, image rules, and fail-closed checks are documented in [Hermetic release execution bundles](design/release-execution-bundles.md). Canonical procedure-inference candidate suites reject their former `:dev` provider-emulator default before any environment use.
+
 Finalization is fail-closed and bounded. The runner records actor shutdown,
 provider-observation capture when enabled, cluster assertions, the final graph
 oracle, scenario cleanup, and explicit port-forward shutdown in
