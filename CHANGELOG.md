@@ -12,6 +12,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- K3d readiness failures now retain bounded Kubernetes resources, pod descriptions, and namespace events before fail-closed image-provenance validation, so mandatory cleanup no longer erases the state needed to diagnose unready workloads.
 - K3d environments now support an explicit node-pull policy for digest-pinned registry images instead of passing multiarch index references through k3d's host-local image import path, while defaulting to local import for private and development image compatibility.
 - SGT9 cleanup now consumes bounded, complete structured inference-reference details from compatible daemons, proving and retaining immutable audit closures beyond the legacy 32-reference message limit without accepting truncated, malformed, unsupported, duplicate, or unrooted reference sets.
 - Protected semantic and cluster release acceptance now preflight immutable, anonymously pullable multiarch MinIO and mc helper images for the native runner architecture before credentials or destructive execution, verify exact upstream source/version provenance, and pass only those preflighted digests into the harness.

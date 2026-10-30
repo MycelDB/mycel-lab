@@ -309,7 +309,7 @@ func TestK3DDriverCaptureStateWritesArtifacts(t *testing.T) {
 		t.Fatalf("CaptureState() error=%v", err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"get all,pvc", "describe pods", "logs statefulset/myceld", "logs -l app=myceld --all-containers=true --prefix=true --tail=5000", "logs -l app=myceld --all-containers=true --prefix=true --previous --tail=5000"} {
+	for _, want := range []string{"get all,pvc", "describe pods", "get events --sort-by=.metadata.creationTimestamp", "logs statefulset/myceld", "logs -l app=myceld --all-containers=true --prefix=true --tail=5000", "logs -l app=myceld --all-containers=true --prefix=true --previous --tail=5000"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("capture commands missing %q:\n%s", want, joined)
 		}
@@ -361,6 +361,16 @@ func TestK3DDriverCaptureStatePersistsClosedImageResolutionEvidenceBeforeRejecti
 			}
 			if !bytes.Contains(data, []byte(`"resolutionStatus": "`+test.wantStatus+`"`)) || bytes.Contains(data, []byte("secret image command failure")) {
 				t.Fatalf("unsafe or incomplete image evidence: %s", data)
+			}
+			for _, name := range []string{"kubernetes-resources.txt", "pods-describe.txt", "kubernetes-events.txt"} {
+				content, readErr := os.ReadFile(filepath.Join(sink.Root(), "environment", name))
+				if readErr != nil || !bytes.Contains(content, []byte("stdout:\n")) {
+					t.Fatalf("readiness diagnostic %s was not preserved before rejection: content=%q err=%v", name, content, readErr)
+				}
+			}
+			commands := strings.Join(test.runner.commands, "\n")
+			if !strings.Contains(commands, "get events --sort-by=.metadata.creationTimestamp") || strings.Contains(commands, "logs statefulset/myceld") {
+				t.Fatalf("closed-evidence diagnostic commands were incomplete or unsafe:\n%s", commands)
 			}
 		})
 	}
