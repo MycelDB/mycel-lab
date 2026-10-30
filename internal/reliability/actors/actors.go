@@ -37,6 +37,7 @@ type Scheduler struct {
 	mu          sync.Mutex
 	scenario    spec.ResolvedScenario
 	instances   []Instance
+	started     int
 	factory     Factory
 	recorder    EventRecorder
 	assignments map[string]provision.ActorAssignment
@@ -99,7 +100,10 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 	instances := append([]Instance(nil), s.instances...)
 	s.mu.Unlock()
-	for _, inst := range instances {
+	for index, inst := range instances {
+		s.mu.Lock()
+		s.started = index + 1
+		s.mu.Unlock()
 		if err := inst.Actor.Start(ctx); err != nil {
 			return fmt.Errorf("start actor %s: %w", inst.ID, err)
 		}
@@ -160,7 +164,11 @@ func (s *Scheduler) RestoreBaseRates(ctx context.Context) error {
 
 func (s *Scheduler) Stop(ctx context.Context) error {
 	s.mu.Lock()
-	instances := append([]Instance(nil), s.instances...)
+	started := s.started
+	if started > len(s.instances) {
+		started = len(s.instances)
+	}
+	instances := append([]Instance(nil), s.instances[:started]...)
 	s.mu.Unlock()
 	var firstErr error
 	for _, inst := range instances {

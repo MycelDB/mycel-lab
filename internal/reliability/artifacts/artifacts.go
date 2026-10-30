@@ -19,8 +19,14 @@ type Sanitizer interface {
 
 type Sink struct {
 	root      string
-	mu        sync.Mutex
+	mu        *sync.Mutex
+	gate      *sinkWriteGate
 	sanitizer Sanitizer
+}
+
+type sinkWriteGate struct {
+	mu       sync.RWMutex
+	disabled bool
 }
 
 type Event struct {
@@ -42,12 +48,40 @@ func NewSanitizedSink(root string, sanitizer Sanitizer) (*Sink, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
-	return &Sink{root: root, sanitizer: sanitizer}, nil
+	return &Sink{root: root, mu: &sync.Mutex{}, gate: &sinkWriteGate{}, sanitizer: sanitizer}, nil
 }
 
 func (s *Sink) Root() string { return s.root }
 
 func (s *Sink) Sanitizer() Sanitizer { return s.sanitizer }
+
+// Scoped returns a sink for supervised work that shares path serialization and
+// sanitization with the parent but can be disabled independently after timeout.
+func (s *Sink) Scoped() *Sink {
+	return &Sink{root: s.root, mu: s.mu, gate: &sinkWriteGate{}, sanitizer: s.sanitizer}
+}
+
+// DisableWrites waits for any active scoped write and rejects future writes.
+func (s *Sink) DisableWrites() {
+	s.gate.mu.Lock()
+	s.gate.disabled = true
+	s.gate.mu.Unlock()
+}
+
+func (s *Sink) beginWrite() error {
+	s.gate.mu.RLock()
+	if s.gate.disabled {
+		s.gate.mu.RUnlock()
+		return fmt.Errorf("artifact sink scope is disabled")
+	}
+	s.mu.Lock()
+	return nil
+}
+
+func (s *Sink) endWrite() {
+	s.mu.Unlock()
+	s.gate.mu.RUnlock()
+}
 
 func (s *Sink) Sanitize(value any) (any, error) {
 	if s.sanitizer == nil {
@@ -57,8 +91,10 @@ func (s *Sink) Sanitize(value any) (any, error) {
 }
 
 func (s *Sink) WriteJSON(name string, value any) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.beginWrite(); err != nil {
+		return "", err
+	}
+	defer s.endWrite()
 	path, err := s.safePath(name)
 	if err != nil {
 		return "", err
@@ -82,8 +118,10 @@ func (s *Sink) WriteJSON(name string, value any) (string, error) {
 }
 
 func (s *Sink) WriteText(name string, content string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.beginWrite(); err != nil {
+		return "", err
+	}
+	defer s.endWrite()
 	path, err := s.safePath(name)
 	if err != nil {
 		return "", err
@@ -101,8 +139,10 @@ func (s *Sink) WriteText(name string, content string) (string, error) {
 }
 
 func (s *Sink) AppendJSONL(name string, value any) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.beginWrite(); err != nil {
+		return "", err
+	}
+	defer s.endWrite()
 	path, err := s.safePath(name)
 	if err != nil {
 		return "", err

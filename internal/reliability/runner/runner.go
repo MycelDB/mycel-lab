@@ -102,6 +102,72 @@ type Options struct {
 	EventRuntime                 events.Runtime
 	ActorFactory                 actors.Factory
 	harnessBuildIdentityOverride *harnessBuildIdentity
+	finalizationTimeoutsOverride *finalizationTimeouts
+	consolePortForwardStarter    consolePortForwardStarter
+	scenarioCleanup              func(context.Context, *provision.ScenarioResources, provision.Options) error
+}
+
+type consolePortForwardSession interface {
+	env.EndpointRecovery
+	Stop(context.Context) error
+}
+
+type consolePortForwardStarter func(context.Context, env.Environment, []env.ConsoleEndpoint) (consolePortForwardSession, error)
+
+type finalizationTimeouts struct {
+	ActorStop           time.Duration
+	ProviderObservation time.Duration
+	ClusterAssertions   time.Duration
+	FinalOracle         time.Duration
+	PortForwardStop     time.Duration
+	ScenarioCleanup     time.Duration
+}
+
+type finalizationStageRun struct {
+	Launched  bool
+	Completed bool
+}
+
+type finalizationStageEvidence struct {
+	Name          string    `json:"name"`
+	Status        string    `json:"status"`
+	Timeout       string    `json:"timeout"`
+	StartedAt     time.Time `json:"startedAt"`
+	FinishedAt    time.Time `json:"finishedAt,omitempty"`
+	ErrorCategory string    `json:"errorCategory,omitempty"`
+}
+
+func resolvedFinalizationTimeouts(override *finalizationTimeouts) finalizationTimeouts {
+	resolved := finalizationTimeouts{
+		ActorStop:           45 * time.Second,
+		ProviderObservation: 30 * time.Second,
+		ClusterAssertions:   90 * time.Second,
+		FinalOracle:         60 * time.Second,
+		PortForwardStop:     15 * time.Second,
+		ScenarioCleanup:     60 * time.Second,
+	}
+	if override == nil {
+		return resolved
+	}
+	if override.ActorStop > 0 {
+		resolved.ActorStop = override.ActorStop
+	}
+	if override.ProviderObservation > 0 {
+		resolved.ProviderObservation = override.ProviderObservation
+	}
+	if override.ClusterAssertions > 0 {
+		resolved.ClusterAssertions = override.ClusterAssertions
+	}
+	if override.FinalOracle > 0 {
+		resolved.FinalOracle = override.FinalOracle
+	}
+	if override.PortForwardStop > 0 {
+		resolved.PortForwardStop = override.PortForwardStop
+	}
+	if override.ScenarioCleanup > 0 {
+		resolved.ScenarioCleanup = override.ScenarioCleanup
+	}
+	return resolved
 }
 
 type SuiteResult struct {
@@ -169,8 +235,15 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	finish := func(status RunStatus, runErr error) (Result, error) {
 		if sensitiveCleanup != nil && !sensitiveCleanupDone {
 			sensitiveCleanupDone = true
-			cleanupErr := sensitiveCleanup()
-			cleanupEvidence := map[string]any{"completed": cleanupErr == nil}
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			cleanupCompleted, cleanupErr := runOperationBounded(cleanupCtx, func(context.Context) error {
+				return sensitiveCleanup()
+			})
+			cleanupCancel()
+			cleanupEvidence := map[string]any{"completed": cleanupCompleted && cleanupErr == nil}
+			if !cleanupCompleted {
+				cleanupEvidence["inFlight"] = true
+			}
 			if cleanupErr != nil {
 				cleanupEvidence["errorCategory"] = "sensitive_host_cleanup_failed"
 				runErr = errors.Join(runErr, errors.New("sensitive host artifact cleanup failed"))
@@ -281,14 +354,22 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		environment.Metadata["liveSemanticProvider"] = "true"
 	}
 	cleanupEnvironment := true
+	cleanupScenario := opts.scenarioCleanup
+	if cleanupScenario == nil {
+		cleanupScenario = provision.CleanupScenario
+	}
 	var resources provision.ScenarioResources
 	resourcesPlanned := false
+	scenarioCleanupAttempted := false
 	scenarioCleanupCompleted := false
+	scenarioCleanupInFlight := false
 	var endpointAddrs []string
 	defer func() {
 		if cleanupEnvironment && !retainEnvironmentOnFailure {
 			deleteCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			_ = driver.Delete(deleteCtx, environment)
+			_, _ = runOperationBounded(deleteCtx, func(operationCtx context.Context) error {
+				return driver.Delete(operationCtx, environment)
+			})
 			cancel()
 		}
 	}()
@@ -296,9 +377,10 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		evidence := map[string]any{
 			"schemaVersion":            "reliability.mycel.io/post-run-cleanup/v1alpha1",
 			"retentionRequested":       retentionRequested,
-			"scenarioCleanupAttempted": scenarioCleanupCompleted,
+			"scenarioCleanupAttempted": scenarioCleanupAttempted,
 			"scenarioCleanupAttempts":  0,
 			"scenarioCleanupCompleted": scenarioCleanupCompleted,
+			"scenarioCleanupInFlight":  scenarioCleanupInFlight,
 			"driverDeleteAttempts":     0,
 			"driverDeleteCompleted":    false,
 			"completed":                false,
@@ -317,17 +399,28 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		errorCategories := []string{}
 		if resourcesPlanned && !scenarioCleanupCompleted {
 			evidence["scenarioCleanupAttempted"] = true
-			cleanupDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
-			attempts, cleanupErr := runBoundedCleanupAttempts(3, 60*time.Second, func(cleanupCtx context.Context) error {
-				return provision.CleanupScenario(cleanupCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun})
-			})
-			evidence["scenarioCleanupAttempts"] = attempts
-			if cleanupErr == nil {
-				scenarioCleanupCompleted = true
-				evidence["scenarioCleanupCompleted"] = true
-			}
-			if !scenarioCleanupCompleted {
-				errorCategories = append(errorCategories, "scenario_cleanup_failed")
+			if scenarioCleanupInFlight {
+				errorCategories = append(errorCategories, "scenario_cleanup_in_flight")
+			} else {
+				scenarioCleanupAttempted = true
+				cleanupDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
+				cleanupResources := provision.CloneScenarioResources(resources)
+				attempts, inFlight, cleanupErr := runBoundedCleanupAttempts(3, 60*time.Second, func(cleanupCtx context.Context) error {
+					return cleanupScenario(cleanupCtx, &cleanupResources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun})
+				})
+				evidence["scenarioCleanupAttempts"] = attempts
+				scenarioCleanupInFlight = inFlight
+				evidence["scenarioCleanupInFlight"] = inFlight
+				if !inFlight {
+					resources = cleanupResources
+				}
+				if cleanupErr == nil {
+					scenarioCleanupCompleted = true
+					evidence["scenarioCleanupCompleted"] = true
+				}
+				if !scenarioCleanupCompleted {
+					errorCategories = append(errorCategories, "scenario_cleanup_failed")
+				}
 			}
 			_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
 		}
@@ -335,8 +428,14 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		for attempt := 1; attempt <= 3; attempt++ {
 			evidence["driverDeleteAttempts"] = attempt
 			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 60*time.Second)
-			deleteErr := driver.Delete(deleteCtx, environment)
+			completed, deleteErr := runOperationBounded(deleteCtx, func(operationCtx context.Context) error {
+				return driver.Delete(operationCtx, environment)
+			})
 			deleteCancel()
+			if !completed {
+				errorCategories = append(errorCategories, "environment_delete_in_flight")
+				break
+			}
 			if deleteErr == nil {
 				deleteCompleted = true
 				break
@@ -351,10 +450,19 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		verification := env.DeletionVerification{}
 		if verifier, ok := driver.(env.EnvironmentDeletionVerifier); ok {
 			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			observed, err := verifier.VerifyDeleted(verifyCtx, environment)
+			var observed env.DeletionVerification
+			completed, verifyErr := runOperationBounded(verifyCtx, func(operationCtx context.Context) error {
+				var operationErr error
+				observed, operationErr = verifier.VerifyDeleted(operationCtx, environment)
+				return operationErr
+			})
 			verifyCancel()
-			verification = observed
-			if err != nil {
+			if completed {
+				verification = observed
+			}
+			if !completed {
+				errorCategories = append(errorCategories, "environment_absence_check_in_flight")
+			} else if verifyErr != nil {
 				errorCategories = append(errorCategories, "environment_absence_check_failed")
 			}
 		} else if !opts.DryRun {
@@ -386,7 +494,11 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			captureErr = errors.New("primary environment state capture failed")
 		} else {
 			captureCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			captureErr = driver.CaptureState(captureCtx, environment, sink)
+			captureSink := sink.Scoped()
+			_, captureErr = runOperationBounded(captureCtx, func(operationCtx context.Context) error {
+				return driver.CaptureState(operationCtx, environment, captureSink)
+			})
+			captureSink.DisableWrites()
 			cancel()
 		}
 		captureEvent := "environment-failure-state-captured"
@@ -435,18 +547,33 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	needsActorEndpoints := len(resources.Assignments) > 0
 	portForwardEnvironment := environment.Driver == "k3d"
-	var portForwardSession *env.ConsolePortForwardSession
+	var portForwardSession consolePortForwardSession
+	portForwardStopAttempted := false
+	portForwardStopped := false
 	needsProvisioningEndpoint := portForwardEnvironment && len(endpointAddrs) > 0
 	if (opts.ConsoleEndpoints || needsActorEndpoints || needsProvisioningEndpoint) && !opts.DryRun {
 		if _, err := sink.WriteJSON("environment/console-endpoints.json", endpoints); err != nil {
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if portForwardEnvironment {
-			portForwardSession, err = env.StartConsolePortForwards(ctx, environment, endpoints)
+			portForwardStarter := opts.consolePortForwardStarter
+			if portForwardStarter == nil {
+				portForwardStarter = func(startCtx context.Context, environment env.Environment, endpoints []env.ConsoleEndpoint) (consolePortForwardSession, error) {
+					return env.StartConsolePortForwards(startCtx, environment, endpoints)
+				}
+			}
+			portForwardSession, err = portForwardStarter(ctx, environment, endpoints)
 			if err != nil {
 				return failAfterEnvironmentCreate(RunFailed, err)
 			}
-			defer portForwardSession.Stop(context.Background())
+			defer func() {
+				if portForwardStopped || portForwardStopAttempted {
+					return
+				}
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer stopCancel()
+				_, _ = runOperationBounded(stopCtx, portForwardSession.Stop)
+			}()
 		}
 		if opts.ConsoleEndpoints {
 			writeConsoleEndpoints(opts.ProgressWriter, endpoints)
@@ -477,7 +604,52 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if _, err := sink.WriteJSON("actors/assignments.json", resources.Assignments); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
-	recorder := &runRecorder{store: opts.Store, sink: sink, runID: runID, budget: budgetLedger, budgetCancel: budgetCancel}
+	recorder := &runRecorder{store: opts.Store, sink: sink.Scoped(), runID: runID, budget: budgetLedger, budgetCancel: budgetCancel}
+	finalizationBounds := resolvedFinalizationTimeouts(opts.finalizationTimeoutsOverride)
+	finalizationStages := []finalizationStageEvidence{}
+	persistFinalizationStages := func() error {
+		_, err := sink.WriteJSON("environment/finalization-stages.json", finalizationStages)
+		return err
+	}
+	runFinalizationStage := func(name string, timeout time.Duration, operation func(context.Context) error) (finalizationStageRun, error) {
+		stage := finalizationStageEvidence{Name: name, Status: "running", Timeout: timeout.String(), StartedAt: time.Now().UTC()}
+		finalizationStages = append(finalizationStages, stage)
+		stageIndex := len(finalizationStages) - 1
+		if err := persistFinalizationStages(); err != nil {
+			return finalizationStageRun{}, fmt.Errorf("persist finalization stage %s start: %w", name, err)
+		}
+		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("finalization-stage-started", "", "", map[string]any{"stage": name, "timeout": timeout.String()}))
+
+		stageRun := finalizationStageRun{Launched: true}
+		stageCtx, stageCancel := context.WithTimeout(ctx, timeout)
+		stageRun.Completed, err = runOperationBounded(stageCtx, operation)
+		stageContextErr := stageCtx.Err()
+		stageCancel()
+		if err == nil && stageContextErr != nil {
+			err = stageContextErr
+		}
+		finalizationStages[stageIndex].FinishedAt = time.Now().UTC()
+		if err != nil {
+			category := "operation_failed"
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(stageContextErr, context.DeadlineExceeded) {
+				category = "timeout"
+			}
+			finalizationStages[stageIndex].Status = "failed"
+			finalizationStages[stageIndex].ErrorCategory = category
+			evidenceErr := persistFinalizationStages()
+			_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("finalization-stage-failed", "", "", map[string]any{"stage": name, "errorCategory": category}))
+			if category == "timeout" {
+				return stageRun, errors.Join(fmt.Errorf("finalization stage %s exceeded %s: %w", name, timeout, context.DeadlineExceeded), evidenceErr)
+			}
+			return stageRun, errors.Join(fmt.Errorf("finalization stage %s failed: %w", name, err), evidenceErr)
+		}
+		finalizationStages[stageIndex].Status = "passed"
+		if err := persistFinalizationStages(); err != nil {
+			return stageRun, fmt.Errorf("persist finalization stage %s completion: %w", name, err)
+		}
+		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("finalization-stage-passed", "", "", map[string]any{"stage": name}))
+		return stageRun, nil
+	}
 	eventRuntime := opts.EventRuntime
 	if eventRuntime == nil {
 		eventRuntime = defaultEventRuntime(opts, driver, environment, scenario, &resources)
@@ -493,26 +665,44 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		assignmentMap = nil
 	}
 	scheduler := actors.NewSchedulerWithRecorderAndAssignments(scenario, opts.ActorFactory, recorder, assignmentMap)
-	if err := scheduler.Start(ctx); err != nil {
-		return failAfterEnvironmentCreate(RunFailed, err)
-	}
 	schedulerStopped := false
+	schedulerStopAttempted := false
+	stopActorsForFailure := func() {
+		if !schedulerStopped && !schedulerStopAttempted {
+			schedulerStopAttempted = true
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			completed, _ := runOperationBounded(stopCtx, scheduler.Stop)
+			stopCancel()
+			schedulerStopped = completed
+		}
+		recorder.Disable()
+	}
 	defer func() {
-		if !schedulerStopped {
-			_ = scheduler.Stop(context.Background())
+		if !schedulerStopped && !schedulerStopAttempted {
+			schedulerStopAttempted = true
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), finalizationBounds.ActorStop)
+			defer stopCancel()
+			_, _ = runOperationBounded(stopCtx, scheduler.Stop)
 		}
 	}()
 	captureRunFailureEvidence := func() {
-		if !schedulerStopped {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
-			_ = scheduler.Stop(stopCtx)
-			stopCancel()
-			schedulerStopped = true
-		}
+		stopActorsForFailure()
 		evidenceCtx, evidenceCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer evidenceCancel()
-		_ = captureClusterAssertionsOnce(evidenceCtx, sink, scenario, driver, environment, nodes)
-		_ = writeFinalOracleReport(evidenceCtx, sink, recorder, resources, scenario.Assertions, !provisionDryRun)
+		clusterSink := sink.Scoped()
+		_, _ = runOperationBounded(evidenceCtx, func(operationCtx context.Context) error {
+			return captureClusterAssertionsOnce(operationCtx, clusterSink, scenario, driver, environment, nodes)
+		})
+		clusterSink.DisableWrites()
+		oracleSink := sink.Scoped()
+		_, _ = runOperationBounded(evidenceCtx, func(operationCtx context.Context) error {
+			return writeFinalOracleReport(operationCtx, oracleSink, recorder, resources, scenario.Assertions, !provisionDryRun)
+		})
+		oracleSink.DisableWrites()
+	}
+	if err := scheduler.Start(ctx); err != nil {
+		captureRunFailureEvidence()
+		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 
 	for i := range result.Phases {
@@ -529,6 +719,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		default:
 		}
 		if err := Transition(&result.Phases[i], PhaseRunning, time.Now().UTC()); err != nil {
+			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		phaseSpec := scenario.Phases[i]
@@ -583,17 +774,26 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		}
 		if err := scheduler.RestoreBaseRates(ctx); err != nil {
 			_ = Transition(&result.Phases[i], PhaseFailed, time.Now().UTC())
+			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		if err := Transition(&result.Phases[i], PhasePassed, time.Now().UTC()); err != nil {
+			captureRunFailureEvidence()
 			return failAfterEnvironmentCreate(RunFailed, err)
 		}
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("phase-passed", phaseSpec.Name, "", nil))
 	}
-	if err := scheduler.Stop(ctx); err != nil {
+	actorStopRun, err := runFinalizationStage("actor-stop", finalizationBounds.ActorStop, scheduler.Stop)
+	schedulerStopAttempted = actorStopRun.Launched
+	if actorStopRun.Launched {
+		schedulerStopped = actorStopRun.Completed
+		recorder.Disable()
+	} else {
+		stopActorsForFailure()
+	}
+	if err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
-	schedulerStopped = true
 	if budgetErr := recorder.budgetError(); budgetErr != nil {
 		return failAfterEnvironmentCreate(RunFailed, budgetErr)
 	}
@@ -603,26 +803,79 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 			return failAfterEnvironmentCreate(RunFailed, errors.New("provider emulator observation capture is unsupported"))
 		}
 		requireNonempty := environment.Metadata["requireNonemptyProviderEmulatorObservations"] == "true"
-		if err := captureFinalProviderEmulatorObservations(ctx, sink, inspector, environment, requireNonempty); err != nil {
-			return failAfterEnvironmentCreate(RunFailed, err)
+		providerSink := sink.Scoped()
+		_, stageErr := runFinalizationStage("provider-observations", finalizationBounds.ProviderObservation, func(stageCtx context.Context) error {
+			return captureFinalProviderEmulatorObservations(stageCtx, providerSink, inspector, environment, requireNonempty)
+		})
+		providerSink.DisableWrites()
+		if stageErr != nil {
+			return failAfterEnvironmentCreate(RunFailed, stageErr)
 		}
 	}
-	if err := runFinalClusterAssertions(ctx, sink, scenario, driver, environment, nodes, !provisionDryRun); err != nil {
-		return failAfterEnvironmentCreate(RunFailed, err)
+	clusterSink := sink.Scoped()
+	_, stageErr := runFinalizationStage("cluster-assertions", finalizationBounds.ClusterAssertions, func(stageCtx context.Context) error {
+		return runFinalClusterAssertions(stageCtx, clusterSink, scenario, driver, environment, nodes, !provisionDryRun)
+	})
+	clusterSink.DisableWrites()
+	if stageErr != nil {
+		return failAfterEnvironmentCreate(RunFailed, stageErr)
 	}
-	if err := writeFinalOracleReport(ctx, sink, recorder, resources, scenario.Assertions, !provisionDryRun); err != nil {
-		return failAfterEnvironmentCreate(RunFailed, err)
+	oracleSink := sink.Scoped()
+	_, stageErr = runFinalizationStage("final-oracle", finalizationBounds.FinalOracle, func(stageCtx context.Context) error {
+		return writeFinalOracleReport(stageCtx, oracleSink, recorder, resources, scenario.Assertions, !provisionDryRun)
+	})
+	oracleSink.DisableWrites()
+	if stageErr != nil {
+		return failAfterEnvironmentCreate(RunFailed, stageErr)
 	}
-	if err := provision.CleanupScenario(ctx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun}); err != nil {
+	cleanupResources := provision.CloneScenarioResources(resources)
+	cleanupRun, stageErr := runFinalizationStage("scenario-cleanup", finalizationBounds.ScenarioCleanup, func(stageCtx context.Context) error {
+		return cleanupScenario(stageCtx, &cleanupResources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun})
+	})
+	scenarioCleanupAttempted = cleanupRun.Launched
+	if cleanupRun.Completed {
+		resources = cleanupResources
+	} else if cleanupRun.Launched {
+		scenarioCleanupInFlight = true
+	}
+	if stageErr != nil {
 		_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
-		return failAfterEnvironmentCreate(RunFailed, err)
+		return failAfterEnvironmentCreate(RunFailed, stageErr)
 	}
 	scenarioCleanupCompleted = true
 	_, _ = sink.WriteJSON("environment/scenario-resources.json", resources)
+	if portForwardSession != nil {
+		portForwardRun, stopStageErr := runFinalizationStage("port-forward-stop", finalizationBounds.PortForwardStop, portForwardSession.Stop)
+		portForwardStopAttempted = portForwardRun.Launched
+		portForwardStopped = portForwardRun.Completed && stopStageErr == nil
+		if !portForwardRun.Launched {
+			portForwardStopAttempted = true
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), finalizationBounds.PortForwardStop)
+			completed, stopErr := runOperationBounded(stopCtx, portForwardSession.Stop)
+			stopCancel()
+			portForwardStopped = completed && stopErr == nil
+		}
+		if stopStageErr != nil {
+			return failAfterEnvironmentCreate(RunFailed, stopStageErr)
+		}
+	}
 	if err := cleanupAfterEnvironment(false); err != nil {
 		return finish(RunFailed, err)
 	}
 	return finish(RunPassed, nil)
+}
+
+func runOperationBounded(ctx context.Context, operation func(context.Context) error) (bool, error) {
+	result := make(chan error, 1)
+	go func() {
+		result <- operation(ctx)
+	}()
+	select {
+	case err := <-result:
+		return true, err
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 func captureFinalProviderEmulatorObservations(ctx context.Context, sink *artifacts.Sink, inspector env.ProviderEmulatorInspector, environment env.Environment, requireNonempty bool) error {
@@ -1075,7 +1328,13 @@ type graphCounts struct {
 	Edges int `json:"edges"`
 }
 
+type finalOracleCountReader func(context.Context, provision.ActorAssignment, graphCounts) (graphCounts, error)
+
 func runLiveFinalOracleChecks(ctx context.Context, resources provision.ScenarioResources, expectedByActor map[string]graphCounts) []finalOracleLiveCheck {
+	return runLiveFinalOracleChecksWithReader(ctx, resources, expectedByActor, 20*time.Second, readFinalGraphCounts)
+}
+
+func runLiveFinalOracleChecksWithReader(ctx context.Context, resources provision.ScenarioResources, expectedByActor map[string]graphCounts, assignmentTimeout time.Duration, reader finalOracleCountReader) []finalOracleLiveCheck {
 	checks := []finalOracleLiveCheck{}
 	for _, assignment := range resources.Assignments {
 		if assignment.BehaviorType != "graph-transaction" || assignment.SpaceID == "" || assignment.DomainID == "" || assignment.DaemonAddr == "" {
@@ -1083,37 +1342,68 @@ func runLiveFinalOracleChecks(ctx context.Context, resources provision.ScenarioR
 		}
 		expected := expectedByActor[assignment.ActorID]
 		check := finalOracleLiveCheck{ActorID: assignment.ActorID, SpaceID: assignment.SpaceID, DomainID: assignment.DomainID, DaemonAddr: assignment.DaemonAddr, Expected: expected}
-		cfg := mycel.Config{Addr: assignment.DaemonAddr, Username: assignment.Username, Password: assignment.Password, ClientName: "mycel-lab-oracle"}
-		if assignment.AccessToken != "" {
-			cfg.Username = ""
-			cfg.Password = ""
-			cfg.AccessToken = assignment.AccessToken
-			cfg.RefreshToken = assignment.RefreshToken
-			cfg.AccessTokenExpireTime = assignment.TokenExpires
+		assignmentCtx, assignmentCancel := context.WithTimeout(ctx, assignmentTimeout)
+		type countResult struct {
+			actual graphCounts
+			err    error
 		}
-		client, err := mycel.Dial(ctx, cfg)
+		result := make(chan countResult, 1)
+		go func() {
+			actual, readErr := reader(assignmentCtx, assignment, expected)
+			result <- countResult{actual: actual, err: readErr}
+		}()
+		var actual graphCounts
+		var err error
+		select {
+		case completed := <-result:
+			actual = completed.actual
+			err = completed.err
+		case <-assignmentCtx.Done():
+			err = assignmentCtx.Err()
+		}
+		contextErr := assignmentCtx.Err()
+		assignmentCancel()
+		check.Actual = actual
+		if err == nil && contextErr != nil {
+			err = contextErr
+		}
 		if err != nil {
 			check.Error = err.Error()
-			checks = append(checks, check)
-			continue
-		}
-		nodes, nodeErr := queryCount(ctx, client, assignment.SpaceID, assignment.DomainID, "MATCH (n) RETURN count(n) FETCH FIRST 1 ROW ONLY")
-		edges, edgeErr := queryEdgeCount(ctx, client, assignment.SpaceID, assignment.DomainID, expected.Edges)
-		_ = client.Close()
-		check.Actual = graphCounts{Nodes: int(nodes), Edges: int(edges)}
-		switch {
-		case nodeErr != nil && edgeErr != nil:
-			check.Error = fmt.Sprintf("node count: %v; edge count: %v", nodeErr, edgeErr)
-		case nodeErr != nil:
-			check.Error = "node count: " + nodeErr.Error()
-		case edgeErr != nil:
-			check.Error = "edge count: " + edgeErr.Error()
-		default:
+		} else {
 			check.OK = check.Actual == check.Expected
 		}
 		checks = append(checks, check)
 	}
 	return checks
+}
+
+func readFinalGraphCounts(ctx context.Context, assignment provision.ActorAssignment, expected graphCounts) (graphCounts, error) {
+	cfg := mycel.Config{Addr: assignment.DaemonAddr, Username: assignment.Username, Password: assignment.Password, ClientName: "mycel-lab-oracle"}
+	if assignment.AccessToken != "" {
+		cfg.Username = ""
+		cfg.Password = ""
+		cfg.AccessToken = assignment.AccessToken
+		cfg.RefreshToken = assignment.RefreshToken
+		cfg.AccessTokenExpireTime = assignment.TokenExpires
+	}
+	client, err := mycel.Dial(ctx, cfg)
+	if err != nil {
+		return graphCounts{}, err
+	}
+	defer client.Close()
+	nodes, nodeErr := queryCount(ctx, client, assignment.SpaceID, assignment.DomainID, "MATCH (n) RETURN count(n) FETCH FIRST 1 ROW ONLY")
+	edges, edgeErr := queryEdgeCount(ctx, client, assignment.SpaceID, assignment.DomainID, expected.Edges)
+	actual := graphCounts{Nodes: int(nodes), Edges: int(edges)}
+	switch {
+	case nodeErr != nil && edgeErr != nil:
+		return actual, fmt.Errorf("node count: %v; edge count: %v", nodeErr, edgeErr)
+	case nodeErr != nil:
+		return actual, fmt.Errorf("node count: %w", nodeErr)
+	case edgeErr != nil:
+		return actual, fmt.Errorf("edge count: %w", edgeErr)
+	default:
+		return actual, nil
+	}
 }
 
 func queryEdgeCount(ctx context.Context, client *mycel.Client, spaceID, domainID string, expected int) (int64, error) {
@@ -1361,6 +1651,9 @@ type runRecorder struct {
 	budget       *provider.Ledger
 	budgetCancel context.CancelFunc
 
+	recordingGate sync.RWMutex
+	disabled      bool
+
 	mu                     sync.Mutex
 	budgetErr              error
 	acknowledged           []oracle.Transaction
@@ -1444,12 +1737,37 @@ func (r *runRecorder) oracleSnapshot() phaseOracleSnapshot {
 	return phaseOracleSnapshot{AcknowledgedTransactions: len(r.acknowledged), SuccessfulReads: r.successfulReads}
 }
 
-func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEvent) error {
-	if event.Type == "graph-transaction-commit-unresolved" {
-		r.mu.Lock()
-		r.unresolvedGraphCommits++
-		r.mu.Unlock()
+func (r *runRecorder) Disable() {
+	if r == nil {
+		return
 	}
+	r.recordingGate.Lock()
+	defer r.recordingGate.Unlock()
+	if r.disabled {
+		return
+	}
+	r.disabled = true
+	r.sink.DisableWrites()
+}
+
+func (r *runRecorder) beginRecording() bool {
+	r.recordingGate.RLock()
+	if r.disabled {
+		r.recordingGate.RUnlock()
+		return false
+	}
+	return true
+}
+
+func (r *runRecorder) endRecording() {
+	r.recordingGate.RUnlock()
+}
+
+func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEvent) error {
+	if !r.beginRecording() {
+		return errors.New("run recorder is disabled")
+	}
+	defer r.endRecording()
 	if err := appendEvent(ctx, r.store, r.sink, r.runID, artifacts.EventNow(event.Type, "", event.ActorID, event)); err != nil {
 		return err
 	}
@@ -1473,6 +1791,9 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName})
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "transaction_latency_ms", 0, map[string]any{"actorId": event.ActorID})
 	case "graph-transaction-commit-unresolved":
+		r.mu.Lock()
+		r.unresolvedGraphCommits++
+		r.mu.Unlock()
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "unresolved_graph_commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName, "class": event.Transaction.ErrorClass})
 	case "graph-transaction-failed":
 		if event.Transaction.ErrorClass == "permanent" {
@@ -1501,6 +1822,10 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 }
 
 func (r *runRecorder) RecordRuntimeEvent(ctx context.Context, record events.Record) error {
+	if !r.beginRecording() {
+		return errors.New("run recorder is disabled")
+	}
+	defer r.endRecording()
 	if err := appendEvent(ctx, r.store, r.sink, r.runID, events.ArtifactEvent(record)); err != nil {
 		return err
 	}
@@ -1592,20 +1917,24 @@ func appendMetric(ctx context.Context, st store.Store, sink *artifacts.Sink, run
 	return nil
 }
 
-func runBoundedCleanupAttempts(maxAttempts int, timeout time.Duration, cleanup func(context.Context) error) (int, error) {
+func runBoundedCleanupAttempts(maxAttempts int, timeout time.Duration, cleanup func(context.Context) error) (attempts int, inFlight bool, err error) {
 	if maxAttempts < 1 {
-		return 0, errors.New("cleanup attempts must be positive")
+		return 0, false, errors.New("cleanup attempts must be positive")
 	}
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(context.Background(), timeout)
-		lastErr = cleanup(attemptCtx)
+		completed, operationErr := runOperationBounded(attemptCtx, cleanup)
 		cancel()
+		if !completed {
+			return attempt, true, operationErr
+		}
+		lastErr = operationErr
 		if lastErr == nil {
-			return attempt, nil
+			return attempt, false, nil
 		}
 	}
-	return maxAttempts, lastErr
+	return maxAttempts, false, lastErr
 }
 
 func appendEvent(ctx context.Context, st store.Store, sink *artifacts.Sink, runID string, event artifacts.Event) error {
