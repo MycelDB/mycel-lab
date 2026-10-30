@@ -594,17 +594,19 @@ func (b *Bundle) ValidateStructure() error {
 		if provenance.Dirty {
 			add(subject+".provenance.dirty", "must be false")
 		}
-		if strings.TrimSpace(provenance.BuildMethod) == "" {
-			add(subject+".provenance.buildMethod", "is required")
-		}
-		if !validSHA256(provenance.BuildContextSHA256) {
-			add(subject+".provenance.buildContextSHA256", "must be a lowercase 64-character SHA-256")
+		bindsProductSource := index == 0 || (b.Images.ProviderEmulator != nil && index == 1)
+		if bindsProductSource || provenance.BuildMethod != "" || provenance.BuildContextSHA256 != "" {
+			if strings.TrimSpace(provenance.BuildMethod) == "" {
+				add(subject+".provenance.buildMethod", "is required")
+			}
+			if !validSHA256(provenance.BuildContextSHA256) {
+				add(subject+".provenance.buildContextSHA256", "must be a lowercase 64-character SHA-256")
+			}
 		}
 		evidenceSource, evidenceSourceExists := sourceNames[provenance.EvidenceSource]
 		if !evidenceSourceExists {
 			add(subject+".provenance.evidenceSource", "must reference a bound source tree")
 		}
-		bindsProductSource := index == 0 || (b.Images.ProviderEmulator != nil && index == 1)
 		if bindsProductSource && evidenceSourceExists && provenance.Revision != evidenceSource.Revision {
 			add(subject+".provenance.revision", "must equal the provenance evidence source revision")
 		}

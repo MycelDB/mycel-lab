@@ -133,6 +133,20 @@ func TestValidateStructureRejectsDaemonRevisionNotBoundToSource(t *testing.T) {
 	}
 }
 
+func TestValidateStructureAllowsImmutableHelperWithoutBuildMetadata(t *testing.T) {
+	root := t.TempDir()
+	bundle := validBundle(t, root)
+	helper := bundle.Images.Daemon
+	helper.Name = "minio"
+	helper.RuntimeEnvironmentVariable = "MINIO_IMAGE"
+	helper.Provenance.BuildMethod = ""
+	helper.Provenance.BuildContextSHA256 = ""
+	bundle.Images.Helpers = []ImageIdentity{helper}
+	if err := bundle.ValidateStructure(); err != nil {
+		t.Fatalf("ValidateStructure() error=%v", err)
+	}
+}
+
 func TestPreflightValidatesFilesHarnessToolsAndImages(t *testing.T) {
 	root := t.TempDir()
 	bundle := validBundle(t, root)

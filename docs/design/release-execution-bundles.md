@@ -60,7 +60,7 @@ Daemon and helper images must be anonymously pullable registry indexes containin
 - `org.opencontainers.image.revision` equal to the bundle revision;
 - `io.myceldb.source.dirty=false`.
 
-The bundle additionally binds build method, build-context SHA-256, and a hashed provenance evidence file. Local provider-emulator images bind an exact `sha256:` image/config ID and exact platform; tags ending in `dev`, `latest`, `head`, `main`, `master`, `edge`, or `snapshot` are forbidden.
+The daemon and provider-emulator identities additionally bind build method and build-context SHA-256; every image binds clean source/revision labels and a hashed provenance evidence file. Legacy immutable helper images may omit build-method/context labels, but if either is declared both must be exact and match every platform. Local provider-emulator images bind an exact `sha256:` image/config ID and exact platform; tags ending in `dev`, `latest`, `head`, `main`, `master`, `edge`, or `snapshot` are forbidden.
 
 ## Identity and retry semantics
 
