@@ -26,6 +26,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/oracle"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
+	"github.com/MycelDB/mycel-lab/internal/reliability/releasebundle"
 	"github.com/MycelDB/mycel-lab/internal/reliability/report"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
@@ -98,10 +99,17 @@ type Options struct {
 	ProviderManifest             provider.CapabilityManifest
 	ProfileDirs                  []string
 	ProgressWriter               io.Writer
+	ReleaseBundle                *releasebundle.Bundle
+	ScenarioSourcePath           string
+	SuiteSourcePath              string
 	EnvironmentDriver            env.EnvironmentDriver
 	EventRuntime                 events.Runtime
 	ActorFactory                 actors.Factory
 	harnessBuildIdentityOverride *harnessBuildIdentity
+	releaseHarnessOverride       *releasebundle.HarnessIdentity
+	releaseImageInspector        releasebundle.ImageInspector
+	releaseToolRunner            releasebundle.ToolRunner
+	releaseCandidateGate         bool
 	finalizationTimeoutsOverride *finalizationTimeouts
 	consolePortForwardStarter    consolePortForwardStarter
 	scenarioProvision            func(context.Context, *provision.ScenarioResources, provision.Options) error
@@ -116,12 +124,15 @@ type consolePortForwardSession interface {
 type consolePortForwardStarter func(context.Context, env.Environment, []env.ConsoleEndpoint) (consolePortForwardSession, error)
 
 type finalizationTimeouts struct {
-	ActorStop           time.Duration
-	ProviderObservation time.Duration
-	ClusterAssertions   time.Duration
-	FinalOracle         time.Duration
-	PortForwardStop     time.Duration
-	ScenarioCleanup     time.Duration
+	SensitiveHostCleanup time.Duration
+	ActorStop            time.Duration
+	ProviderObservation  time.Duration
+	ClusterAssertions    time.Duration
+	FinalOracle          time.Duration
+	PortForwardStop      time.Duration
+	ScenarioCleanup      time.Duration
+	EnvironmentDelete    time.Duration
+	DeletionVerification time.Duration
 }
 
 type finalizationStageRun struct {
@@ -140,15 +151,21 @@ type finalizationStageEvidence struct {
 
 func resolvedFinalizationTimeouts(override *finalizationTimeouts) finalizationTimeouts {
 	resolved := finalizationTimeouts{
-		ActorStop:           45 * time.Second,
-		ProviderObservation: 30 * time.Second,
-		ClusterAssertions:   90 * time.Second,
-		FinalOracle:         60 * time.Second,
-		PortForwardStop:     15 * time.Second,
-		ScenarioCleanup:     60 * time.Second,
+		SensitiveHostCleanup: 60 * time.Second,
+		ActorStop:            45 * time.Second,
+		ProviderObservation:  30 * time.Second,
+		ClusterAssertions:    90 * time.Second,
+		FinalOracle:          60 * time.Second,
+		PortForwardStop:      15 * time.Second,
+		ScenarioCleanup:      60 * time.Second,
+		EnvironmentDelete:    60 * time.Second,
+		DeletionVerification: 30 * time.Second,
 	}
 	if override == nil {
 		return resolved
+	}
+	if override.SensitiveHostCleanup > 0 {
+		resolved.SensitiveHostCleanup = override.SensitiveHostCleanup
 	}
 	if override.ActorStop > 0 {
 		resolved.ActorStop = override.ActorStop
@@ -167,6 +184,12 @@ func resolvedFinalizationTimeouts(override *finalizationTimeouts) finalizationTi
 	}
 	if override.ScenarioCleanup > 0 {
 		resolved.ScenarioCleanup = override.ScenarioCleanup
+	}
+	if override.EnvironmentDelete > 0 {
+		resolved.EnvironmentDelete = override.EnvironmentDelete
+	}
+	if override.DeletionVerification > 0 {
+		resolved.DeletionVerification = override.DeletionVerification
 	}
 	return resolved
 }
@@ -221,6 +244,102 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	for _, phase := range scenario.Phases {
 		result.Phases = append(result.Phases, PhaseState{Name: phase.Name, Status: PhasePending, Duration: phase.Duration.Duration})
 	}
+	if opts.ReleaseBundle == nil && !opts.DryRun && (opts.releaseCandidateGate || hermeticCandidateScenario(scenario.Metadata.Name)) {
+		return finalize(parentCtx, opts.Store, sink, result, RunFailed, errors.New("destructive release-candidate suite requires a hermetic release execution bundle before provisioning"))
+	}
+	if opts.ReleaseBundle != nil {
+		if err := rejectIndependentReleaseOverrides(opts); err != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+		}
+		binding, ok := opts.ReleaseBundle.Binding(scenario.Metadata.Name)
+		if !ok {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, fmt.Errorf("scenario %q is not bound by release execution bundle %q", scenario.Metadata.Name, opts.ReleaseBundle.Path()))
+		}
+		if scenario.ProviderProfile != nil && !opts.ReleaseBundle.BindsFileDigest("provider-profile", scenario.ProviderProfile.SourceSHA256) {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, errors.New("resolved provider profile is not bound by the release execution bundle"))
+		}
+		resolvedDigest, err := resolvedScenarioSHA256(scenario)
+		if err != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+		}
+		if scenario.ProviderProfile != nil && scenario.ProviderProfile.Profile.Mode == provider.ModeEmulator && binding.ProviderEmulatorImage == "" {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, errors.New("emulator-backed scenario requires a provider emulator identity in the release execution bundle"))
+		}
+		outerCtx, outerCancel := context.WithTimeout(ctx, binding.OuterTimeout)
+		defer outerCancel()
+		ctx = outerCtx
+		harness := currentReleaseHarnessIdentity(ctx, opts.ReleaseBundle)
+		if opts.releaseHarnessOverride != nil {
+			harness = *opts.releaseHarnessOverride
+		}
+		preflight, preflightErr := opts.ReleaseBundle.Preflight(ctx, harness, opts.releaseImageInspector, opts.releaseToolRunner)
+		if _, err := sink.WriteJSON("release/execution-bundle-preflight.json", preflight); err != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+		}
+		if raw, err := opts.ReleaseBundle.MarshalEvidence(); err != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+		} else if _, err := sink.WriteText("release/execution-bundle.json", string(raw)); err != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+		}
+		if preflightErr != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, preflightErr)
+		}
+		restoreTools, activateErr := opts.ReleaseBundle.ActivateVerifiedTools()
+		if activateErr != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, activateErr)
+		}
+		defer restoreTools()
+		opts.finalizationTimeoutsOverride = &finalizationTimeouts{
+			SensitiveHostCleanup: binding.Finalization.SensitiveHostCleanup, ActorStop: binding.Finalization.ActorStop,
+			ProviderObservation: binding.Finalization.ProviderObservation, ClusterAssertions: binding.Finalization.ClusterAssertions,
+			FinalOracle: binding.Finalization.FinalOracle, PortForwardStop: binding.Finalization.PortForwardStop,
+			ScenarioCleanup: binding.Finalization.ScenarioCleanup, EnvironmentDelete: binding.Finalization.EnvironmentDelete,
+			DeletionVerification: binding.Finalization.DeletionVerification,
+		}
+		opts.ScenarioSourcePath, err = opts.ReleaseBundle.ScenarioFilePath(binding)
+		if err != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+		}
+		if binding.SuitePath != "" {
+			opts.SuiteSourcePath, err = opts.ReleaseBundle.SuiteFilePath(binding)
+			if err != nil {
+				return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+			}
+		}
+		scenario.Environment.Driver = binding.Environment.Driver
+		scenario.Environment.Namespace = binding.Environment.Namespace
+		scenario.Environment.KeepOnFailure = binding.Environment.KeepOnFailure
+		scenario.Environment.Options = cloneStringAnyMap(binding.Environment.Options)
+		if scenario.Environment.Options == nil {
+			scenario.Environment.Options = map[string]any{}
+		}
+		for _, runtimeFile := range binding.Environment.RuntimeFiles {
+			path, pathErr := opts.ReleaseBundle.RuntimeFilePath(runtimeFile)
+			if pathErr != nil {
+				return finalize(parentCtx, opts.Store, sink, result, RunFailed, pathErr)
+			}
+			if runtimeFile.Option == "composeFiles" {
+				paths, _ := scenario.Environment.Options[runtimeFile.Option].([]string)
+				scenario.Environment.Options[runtimeFile.Option] = append(paths, path)
+			} else {
+				scenario.Environment.Options[runtimeFile.Option] = path
+			}
+		}
+		scenario.Cluster.Image = binding.DaemonImage
+		if strings.EqualFold(binding.Environment.Driver, "compose") {
+			scenario.Environment.Options["imageOverride"] = binding.DaemonImage
+		}
+		if binding.ProviderEmulatorImage != "" {
+			if scenario.Environment.Options == nil {
+				scenario.Environment.Options = map[string]any{}
+			}
+			scenario.Environment.Options["providerEmulatorImage"] = opts.ReleaseBundle.ProviderEmulatorRuntimeReference()
+		}
+		requiredTools := releaseRequiredTools(binding.Environment.Driver)
+		if err := opts.ReleaseBundle.ValidateScenario(scenario.Metadata.Name, opts.ScenarioSourcePath, opts.SuiteSourcePath, resolvedDigest, scenario.Cluster.Image, binding.ProviderEmulatorImage, requiredTools); err != nil {
+			return finalize(parentCtx, opts.Store, sink, result, RunFailed, err)
+		}
+	}
 	var budgetLedger *provider.Ledger
 	budgetCancel := func() {}
 	if scenario.ProviderProfile != nil {
@@ -233,10 +352,11 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}
 	var sensitiveCleanup func() error
 	sensitiveCleanupDone := false
+	finalizationBounds := resolvedFinalizationTimeouts(opts.finalizationTimeoutsOverride)
 	finish := func(status RunStatus, runErr error) (Result, error) {
 		if sensitiveCleanup != nil && !sensitiveCleanupDone {
 			sensitiveCleanupDone = true
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), finalizationBounds.SensitiveHostCleanup)
 			cleanupCompleted, cleanupErr := runOperationBounded(cleanupCtx, func(context.Context) error {
 				return sensitiveCleanup()
 			})
@@ -285,8 +405,8 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if imageOverride != "" {
 		scenario.Cluster.Image = imageOverride
 	}
-	if !opts.DryRun && graphCommitRestartQualificationScenario(scenario) && (imageOverride == "" || !env.IsDigestPinnedImageReference(imageOverride)) {
-		return finish(RunFailed, errors.New("graph commit restart qualification requires --image with a named digest-pinned daemon image"))
+	if !opts.DryRun && graphCommitRestartQualificationScenario(scenario) && !env.IsDigestPinnedImageReference(scenario.Cluster.Image) {
+		return finish(RunFailed, errors.New("graph commit restart qualification requires --image with a named digest-pinned daemon image or an authoritative release bundle image"))
 	}
 	driver := opts.EnvironmentDriver
 	effectiveEnvironment := scenario.Environment
@@ -371,7 +491,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	var endpointAddrs []string
 	defer func() {
 		if cleanupEnvironment && !retainEnvironmentOnFailure {
-			deleteCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			deleteCtx, cancel := context.WithTimeout(context.Background(), finalizationBounds.EnvironmentDelete)
 			_, _ = runOperationBounded(deleteCtx, func(operationCtx context.Context) error {
 				return driver.Delete(operationCtx, environment)
 			})
@@ -410,7 +530,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 				scenarioCleanupAttempted = true
 				cleanupDryRun := opts.DryRun || environment.Driver == "dry-run" || len(endpointAddrs) == 0
 				cleanupResources := provision.CloneScenarioResources(resources)
-				attempts, inFlight, cleanupErr := runBoundedCleanupAttempts(3, 60*time.Second, func(cleanupCtx context.Context) error {
+				attempts, inFlight, cleanupErr := runBoundedCleanupAttempts(3, finalizationBounds.ScenarioCleanup, func(cleanupCtx context.Context) error {
 					return cleanupScenario(cleanupCtx, &cleanupResources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: cleanupDryRun})
 				})
 				evidence["scenarioCleanupAttempts"] = attempts
@@ -432,7 +552,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		deleteCompleted := false
 		for attempt := 1; attempt <= 3; attempt++ {
 			evidence["driverDeleteAttempts"] = attempt
-			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), finalizationBounds.EnvironmentDelete)
 			completed, deleteErr := runOperationBounded(deleteCtx, func(operationCtx context.Context) error {
 				return driver.Delete(operationCtx, environment)
 			})
@@ -454,7 +574,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		}
 		verification := env.DeletionVerification{}
 		if verifier, ok := driver.(env.EnvironmentDeletionVerifier); ok {
-			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), finalizationBounds.DeletionVerification)
 			var observed env.DeletionVerification
 			completed, verifyErr := runOperationBounded(verifyCtx, func(operationCtx context.Context) error {
 				var operationErr error
@@ -610,7 +730,6 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
 	recorder := &runRecorder{store: opts.Store, sink: sink.Scoped(), runID: runID, budget: budgetLedger, budgetCancel: budgetCancel}
-	finalizationBounds := resolvedFinalizationTimeouts(opts.finalizationTimeoutsOverride)
 	finalizationStages := []finalizationStageEvidence{}
 	persistFinalizationStages := func() error {
 		_, err := sink.WriteJSON("environment/finalization-stages.json", finalizationStages)
@@ -626,7 +745,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		_ = appendEvent(ctx, opts.Store, sink, runID, artifacts.EventNow("finalization-stage-started", "", "", map[string]any{"stage": name, "timeout": timeout.String()}))
 
 		stageRun := finalizationStageRun{Launched: true}
-		stageCtx, stageCancel := context.WithTimeout(ctx, timeout)
+		stageCtx, stageCancel := context.WithTimeout(context.Background(), timeout)
 		stageRun.Completed, err = runOperationBounded(stageCtx, operation)
 		stageContextErr := stageCtx.Err()
 		stageCancel()
@@ -675,7 +794,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	stopActorsForFailure := func() {
 		if !schedulerStopped && !schedulerStopAttempted {
 			schedulerStopAttempted = true
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), finalizationBounds.ActorStop)
 			completed, _ := runOperationBounded(stopCtx, scheduler.Stop)
 			stopCancel()
 			schedulerStopped = completed
@@ -692,17 +811,19 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	}()
 	captureRunFailureEvidence := func() {
 		stopActorsForFailure()
-		evidenceCtx, evidenceCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer evidenceCancel()
+		clusterCtx, clusterCancel := context.WithTimeout(context.Background(), finalizationBounds.ClusterAssertions)
 		clusterSink := sink.Scoped()
-		_, _ = runOperationBounded(evidenceCtx, func(operationCtx context.Context) error {
+		_, _ = runOperationBounded(clusterCtx, func(operationCtx context.Context) error {
 			return captureClusterAssertionsOnce(operationCtx, clusterSink, scenario, driver, environment, nodes)
 		})
+		clusterCancel()
 		clusterSink.DisableWrites()
+		oracleCtx, oracleCancel := context.WithTimeout(context.Background(), finalizationBounds.FinalOracle)
 		oracleSink := sink.Scoped()
-		_, _ = runOperationBounded(evidenceCtx, func(operationCtx context.Context) error {
+		_, _ = runOperationBounded(oracleCtx, func(operationCtx context.Context) error {
 			return writeFinalOracleReport(operationCtx, oracleSink, recorder, resources, scenario.Assertions, !provisionDryRun)
 		})
+		oracleCancel()
 		oracleSink.DisableWrites()
 	}
 	if err := scheduler.Start(ctx); err != nil {
@@ -991,7 +1112,42 @@ func defaultEventRuntime(opts Options, driver env.EnvironmentDriver, environment
 }
 
 func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, error) {
-	loaded, err := spec.LoadFile(path)
+	var raw []byte
+	var err error
+	var expectedScenarioNames []string
+	if opts.ReleaseBundle != nil {
+		if err := rejectIndependentReleaseOverrides(opts); err != nil {
+			return SuiteResult{}, err
+		}
+		preflightCtx, cancel := context.WithTimeout(ctx, opts.ReleaseBundle.MaximumOuterTimeout())
+		harness := currentReleaseHarnessIdentity(preflightCtx, opts.ReleaseBundle)
+		if opts.releaseHarnessOverride != nil {
+			harness = *opts.releaseHarnessOverride
+		}
+		_, preflightErr := opts.ReleaseBundle.Preflight(preflightCtx, harness, opts.releaseImageInspector, opts.releaseToolRunner)
+		cancel()
+		if preflightErr != nil {
+			return SuiteResult{}, preflightErr
+		}
+		raw, err = opts.ReleaseBundle.VerifyBoundFile(path, "suite")
+		if err == nil {
+			expectedScenarioNames, err = opts.ReleaseBundle.ScenarioNamesForSuite(path)
+		}
+		if err == nil && len(expectedScenarioNames) > 0 {
+			binding, exists := opts.ReleaseBundle.Binding(expectedScenarioNames[0])
+			if !exists {
+				err = fmt.Errorf("suite scenario %q is not bound", expectedScenarioNames[0])
+			} else {
+				path, err = opts.ReleaseBundle.SuiteFilePath(binding)
+			}
+		}
+	} else {
+		raw, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return SuiteResult{}, err
+	}
+	loaded, err := spec.Load(raw)
 	if err != nil {
 		return SuiteResult{}, err
 	}
@@ -1001,6 +1157,12 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 	}
 	baseDir := filepath.Dir(path)
 	out := SuiteResult{SuiteName: suite.Metadata.Name, DryRun: opts.DryRun}
+	opts.releaseCandidateGate = hermeticCandidateSuite(suite.Metadata.Name)
+	type resolvedSuiteScenario struct {
+		path     string
+		scenario spec.ResolvedScenario
+	}
+	resolvedScenarios := make([]resolvedSuiteScenario, 0, len(suite.Scenarios))
 	for _, scenarioRef := range suite.Scenarios {
 		if scenarioRef.Path == "" {
 			return out, fmt.Errorf("suite scenario refs are not supported until catalog run wiring")
@@ -1009,14 +1171,29 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 		if !filepath.IsAbs(scenarioPath) {
 			scenarioPath = filepath.Join(baseDir, scenarioPath)
 		}
-		resolved, err := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProfileDirs: opts.ProfileDirs, ProviderProfileOverride: opts.ProviderProfileOverride, ProviderDryRun: opts.DryRun, DeferLiveProviderValidation: true, ProviderManifest: opts.ProviderManifest})
-		if err != nil {
-			return out, err
+		resolved, resolveErr := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProfileDirs: opts.ProfileDirs, ProviderProfileOverride: opts.ProviderProfileOverride, ProviderDryRun: opts.DryRun, DeferLiveProviderValidation: true, ProviderManifest: opts.ProviderManifest})
+		if resolveErr != nil {
+			return out, resolveErr
 		}
-		result, err := RunScenario(ctx, resolved, opts)
+		resolvedScenarios = append(resolvedScenarios, resolvedSuiteScenario{path: scenarioPath, scenario: resolved})
+	}
+	if opts.ReleaseBundle != nil {
+		actualNames := make([]string, 0, len(resolvedScenarios))
+		for _, resolved := range resolvedScenarios {
+			actualNames = append(actualNames, resolved.scenario.Metadata.Name)
+		}
+		if strings.Join(actualNames, "\x00") != strings.Join(expectedScenarioNames, "\x00") {
+			return out, fmt.Errorf("suite scenario order %v does not match release bundle %v", actualNames, expectedScenarioNames)
+		}
+	}
+	for _, resolved := range resolvedScenarios {
+		scenarioOpts := opts
+		scenarioOpts.ScenarioSourcePath = resolved.path
+		scenarioOpts.SuiteSourcePath = path
+		result, runErr := RunScenario(ctx, resolved.scenario, scenarioOpts)
 		out.Results = append(out.Results, result)
-		if err != nil && suite.Execution.StopOnFailure {
-			return out, err
+		if runErr != nil && suite.Execution.StopOnFailure {
+			return out, runErr
 		}
 	}
 	return out, nil
@@ -1075,11 +1252,37 @@ func liveSemanticEvidenceTarget(eventType string, target map[string]any) map[str
 	return out
 }
 
+func ResolvedScenarioSHA256(scenario spec.ResolvedScenario) (string, error) {
+	return resolvedScenarioSHA256(scenario)
+}
+
+func resolvedScenarioSHA256(scenario spec.ResolvedScenario) (string, error) {
+	identity := evidenceSafeResolvedScenario(scenario)
+	identity.Environment.Driver = ""
+	identity.Environment.Namespace = ""
+	identity.Environment.KeepOnFailure = false
+	identity.Environment.Options = nil
+	identity.Cluster.Image = ""
+	raw, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("marshal resolved scenario identity: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
+}
+
 func writeInitialArtifacts(sink *artifacts.Sink, scenario spec.ResolvedScenario, buildIdentity harnessBuildIdentity) error {
 	if _, err := sink.WriteJSON("harness-build.json", buildIdentity); err != nil {
 		return err
 	}
 	if _, err := sink.WriteJSON("resolved-scenario.json", evidenceSafeResolvedScenario(scenario)); err != nil {
+		return err
+	}
+	resolvedDigest, err := resolvedScenarioSHA256(scenario)
+	if err != nil {
+		return err
+	}
+	if _, err := sink.WriteText("resolved-scenario.sha256", resolvedDigest+"\n"); err != nil {
 		return err
 	}
 	if scenario.ProviderProfile != nil {

@@ -12,6 +12,7 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Mycel Lab model](docs/design/model.md)
 - [Environment driver abstraction design](docs/design/environment-drivers.md)
 - [Provider profiles, budgets, and artifact safety](docs/design/provider-profiles.md)
+- [Hermetic release execution bundles](docs/design/release-execution-bundles.md)
 - [Structured reliability harness implementation plan](docs/implementation/reliability-harness-implementation-plan.md)
 - [Environment driver abstraction implementation plan](docs/implementation/environment-driver-abstraction-plan.md)
 - [MycelDB system integration migration plan](docs/implementation/system-integration-migration-plan.md)
@@ -32,6 +33,10 @@ mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml --d
 mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml --dry-run \
   --provider-profile tests/reliability/provider-profiles/deterministic-token-basis-v1.yaml
 mycel-lab run suite-file tests/reliability/suites/raft-baseline.yaml --dry-run
+# Capture and validate a release bundle from a maintained draft placed above clean source checkouts.
+mycel-lab release-bundle build /candidate/release-bundle-draft.yaml /candidate/release-bundle.yaml \
+  --daemon-image 'docker.io/myceldb/mycel@sha256:<64-hex-digest>' --candidate-id '<approved-id>'
+mycel-lab release-bundle validate /candidate/release-bundle.yaml
 # Non-dry runs require local k3d + kubectl and create disposable clusters.
 mycel-lab run scenario actor-noop --confirm-destructive
 mycel-lab run scenario graph-actor-smoke --confirm-destructive

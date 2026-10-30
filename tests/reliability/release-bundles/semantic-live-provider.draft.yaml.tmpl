@@ -1,0 +1,72 @@
+apiVersion: myceldb.io/release-execution-bundle/v1
+kind: ReleaseExecutionBundle
+metadata:
+  name: draft
+  candidateId: draft
+  createdAt: "1970-01-01T00:00:00Z"
+sourceRoot: .
+sources:
+  - {name: lab, path: mycel-lab}
+  - {name: daemon, path: mycel}
+harness: {source: lab}
+files:
+  - {source: lab, role: source, path: tests/reliability/release-bundles/semantic-live-provider.draft.yaml.tmpl}
+  - {source: lab, role: suite, path: tests/reliability/suites/semantic-live-provider.yaml}
+  - {source: lab, role: scenario, path: tests/reliability/scenarios/compose-semantic-live-provider/compose-semantic-live-provider.yaml}
+  - {source: lab, role: provider-profile, path: tests/reliability/provider-profiles/openai-compatible-live.yaml}
+  - {source: lab, role: runtime-config, path: tests/compose/ports.yml}
+  - {source: daemon, role: runtime-config, path: tests/compose/cluster/compose.yml}
+  - {source: lab, role: source, path: tests/reliability/clusters/raft-3-node.yaml}
+  - {source: lab, role: source, path: tests/reliability/actor-profiles/semantic-controller.yaml}
+  - {source: lab, role: source, path: tests/reliability/actor-profiles/gql-reader.yaml}
+  - {source: lab, role: source, path: .github/workflows/semantic-live.yml}
+  - {source: lab, role: provenance, path: docs/design/release-execution-bundles.md}
+  - {source: daemon, role: provenance, path: Dockerfile}
+images:
+  daemon:
+    name: daemon
+    reference: ""
+    anonymousPull: true
+    provenance: {evidenceSource: daemon, evidencePath: Dockerfile}
+  helpers:
+    - name: minio
+      reference: docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff
+      anonymousPull: true
+      runtimeEnvironmentVariable: MINIO_IMAGE
+      provenance: {evidenceSource: lab, evidencePath: docs/design/release-execution-bundles.md}
+    - name: minio-mc
+      reference: docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0
+      anonymousPull: true
+      runtimeEnvironmentVariable: MINIO_MC_IMAGE
+      provenance: {evidenceSource: lab, evidencePath: docs/design/release-execution-bundles.md}
+tools:
+  - {name: git, path: git, versionArguments: [--version]}
+  - {name: docker, path: docker, versionArguments: [version, --format, "{{.Client.Version}}"]}
+  - {name: docker-buildx, path: auto, versionArguments: [version]}
+  - {name: docker-compose, path: auto, versionArguments: [version]}
+scenarios:
+  - name: compose-semantic-live-provider
+    source: lab
+    scenarioPath: tests/reliability/scenarios/compose-semantic-live-provider/compose-semantic-live-provider.yaml
+    suitePath: tests/reliability/suites/semantic-live-provider.yaml
+    environment:
+      driver: compose
+      namespace: draft
+      options:
+        projectNamePrefix: draft
+        serviceNames: [myceld-a, myceld-b, myceld-c]
+        grpcPorts: [19091, 19092, 19093]
+      runtimeFiles:
+        - {option: composeFiles, source: daemon, path: tests/compose/cluster/compose.yml}
+        - {option: composeFiles, source: lab, path: tests/compose/ports.yml}
+    outerTimeout: 15m
+    finalization:
+      actorStop: 2m
+      portForwardStop: 2m
+      providerObservation: 5m
+      clusterAssertions: 5m
+      finalOracle: 5m
+      sensitiveHostCleanup: 5m
+      scenarioCleanup: 5m
+      environmentDelete: 5m
+      deletionVerification: 5m

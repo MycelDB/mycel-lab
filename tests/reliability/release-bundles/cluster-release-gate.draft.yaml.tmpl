@@ -1,0 +1,105 @@
+apiVersion: myceldb.io/release-execution-bundle/v1
+kind: ReleaseExecutionBundle
+metadata:
+  name: draft
+  candidateId: draft
+  createdAt: "1970-01-01T00:00:00Z"
+sourceRoot: .
+sources:
+  - name: lab
+    path: mycel-lab
+  - name: daemon
+    path: mycel
+harness:
+  source: lab
+files:
+  - {source: lab, role: source, path: tests/reliability/release-bundles/cluster-release-gate.draft.yaml.tmpl}
+  - {source: lab, role: suite, path: tests/reliability/suites/cluster-release-gate.yaml}
+  - {source: lab, role: scenario, path: tests/reliability/scenarios/compose-cluster-validation/compose-cluster-validation.yaml}
+  - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-cluster-validation/k3d-cluster-validation.yaml}
+  - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-system-backup-restore/k3d-system-backup-restore.yaml}
+  - {source: lab, role: runtime-config, path: tests/compose/ports.yml}
+  - {source: daemon, role: runtime-config, path: tests/compose/cluster/compose.yml}
+  - {source: lab, role: source, path: tests/reliability/clusters/raft-3-node.yaml}
+  - {source: lab, role: source, path: tests/reliability/actor-profiles/graph-committer.yaml}
+  - {source: lab, role: source, path: tests/reliability/actor-profiles/gql-reader.yaml}
+  - {source: lab, role: source, path: .github/workflows/release-gate.yml}
+  - {source: lab, role: provenance, path: docs/design/release-execution-bundles.md}
+  - {source: daemon, role: provenance, path: Dockerfile}
+images:
+  daemon:
+    name: daemon
+    reference: ""
+    anonymousPull: true
+    provenance: {evidenceSource: daemon, evidencePath: Dockerfile}
+  helpers:
+    - name: minio
+      reference: docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff
+      anonymousPull: true
+      runtimeEnvironmentVariable: MINIO_IMAGE
+      provenance: {evidenceSource: lab, evidencePath: docs/design/release-execution-bundles.md}
+    - name: minio-mc
+      reference: docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0
+      anonymousPull: true
+      runtimeEnvironmentVariable: MINIO_MC_IMAGE
+      provenance: {evidenceSource: lab, evidencePath: docs/design/release-execution-bundles.md}
+tools:
+  - {name: git, path: git, versionArguments: [--version]}
+  - {name: docker, path: docker, versionArguments: [version, --format, "{{.Client.Version}}"]}
+  - {name: docker-buildx, path: auto, versionArguments: [version]}
+  - {name: docker-compose, path: auto, versionArguments: [version]}
+  - {name: k3d, path: k3d, versionArguments: [version]}
+  - {name: kubectl, path: kubectl, versionArguments: [version, --client=true]}
+scenarios:
+  - name: compose-cluster-validation
+    source: lab
+    scenarioPath: tests/reliability/scenarios/compose-cluster-validation/compose-cluster-validation.yaml
+    suitePath: tests/reliability/suites/cluster-release-gate.yaml
+    environment:
+      driver: compose
+      namespace: draft
+      options:
+        projectNamePrefix: draft
+        serviceNames: [myceld-a, myceld-b, myceld-c]
+        grpcPorts: [19091, 19092, 19093]
+      runtimeFiles:
+        - {option: composeFiles, source: daemon, path: tests/compose/cluster/compose.yml}
+        - {option: composeFiles, source: lab, path: tests/compose/ports.yml}
+    outerTimeout: 30m
+    finalization: &finalization
+      actorStop: 2m
+      portForwardStop: 2m
+      providerObservation: 5m
+      clusterAssertions: 5m
+      finalOracle: 5m
+      sensitiveHostCleanup: 5m
+      scenarioCleanup: 5m
+      environmentDelete: 5m
+      deletionVerification: 5m
+  - name: k3d-cluster-validation
+    source: lab
+    scenarioPath: tests/reliability/scenarios/k3d-cluster-validation/k3d-cluster-validation.yaml
+    suitePath: tests/reliability/suites/cluster-release-gate.yaml
+    environment:
+      driver: k3d
+      namespace: draft
+      options:
+        clusterNamePrefix: draft
+        digestPinnedImagePolicy: node-pull
+        createArguments: [--agents, "3", --timeout, 180s]
+    outerTimeout: 45m
+    finalization: *finalization
+  - name: k3d-system-backup-restore
+    source: lab
+    scenarioPath: tests/reliability/scenarios/k3d-system-backup-restore/k3d-system-backup-restore.yaml
+    suitePath: tests/reliability/suites/cluster-release-gate.yaml
+    environment:
+      driver: k3d
+      namespace: draft
+      options:
+        clusterNamePrefix: draft
+        digestPinnedImagePolicy: node-pull
+        createArguments: [--agents, "3", --timeout, 180s]
+        consolePortBase: 19191
+    outerTimeout: 90m
+    finalization: *finalization

@@ -3,9 +3,12 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,9 +25,37 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/oracle"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
+	"github.com/MycelDB/mycel-lab/internal/reliability/releasebundle"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
+	"gopkg.in/yaml.v3"
 )
+
+func TestResolvedScenarioIdentityBindsResolvedContentButNotBundleRuntime(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	original, err := resolvedScenarioSHA256(scenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario.Environment.Driver = "dry-run"
+	scenario.Environment.Options = map[string]any{"imageOverride": "other"}
+	scenario.Cluster.Image = "docker.io/myceldb/mycel@sha256:" + strings.Repeat("a", 64)
+	runtimeChanged, err := resolvedScenarioSHA256(scenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimeChanged != original {
+		t.Fatalf("runtime-only change altered resolved scenario identity: %s != %s", runtimeChanged, original)
+	}
+	scenario.Seed++
+	contentChanged, err := resolvedScenarioSHA256(scenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentChanged == original {
+		t.Fatal("resolved content change did not alter scenario identity")
+	}
+}
 
 func TestRunRecorderRegistersSystemBackupFixtureExpectedCounts(t *testing.T) {
 	recorder := &runRecorder{}
@@ -397,6 +428,7 @@ func TestRunScenarioRoutesImageOverrideThroughK3DClusterImageOnly(t *testing.T) 
 
 func TestRunScenarioPersistsFinalProviderEmulatorObservations(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "compose-procedure-inference-control-emulator/compose-procedure-inference-control-emulator.yaml")
+	scenario.Metadata.Name += "-unit-test"
 	scenario.Assertions = nil
 	scenario.Phases = []spec.PhaseSpec{{Name: "first"}, {Name: "second"}}
 	observations := providerObservationJSONL(t, 2)
@@ -436,6 +468,7 @@ func TestRunScenarioFinalProviderObservationFailuresRemainClosedAndCleanUp(t *te
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			scenario := resolveFixtureScenario(t, "compose-procedure-inference-control-emulator/compose-procedure-inference-control-emulator.yaml")
+			scenario.Metadata.Name += "-unit-test"
 			scenario.Phases = []spec.PhaseSpec{{Name: "only"}}
 			scenario.Assertions = nil
 			driver := &recordingDriver{environmentDriver: "dry-run", providerEmulator: true, providerObservations: test.output, providerObservationErr: test.captureErr}
@@ -581,6 +614,126 @@ func TestRunScenarioQualificationRejectsMutableImageBeforeEnvironmentUse(t *test
 	}
 }
 
+type releaseImageInspectorFunc func(context.Context, releasebundle.ImageIdentity) (releasebundle.ResolvedImage, error)
+
+func (function releaseImageInspectorFunc) Inspect(ctx context.Context, image releasebundle.ImageIdentity) (releasebundle.ResolvedImage, error) {
+	return function(ctx, image)
+}
+
+type releaseToolRunnerFunc func(context.Context, string, ...string) ([]byte, error)
+
+func (function releaseToolRunnerFunc) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return function(ctx, name, args...)
+}
+
+func TestReleaseBundleFailurePreventsEnvironmentPreflightAndCreate(t *testing.T) {
+	root := t.TempDir()
+	sourceRoot := filepath.Join(root, "lab")
+	if err := os.MkdirAll(sourceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scenarioPath := filepath.Join(sourceRoot, "scenario.yaml")
+	provenancePath := filepath.Join(sourceRoot, "provenance.txt")
+	composePath := filepath.Join(sourceRoot, "compose.yml")
+	toolPath := filepath.Join(sourceRoot, "fake-docker")
+	if err := os.WriteFile(scenarioPath, []byte("bound scenario\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(provenancePath, []byte("bound provenance\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(toolPath, []byte("#!/bin/sh\necho fake docker\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", sourceRoot+string(os.PathListSeparator)+os.Getenv("PATH"))
+	digest := func(path string) string {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(raw)
+		return hex.EncodeToString(sum[:])
+	}
+	versionSum := sha256.Sum256([]byte("fake docker"))
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitPath, err = filepath.EvalSymlinks(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) string {
+		command := exec.Command("git", append([]string{"-C", sourceRoot}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "-q")
+	git("config", "user.email", "test@myceldb.local")
+	git("config", "user.name", "Mycel Lab Test")
+	git("add", ".")
+	git("commit", "-q", "-m", "fixture")
+	revision := git("rev-parse", "HEAD")
+	tree := git("rev-parse", "HEAD^{tree}")
+	const index = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const config = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	scenario.ActorGroups, scenario.Phases, scenario.Assertions, scenario.ProviderProfile = nil, nil, nil, nil
+	resolvedDigest, err := resolvedScenarioSHA256(scenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleValue := releasebundle.Bundle{
+		APIVersion: releasebundle.APIVersion, Kind: releasebundle.Kind, SourceRoot: ".",
+		Metadata: releasebundle.Metadata{Name: "candidate-1", CandidateID: "candidate-1", CreatedAt: "2026-10-31T00:00:00Z"},
+		Sources:  []releasebundle.SourceIdentity{{Name: "lab", Path: "lab", Revision: revision, Tree: tree}},
+		Harness:  releasebundle.HarnessIdentity{Source: "lab", ExecutableSHA256: strings.Repeat("1", 64), Revision: revision, Tree: tree, ModulePath: "github.com/MycelDB/mycel-lab", GoVersion: "go1.test"},
+		Images:   releasebundle.Images{Daemon: releasebundle.ImageIdentity{Name: "daemon", Reference: "docker.io/myceldb/mycel@" + index, IndexDigest: index, AnonymousPull: true, Platforms: []releasebundle.PlatformIdentity{{OS: "linux", Architecture: "amd64", ManifestDigest: manifest, ConfigDigest: config}, {OS: "linux", Architecture: "arm64", ManifestDigest: "sha256:" + strings.Repeat("d", 64), ConfigDigest: "sha256:" + strings.Repeat("e", 64)}}, Provenance: releasebundle.ProvenanceIdentity{Source: "https://github.com/MycelDB/mycel", Revision: revision, BuildMethod: "buildx", BuildContextSHA256: strings.Repeat("2", 64), EvidenceSource: "lab", EvidencePath: "provenance.txt"}}},
+		Files:    []releasebundle.FileIdentity{{Source: "lab", Role: "scenario", Path: "scenario.yaml", SHA256: digest(scenarioPath)}, {Source: "lab", Role: "provenance", Path: "provenance.txt", SHA256: digest(provenancePath)}, {Source: "lab", Role: "runtime-config", Path: "compose.yml", SHA256: digest(composePath)}},
+		Tools: []releasebundle.ToolIdentity{
+			{Name: "git", Path: gitPath, ExecutableSHA256: digest(gitPath), VersionArguments: []string{"version"}, VersionOutputSHA256: hex.EncodeToString(versionSum[:])},
+			{Name: "docker", Path: "fake-docker", ExecutableSHA256: digest(toolPath), VersionArguments: []string{"version"}, VersionOutputSHA256: hex.EncodeToString(versionSum[:])},
+			{Name: "docker-buildx", Path: "fake-docker", ExecutableSHA256: digest(toolPath), VersionArguments: []string{"version"}, VersionOutputSHA256: hex.EncodeToString(versionSum[:])},
+			{Name: "docker-compose", Path: "fake-docker", ExecutableSHA256: digest(toolPath), VersionArguments: []string{"version"}, VersionOutputSHA256: hex.EncodeToString(versionSum[:])},
+		},
+		Scenarios: []releasebundle.ScenarioBinding{{Name: "example", Source: "lab", ScenarioPath: "scenario.yaml", ResolvedScenarioSHA256: resolvedDigest, Environment: releasebundle.EnvironmentBinding{Driver: "compose", Namespace: "candidate-1", Options: map[string]any{}, RuntimeFiles: []releasebundle.RuntimeFileBinding{{Option: "composeFile", Source: "lab", Path: "compose.yml"}}}, DaemonImage: "docker.io/myceldb/mycel@" + index, RequiredTools: []string{"git", "docker", "docker-buildx", "docker-compose"}, OuterTimeout: time.Minute, Finalization: releasebundle.FinalizationBounds{SensitiveHostCleanup: time.Second, ActorStop: time.Second, ProviderObservation: time.Second, ClusterAssertions: time.Second, FinalOracle: time.Second, PortForwardStop: time.Second, ScenarioCleanup: time.Second, EnvironmentDelete: time.Second, DeletionVerification: time.Second}}},
+	}
+	raw, err := yaml.Marshal(bundleValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(root, "bundle.json")
+	if err := os.WriteFile(bundlePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := releasebundle.Load(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := &recordingDriver{omitEndpoints: true}
+	_, err = RunScenario(context.Background(), scenario, Options{
+		ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ReleaseBundle: bundle, ScenarioSourcePath: scenarioPath, EnvironmentDriver: driver,
+		releaseHarnessOverride: &bundleValue.Harness,
+		releaseToolRunner:      releaseToolRunnerFunc(func(context.Context, string, ...string) ([]byte, error) { return []byte("fake docker\n"), nil }),
+		releaseImageInspector: releaseImageInspectorFunc(func(context.Context, releasebundle.ImageIdentity) (releasebundle.ResolvedImage, error) {
+			return releasebundle.ResolvedImage{}, errors.New("anonymous pull failed")
+		}),
+	})
+	if err == nil || !strings.Contains(err.Error(), "anonymous pull failed") {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	if len(driver.order) != 0 {
+		t.Fatalf("environment used before bundle rejection: %v", driver.order)
+	}
+}
+
 func TestApplyComposeImageOverrideDoesNotLeakIntoK3D(t *testing.T) {
 	compose := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": "compose.yml"}}
 	applyComposeImageOverride(&compose, " local/mycel:head ")
@@ -611,6 +764,31 @@ func TestRunScenarioGraphMetricsAggregate(t *testing.T) {
 	}
 	if details.Run.Status != string(RunPassed) || details.Run.FinishedAt == nil {
 		t.Fatalf("run did not finish cleanly in store: %+v", details.Run)
+	}
+}
+
+func TestProcedureCandidateSuiteRejectsDefaultEmulatorBeforeEnvironmentUse(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "k3d-procedure-inference-recovery.yaml")
+	driver := &recordingDriver{}
+	image := "docker.io/myceldb/mycel@sha256:" + strings.Repeat("a", 64)
+	_, err := RunSuiteFile(context.Background(), path, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ImageOverride: image, EnvironmentDriver: driver})
+	if err == nil || !strings.Contains(err.Error(), "release-candidate suite requires a hermetic release execution bundle") {
+		t.Fatalf("RunSuiteFile() error=%v, want pre-provisioning mutable emulator rejection", err)
+	}
+	if len(driver.order) != 0 {
+		t.Fatalf("environment used before candidate bundle rejection: %v", driver.order)
+	}
+}
+
+func TestDirectCandidateScenarioRequiresBundleBeforeEnvironmentUse(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "compose-procedure-inference-control-emulator/compose-procedure-inference-control-emulator.yaml")
+	driver := &recordingDriver{}
+	_, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, EnvironmentDriver: driver})
+	if err == nil || !strings.Contains(err.Error(), "release-candidate suite requires a hermetic release execution bundle") {
+		t.Fatalf("RunScenario() error=%v", err)
+	}
+	if len(driver.order) != 0 {
+		t.Fatalf("environment used before bundle rejection: %v", driver.order)
 	}
 }
 
