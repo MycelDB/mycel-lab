@@ -211,6 +211,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if imageOverride != "" {
 		scenario.Cluster.Image = imageOverride
 	}
+	if !opts.DryRun && graphCommitRestartQualificationScenario(scenario) && (imageOverride == "" || !env.IsDigestPinnedImageReference(imageOverride)) {
+		return finish(RunFailed, errors.New("graph commit restart qualification requires --image with a named digest-pinned daemon image"))
+	}
 	driver := opts.EnvironmentDriver
 	effectiveEnvironment := scenario.Environment
 	if driver == nil {
@@ -864,8 +867,12 @@ func liveSemanticScenario(scenario spec.ResolvedScenario) bool {
 	return scenario.Semantic != nil && scenario.ProviderProfile != nil && scenario.ProviderProfile.Profile.Mode == provider.ModeLive
 }
 
+func graphCommitRestartQualificationScenario(scenario spec.ResolvedScenario) bool {
+	return scenario.Metadata.Name == "k3d-graph-commit-restart-qualification"
+}
+
 func requiresImmutableBuildProvenance(scenario spec.ResolvedScenario) bool {
-	return scenario.ProcedureInference != nil || liveSemanticScenario(scenario)
+	return scenario.ProcedureInference != nil || liveSemanticScenario(scenario) || graphCommitRestartQualificationScenario(scenario)
 }
 
 func validHarnessBuildIdentity(identity harnessBuildIdentity) bool {
@@ -910,6 +917,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 	acknowledged := append([]oracle.Transaction(nil), recorder.acknowledged...)
 	readChecks := append([]map[string]any(nil), recorder.readChecks...)
 	failedWrites := recorder.failedWrites
+	unresolvedGraphCommits := recorder.unresolvedGraphCommits
 	expectedByActor := cloneGraphCountsMap(recorder.expectedByActor)
 	recorder.mu.Unlock()
 	failedReads := 0
@@ -929,6 +937,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 		ReadChecks:               len(readChecks),
 		FailedReads:              failedReads,
 		FailedWrites:             failedWrites,
+		UnresolvedGraphCommits:   unresolvedGraphCommits,
 		RequiredAssertions:       finalOracleAssertionOptionsFrom(assertions),
 	}
 	if live {
@@ -951,6 +960,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 	fmt.Fprintf(&b, "- Expected nodes: %d\n", report.ExpectedCounts.Nodes)
 	fmt.Fprintf(&b, "- Expected edges: %d\n", report.ExpectedCounts.Edges)
 	fmt.Fprintf(&b, "- Failed writes: %d\n", report.FailedWrites)
+	fmt.Fprintf(&b, "- Unresolved graph commits: %d\n", report.UnresolvedGraphCommits)
 	fmt.Fprintf(&b, "- Read checks: %d\n", report.ReadChecks)
 	fmt.Fprintf(&b, "- Failed reads: %d\n", report.FailedReads)
 	if len(report.LiveChecks) > 0 {
@@ -988,6 +998,7 @@ type finalOracleReport struct {
 	ReadChecks               int                         `json:"readChecks"`
 	FailedReads              int                         `json:"failedReads"`
 	FailedWrites             int                         `json:"failedWrites"`
+	UnresolvedGraphCommits   int                         `json:"unresolvedGraphCommits"`
 	OK                       bool                        `json:"ok"`
 	RequiredAssertions       finalOracleAssertionOptions `json:"requiredAssertions"`
 	AssertionsOK             bool                        `json:"assertionsOk"`
@@ -998,6 +1009,7 @@ type finalOracleReport struct {
 type finalOracleAssertionOptions struct {
 	RequireConvergedCounts                    bool `json:"requireConvergedCounts"`
 	RequireNoAcknowledgedGraphTransactionLoss bool `json:"requireNoAcknowledgedGraphTransactionLoss"`
+	RequireNoUnresolvedGraphCommits           bool `json:"requireNoUnresolvedGraphCommits"`
 }
 
 func finalOracleAssertionOptionsFrom(assertions map[string]any) finalOracleAssertionOptions {
@@ -1005,11 +1017,12 @@ func finalOracleAssertionOptionsFrom(assertions map[string]any) finalOracleAsser
 	return finalOracleAssertionOptions{
 		RequireConvergedCounts:                    boolFromMap(final, "requireConvergedCounts"),
 		RequireNoAcknowledgedGraphTransactionLoss: boolFromMap(final, "requireNoAcknowledgedGraphTransactionLoss"),
+		RequireNoUnresolvedGraphCommits:           boolFromMap(final, "requireNoUnresolvedGraphCommits"),
 	}
 }
 
 func (o finalOracleAssertionOptions) required() bool {
-	return o.RequireConvergedCounts || o.RequireNoAcknowledgedGraphTransactionLoss
+	return o.RequireConvergedCounts || o.RequireNoAcknowledgedGraphTransactionLoss || o.RequireNoUnresolvedGraphCommits
 }
 
 func evaluateFinalOracleAssertions(report *finalOracleReport, resources provision.ScenarioResources, live bool) {
@@ -1026,6 +1039,9 @@ func evaluateFinalOracleAssertions(report *finalOracleReport, resources provisio
 		if assignment.BehaviorType == "graph-transaction" && assignment.SpaceID != "" && assignment.DomainID != "" && assignment.DaemonAddr != "" {
 			expectedChecks++
 		}
+	}
+	if report.RequiredAssertions.RequireNoUnresolvedGraphCommits && report.UnresolvedGraphCommits != 0 {
+		report.AssertionErrors = append(report.AssertionErrors, fmt.Sprintf("unresolved graph commits=%d, want 0", report.UnresolvedGraphCommits))
 	}
 	if len(report.LiveChecks) != expectedChecks || expectedChecks == 0 {
 		report.AssertionErrors = append(report.AssertionErrors, fmt.Sprintf("live graph checks=%d, expected graph assignments=%d", len(report.LiveChecks), expectedChecks))
@@ -1345,13 +1361,14 @@ type runRecorder struct {
 	budget       *provider.Ledger
 	budgetCancel context.CancelFunc
 
-	mu              sync.Mutex
-	budgetErr       error
-	acknowledged    []oracle.Transaction
-	expectedByActor map[string]graphCounts
-	readChecks      []map[string]any
-	successfulReads int
-	failedWrites    int
+	mu                     sync.Mutex
+	budgetErr              error
+	acknowledged           []oracle.Transaction
+	expectedByActor        map[string]graphCounts
+	readChecks             []map[string]any
+	successfulReads        int
+	failedWrites           int
+	unresolvedGraphCommits int
 }
 
 func reserveProviderOperation(ctx context.Context, ledger *provider.Ledger) (context.Context, func() error, error) {
@@ -1428,6 +1445,11 @@ func (r *runRecorder) oracleSnapshot() phaseOracleSnapshot {
 }
 
 func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEvent) error {
+	if event.Type == "graph-transaction-commit-unresolved" {
+		r.mu.Lock()
+		r.unresolvedGraphCommits++
+		r.mu.Unlock()
+	}
 	if err := appendEvent(ctx, r.store, r.sink, r.runID, artifacts.EventNow(event.Type, "", event.ActorID, event)); err != nil {
 		return err
 	}
@@ -1450,6 +1472,8 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 		_, _ = r.sink.AppendJSONL("actors/acknowledged-commits.jsonl", event.Transaction)
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName})
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "transaction_latency_ms", 0, map[string]any{"actorId": event.ActorID})
+	case "graph-transaction-commit-unresolved":
+		_ = appendMetric(ctx, r.store, r.sink, r.runID, "unresolved_graph_commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName, "class": event.Transaction.ErrorClass})
 	case "graph-transaction-failed":
 		if event.Transaction.ErrorClass == "permanent" {
 			r.mu.Lock()

@@ -8,10 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added a pre-candidate graph-commit restart qualification suite and policy requiring repeated fresh credential-free k3d clusters, one digest-pinned provenance-validated daemon identity, and zero unresolved ambiguous commits before assigning another candidate identity.
 - Added SGT10 CI/release integration with credential-free pull-request checks, deterministic/emulator/live-profile dry-runs, protected exact-candidate live and cluster release-gate workflows, immutable action/image inputs, serialized destructive execution, fail-closed sanitized artifact uploads, and credential incident-response guidance (#46).
 
 ### Fixed
 
+- Graph actors now reconcile ambiguous commit responses with bounded retries of the same durable transaction identity and idempotency key instead of treating every EOF as definitively uncommitted; CI repeats a deterministic committed-response-loss regression 100 times.
 - K3d readiness failures now retain bounded Kubernetes resources, pod descriptions, and namespace events before fail-closed image-provenance validation, so mandatory cleanup no longer erases the state needed to diagnose unready workloads.
 - K3d environments now support an explicit node-pull policy for digest-pinned registry images instead of passing multiarch index references through k3d's host-local image import path, while defaulting to local import for private and development image compatibility.
 - SGT9 cleanup now consumes bounded, complete structured inference-reference details from compatible daemons, proving and retaining immutable audit closures beyond the legacy 32-reference message limit without accepting truncated, malformed, unsupported, duplicate, or unrooted reference sets.

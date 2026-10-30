@@ -44,6 +44,9 @@ jobs:
       - name: Test
         working-directory: mycel-lab
         run: go test -count=1 ./...
+      - name: Stress committed-response-loss reconciliation
+        working-directory: mycel-lab
+        run: go test -count=100 ./internal/reliability/actors -run '^TestGraphCommitRetriesCommittedResponseLossWithSameIdentity$'
       - name: Race test
         working-directory: mycel-lab
         run: go test -race -count=1 ./...
@@ -102,6 +105,10 @@ jobs:
             --image local/mycel:sgt10-ci-dry-run \
             --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
             --artifact-root "$ARTIFACT_ROOT/protocol-emulator"
+          ./bin/mycel-lab run suite k3d-graph-commit-restart-qualification \
+            --dry-run \
+            --image local/mycel:sgt10-ci-dry-run \
+            --artifact-root "$ARTIFACT_ROOT/graph-commit-restart-qualification"
           ./bin/mycel-lab run suite k3d-procedure-inference-recovery \
             --dry-run \
             --image local/mycel:sgt10-ci-dry-run \

@@ -19,6 +19,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/events"
 	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
+	"github.com/MycelDB/mycel-lab/internal/reliability/oracle"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
@@ -568,6 +569,18 @@ func TestRunScenarioRoutesImageOverrideThroughComposeCreate(t *testing.T) {
 	}
 }
 
+func TestRunScenarioQualificationRejectsMutableImageBeforeEnvironmentUse(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "k3d-graph-commit-restart-qualification")
+	driver := &recordingDriver{}
+	_, err := RunScenario(context.Background(), scenario, Options{ArtifactRoot: t.TempDir(), ConfirmDestructive: true, ImageOverride: "myceldb/mycel:latest", EnvironmentDriver: driver})
+	if err == nil || !strings.Contains(err.Error(), "requires --image with a named digest-pinned daemon image") {
+		t.Fatalf("RunScenario() error=%v, want immutable image rejection", err)
+	}
+	if len(driver.order) != 0 {
+		t.Fatalf("environment used before image rejection: %v", driver.order)
+	}
+}
+
 func TestApplyComposeImageOverrideDoesNotLeakIntoK3D(t *testing.T) {
 	compose := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": "compose.yml"}}
 	applyComposeImageOverride(&compose, " local/mycel:head ")
@@ -946,6 +959,34 @@ func TestFinalOracleAssertionsEnforceNodeAndEdgeCounts(t *testing.T) {
 	}
 }
 
+func TestRunRecorderCountsUnresolvedGraphCommit(t *testing.T) {
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &runRecorder{sink: sink, runID: "run-1"}
+	event := actors.ActorEvent{Type: "graph-transaction-commit-unresolved", ActorID: "writer-0", Transaction: oracle.Transaction{ErrorClass: "unavailable"}}
+	if err := recorder.RecordActorEvent(context.Background(), event); err != nil {
+		t.Fatalf("RecordActorEvent() error=%v", err)
+	}
+	if recorder.unresolvedGraphCommits != 1 {
+		t.Fatalf("unresolvedGraphCommits=%d, want 1", recorder.unresolvedGraphCommits)
+	}
+}
+
+func TestFinalOracleAssertionsFailOnUnresolvedGraphCommit(t *testing.T) {
+	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space", DomainID: "domain", DaemonAddr: "daemon"}}}
+	report := finalOracleReport{
+		RequiredAssertions:     finalOracleAssertionOptions{RequireConvergedCounts: true, RequireNoUnresolvedGraphCommits: true},
+		UnresolvedGraphCommits: 1,
+		LiveChecks:             []finalOracleLiveCheck{{ActorID: "writer-0", Expected: graphCounts{Nodes: 2, Edges: 1}, Actual: graphCounts{Nodes: 2, Edges: 1}, OK: true}},
+	}
+	evaluateFinalOracleAssertions(&report, resources, true)
+	if report.AssertionsOK || !strings.Contains(strings.Join(report.AssertionErrors, " "), "unresolved graph commits=1") {
+		t.Fatalf("report=%+v, want unresolved commit failure", report)
+	}
+}
+
 func TestFinalOracleAssertionsFailWithoutGraphChecks(t *testing.T) {
 	report := finalOracleReport{RequiredAssertions: finalOracleAssertionOptions{RequireConvergedCounts: true}}
 	evaluateFinalOracleAssertions(&report, provision.ScenarioResources{}, true)
@@ -1239,5 +1280,31 @@ func TestLiveSemanticScenarioRequiresImmutableBuildProvenance(t *testing.T) {
 	scenario := spec.ResolvedScenario{Semantic: &spec.SemanticScenarioSpec{}, ProviderProfile: &provider.ResolvedProfile{Profile: provider.Profile{Mode: provider.ModeLive}}}
 	if !liveSemanticScenario(scenario) || !requiresImmutableBuildProvenance(scenario) {
 		t.Fatal("live semantic scenario did not require immutable build provenance")
+	}
+}
+
+func TestGraphCommitRestartQualificationRequiresImmutableInputs(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "k3d-graph-commit-restart-qualification")
+	if !graphCommitRestartQualificationScenario(scenario) || !requiresImmutableBuildProvenance(scenario) {
+		t.Fatal("graph commit restart qualification did not require immutable build provenance")
+	}
+	final, _ := scenario.Assertions["final"].(map[string]any)
+	if final["requireNoUnresolvedGraphCommits"] != true {
+		t.Fatalf("final assertions=%v, want requireNoUnresolvedGraphCommits=true", final)
+	}
+	progressPhases := map[string]bool{}
+	for _, phase := range scenario.Phases {
+		if phase.Assertions["requireWorkloadProgress"] == true {
+			progressPhases[phase.Name] = true
+		}
+	}
+	if !progressPhases["bootstrap-and-write"] || !progressPhases["post-restart-validation"] || len(progressPhases) != 2 {
+		t.Fatalf("workload-progress phases=%v, want baseline and post-restart only", progressPhases)
+	}
+	if env.IsDigestPinnedImageReference(scenario.Cluster.Image) {
+		t.Fatalf("default qualification image %q unexpectedly immutable; real runs must supply --image", scenario.Cluster.Image)
+	}
+	if !env.IsDigestPinnedImageReference("docker.io/myceldb/mycel@sha256:" + strings.Repeat("a", 64)) {
+		t.Fatal("valid named digest reference rejected")
 	}
 }
