@@ -19,9 +19,7 @@ import (
 // Scenario semantic identities remain caller-owned because they require catalog
 // resolution; callers must fill them before ValidateStructure.
 func (b *Bundle) Capture(ctx context.Context, inspector ImageInspector, runner ToolRunner) error {
-	if inspector == nil {
-		inspector = NewDockerInspector(nil)
-	}
+	useCapturedDockerTools := inspector == nil
 	if runner == nil {
 		runner = localToolRunner{}
 	}
@@ -75,6 +73,7 @@ func (b *Bundle) Capture(ctx context.Context, inspector ImageInspector, runner T
 			return err
 		}
 	}
+	capturedToolPaths := make(map[string]string, len(b.Tools))
 	for index := range b.Tools {
 		tool := &b.Tools[index]
 		if (tool.Name == "docker-buildx" || tool.Name == "docker-compose") && (tool.Path == "" || tool.Path == "auto") {
@@ -97,6 +96,7 @@ func (b *Bundle) Capture(ctx context.Context, inspector ImageInspector, runner T
 		if err != nil {
 			return err
 		}
+		capturedToolPaths[tool.Name] = path
 		tool.ExecutableSHA256, err = fileSHA256(path)
 		if err != nil {
 			return err
@@ -107,6 +107,14 @@ func (b *Bundle) Capture(ctx context.Context, inspector ImageInspector, runner T
 		}
 		digest := sha256.Sum256(bytes.TrimSpace(output))
 		tool.VersionOutputSHA256 = hex.EncodeToString(digest[:])
+	}
+	if useCapturedDockerTools {
+		dockerPath, dockerOK := capturedToolPaths["docker"]
+		buildxPath, buildxOK := capturedToolPaths["docker-buildx"]
+		if !dockerOK || !buildxOK {
+			return errors.New("capture images requires bound docker and docker-buildx tools")
+		}
+		inspector = NewDockerInspectorWithToolPaths(nil, dockerPath, buildxPath)
 	}
 	images := []*ImageIdentity{&b.Images.Daemon}
 	if b.Images.ProviderEmulator != nil {
