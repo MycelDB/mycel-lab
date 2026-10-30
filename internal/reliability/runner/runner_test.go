@@ -167,7 +167,7 @@ func TestRunScenarioDryRunWritesArtifactsAndTerminalStatus(t *testing.T) {
 	if result.Status != RunPassed {
 		t.Fatalf("status=%s, want passed", result.Status)
 	}
-	for _, name := range []string{"harness-build.json", "resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json"), filepath.Join("environment", "post-run-cleanup.json")} {
+	for _, name := range []string{"harness-build.json", "resolved-scenario.json", "events.jsonl", "result.json", "summary.md", filepath.Join("manifests", "myceld.yaml"), filepath.Join("environment", "state.json"), filepath.Join("environment", "finalization-stages.json"), filepath.Join("environment", "post-run-cleanup.json")} {
 		if _, err := os.Stat(filepath.Join(result.ArtifactRoot, name)); err != nil {
 			t.Fatalf("artifact %s missing: %v", name, err)
 		}
@@ -690,10 +690,59 @@ func TestCleanupInvokedOnFailure(t *testing.T) {
 	}
 }
 
+func TestPartialActorStartFailureStopsAttemptedActorsBeforeFinalization(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	if len(scenario.ActorGroups) == 0 {
+		t.Fatal("fixture has no actor groups")
+	}
+	scenario.ActorGroups[0].Count = 2
+	actorsByIndex := []*failurePathActor{{}, {startErr: errors.New("start failed")}}
+	driver := &recordingDriver{}
+	result, err := RunScenario(context.Background(), scenario, Options{
+		DryRun:            true,
+		ArtifactRoot:      t.TempDir(),
+		EnvironmentDriver: driver,
+		ActorFactory: func(_ spec.ResolvedActorGroup, index int, _ int64, _ spec.RateSpec) actors.Actor {
+			return actorsByIndex[index]
+		},
+	})
+	if err == nil || result.Status != RunFailed {
+		t.Fatalf("RunScenario() status=%s error=%v", result.Status, err)
+	}
+	if actorsByIndex[0].stopCalls != 1 || actorsByIndex[1].stopCalls != 1 {
+		t.Fatalf("partial-start stop calls=%d,%d", actorsByIndex[0].stopCalls, actorsByIndex[1].stopCalls)
+	}
+	for _, name := range []string{"result.json", "redaction-scan.json", "environment/post-run-cleanup.json"} {
+		if _, statErr := os.Stat(filepath.Join(result.ArtifactRoot, name)); statErr != nil {
+			t.Fatalf("artifact %s missing: %v", name, statErr)
+		}
+	}
+}
+
+func TestRestoreRateFailureStopsActorsBeforeFinalization(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	actor := &failurePathActor{updateErr: errors.New("restore failed")}
+	driver := &recordingDriver{}
+	result, err := RunScenario(context.Background(), scenario, Options{
+		DryRun:            true,
+		ArtifactRoot:      t.TempDir(),
+		EnvironmentDriver: driver,
+		ActorFactory: func(spec.ResolvedActorGroup, int, int64, spec.RateSpec) actors.Actor {
+			return actor
+		},
+	})
+	if err == nil || result.Status != RunFailed || actor.stopCalls != 1 {
+		t.Fatalf("RunScenario() status=%s error=%v stopCalls=%d", result.Status, err, actor.stopCalls)
+	}
+	if _, statErr := os.Stat(filepath.Join(result.ArtifactRoot, "redaction-scan.json")); statErr != nil {
+		t.Fatalf("redaction evidence missing: %v", statErr)
+	}
+}
+
 func TestRunBoundedCleanupAttemptsRetriesWithFreshBoundedContexts(t *testing.T) {
 	calls := 0
 	var contexts []context.Context
-	attempts, err := runBoundedCleanupAttempts(3, time.Second, func(ctx context.Context) error {
+	attempts, inFlight, err := runBoundedCleanupAttempts(3, time.Second, func(ctx context.Context) error {
 		calls++
 		contexts = append(contexts, ctx)
 		if _, ok := ctx.Deadline(); !ok {
@@ -704,8 +753,8 @@ func TestRunBoundedCleanupAttemptsRetriesWithFreshBoundedContexts(t *testing.T) 
 		}
 		return nil
 	})
-	if err != nil || attempts != 3 || calls != 3 {
-		t.Fatalf("attempts=%d calls=%d err=%v", attempts, calls, err)
+	if err != nil || inFlight || attempts != 3 || calls != 3 {
+		t.Fatalf("attempts=%d calls=%d inFlight=%t err=%v", attempts, calls, inFlight, err)
 	}
 	if contexts[0] == contexts[1] || contexts[1] == contexts[2] {
 		t.Fatal("cleanup attempts reused a context")
@@ -937,6 +986,320 @@ func TestFinalClusterAssertionsFailOnClusterIDMismatch(t *testing.T) {
 	}
 }
 
+func TestFinalClusterAssertionTimeoutFailsClosedAndCleansUp(t *testing.T) {
+	scenario := spec.ResolvedScenario{
+		Metadata: spec.Metadata{Name: "bounded-finalization"},
+		Cluster: spec.ClusterSpec{
+			Nodes: 1,
+			Image: "local/mycel:test",
+			Raft:  spec.RaftSpec{NodeCount: 1, PartitionCount: 1, ReplicaFactor: 1},
+		},
+		Environment: spec.EnvironmentSpec{Driver: "test"},
+		Phases:      []spec.PhaseSpec{{Name: "workload"}},
+		Assertions:  map[string]any{"final": map[string]any{"requireHealthyCluster": true}},
+	}
+	driver := &blockingFinalAssertionDriver{}
+	started := time.Now()
+	result, err := RunScenario(context.Background(), scenario, Options{
+		ArtifactRoot:                 t.TempDir(),
+		ConfirmDestructive:           true,
+		EnvironmentDriver:            driver,
+		scenarioProvision:            noOpScenarioProvision,
+		scenarioCleanup:              noOpScenarioProvision,
+		finalizationTimeoutsOverride: &finalizationTimeouts{ClusterAssertions: 20 * time.Millisecond},
+	})
+	if err == nil || !strings.Contains(err.Error(), "finalization stage cluster-assertions exceeded 20ms") {
+		t.Fatalf("RunScenario() status=%s error=%v", result.Status, err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded finalization took %s", elapsed)
+	}
+	if result.Status != RunFailed || !driver.deleted || !driver.verifiedDeleted {
+		t.Fatalf("result=%+v deleted=%t verified=%t", result, driver.deleted, driver.verifiedDeleted)
+	}
+	for _, name := range []string{
+		filepath.Join("oracle", "cluster-report.json"),
+		filepath.Join("environment", "finalization-stages.json"),
+		filepath.Join("environment", "post-run-cleanup.json"),
+		"result.json",
+		"redaction-scan.json",
+	} {
+		if _, statErr := os.Stat(filepath.Join(result.ArtifactRoot, name)); statErr != nil {
+			t.Fatalf("artifact %s missing: %v", name, statErr)
+		}
+	}
+	var stages []finalizationStageEvidence
+	raw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "finalization-stages.json"))
+	if readErr != nil || json.Unmarshal(raw, &stages) != nil {
+		t.Fatalf("read finalization evidence: err=%v raw=%s", readErr, raw)
+	}
+	if len(stages) != 2 || stages[0].Name != "actor-stop" || stages[0].Status != "passed" || stages[1].Name != "cluster-assertions" || stages[1].Status != "failed" || stages[1].ErrorCategory != "timeout" {
+		t.Fatalf("finalization stages=%+v", stages)
+	}
+}
+
+func TestActorStopFallbackRunsWhenStageStartEvidenceCannotPersist(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	driver := &stageStartPersistenceFailureDriver{}
+	actor := &failurePathActor{}
+	result, err := RunScenario(context.Background(), scenario, Options{
+		DryRun:            true,
+		ArtifactRoot:      t.TempDir(),
+		EnvironmentDriver: driver,
+		ActorFactory: func(spec.ResolvedActorGroup, int, int64, spec.RateSpec) actors.Actor {
+			return actor
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "persist finalization stage actor-stop start") {
+		t.Fatalf("RunScenario() status=%s error=%v", result.Status, err)
+	}
+	if actor.stopCalls != 1 || result.Status != RunFailed || !driver.deleted || !driver.verifiedDeleted {
+		t.Fatalf("stopCalls=%d result=%+v driver=%+v", actor.stopCalls, result, driver.recordingDriver)
+	}
+	for _, name := range []string{"result.json", "redaction-scan.json", "environment/post-run-cleanup.json"} {
+		if _, statErr := os.Stat(filepath.Join(result.ArtifactRoot, name)); statErr != nil {
+			t.Fatalf("artifact %s missing: %v", name, statErr)
+		}
+	}
+}
+
+func TestActorStopTimeoutDoesNotRequireActorContextCooperation(t *testing.T) {
+	scenario := resolveFixtureScenario(t, "example.yaml")
+	driver := &recordingDriver{}
+	release := make(chan struct{})
+	started := time.Now()
+	result, err := RunScenario(context.Background(), scenario, Options{
+		DryRun:            true,
+		ArtifactRoot:      t.TempDir(),
+		EnvironmentDriver: driver,
+		ActorFactory: func(spec.ResolvedActorGroup, int, int64, spec.RateSpec) actors.Actor {
+			return nonCooperativeStopActor{release: release}
+		},
+		finalizationTimeoutsOverride: &finalizationTimeouts{ActorStop: 20 * time.Millisecond},
+	})
+	close(release)
+	if err == nil || !strings.Contains(err.Error(), "finalization stage actor-stop exceeded 20ms") {
+		t.Fatalf("RunScenario() status=%s error=%v", result.Status, err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("non-cooperative actor stop blocked finalization for %s", elapsed)
+	}
+	if result.Status != RunFailed || !driver.deleted || !driver.verifiedDeleted {
+		t.Fatalf("result=%+v deleted=%t verified=%t", result, driver.deleted, driver.verifiedDeleted)
+	}
+	for _, name := range []string{"environment/finalization-stages.json", "environment/post-run-cleanup.json", "result.json", "redaction-scan.json"} {
+		if _, statErr := os.Stat(filepath.Join(result.ArtifactRoot, name)); statErr != nil {
+			t.Fatalf("artifact %s missing: %v", name, statErr)
+		}
+	}
+}
+
+func TestSuccessfulPortForwardStopFollowsScenarioCleanup(t *testing.T) {
+	scenario := spec.ResolvedScenario{
+		Metadata:    spec.Metadata{Name: "port-forward-cleanup-order"},
+		Cluster:     spec.ClusterSpec{Nodes: 1, Image: "local/mycel:test", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 1, ReplicaFactor: 1}},
+		Environment: spec.EnvironmentSpec{Driver: "test"},
+		Phases:      []spec.PhaseSpec{{Name: "workload"}},
+	}
+	driver := &clusterAssertionDriver{}
+	driver.environmentDriver = "k3d"
+	var order []string
+	session := &recordingPortForwardSession{stop: func() { order = append(order, "port-forward-stop") }}
+	result, err := RunScenario(context.Background(), scenario, Options{
+		ArtifactRoot:       t.TempDir(),
+		ConfirmDestructive: true,
+		EnvironmentDriver:  driver,
+		consolePortForwardStarter: func(context.Context, env.Environment, []env.ConsoleEndpoint) (consolePortForwardSession, error) {
+			return session, nil
+		},
+		scenarioProvision: noOpScenarioProvision,
+		scenarioCleanup: func(context.Context, *provision.ScenarioResources, provision.Options) error {
+			order = append(order, "scenario-cleanup")
+			return nil
+		},
+	})
+	if err != nil || result.Status != RunPassed {
+		t.Fatalf("RunScenario() status=%s error=%v", result.Status, err)
+	}
+	if strings.Join(order, ",") != "scenario-cleanup,port-forward-stop" {
+		t.Fatalf("finalization order=%v", order)
+	}
+}
+
+func TestPortForwardStopTimeoutFailsRunAndCleansUp(t *testing.T) {
+	scenario := spec.ResolvedScenario{
+		Metadata:    spec.Metadata{Name: "bounded-port-forward-stop"},
+		Cluster:     spec.ClusterSpec{Nodes: 1, Image: "local/mycel:test", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 1, ReplicaFactor: 1}},
+		Environment: spec.EnvironmentSpec{Driver: "test"},
+		Phases:      []spec.PhaseSpec{{Name: "workload"}},
+	}
+	driver := &clusterAssertionDriver{}
+	driver.environmentDriver = "k3d"
+	release := make(chan struct{})
+	session := &nonCooperativePortForwardSession{release: release}
+	started := time.Now()
+	result, err := RunScenario(context.Background(), scenario, Options{
+		ArtifactRoot:       t.TempDir(),
+		ConfirmDestructive: true,
+		EnvironmentDriver:  driver,
+		consolePortForwardStarter: func(context.Context, env.Environment, []env.ConsoleEndpoint) (consolePortForwardSession, error) {
+			return session, nil
+		},
+		scenarioProvision:            noOpScenarioProvision,
+		scenarioCleanup:              noOpScenarioProvision,
+		finalizationTimeoutsOverride: &finalizationTimeouts{PortForwardStop: 20 * time.Millisecond},
+	})
+	close(release)
+	if err == nil || !strings.Contains(err.Error(), "finalization stage port-forward-stop exceeded 20ms") {
+		t.Fatalf("RunScenario() status=%s error=%v", result.Status, err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("non-cooperative port-forward stop blocked finalization for %s", elapsed)
+	}
+	if result.Status != RunFailed || !driver.deleted || !driver.verifiedDeleted {
+		t.Fatalf("result=%+v deleted=%t verified=%t", result, driver.deleted, driver.verifiedDeleted)
+	}
+	var stages []finalizationStageEvidence
+	raw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "finalization-stages.json"))
+	if readErr != nil || json.Unmarshal(raw, &stages) != nil {
+		t.Fatalf("read finalization evidence: err=%v raw=%s", readErr, raw)
+	}
+	last := stages[len(stages)-1]
+	if last.Name != "port-forward-stop" || last.Status != "failed" || last.ErrorCategory != "timeout" {
+		t.Fatalf("finalization stages=%+v", stages)
+	}
+}
+
+func TestScenarioCleanupTimeoutDoesNotRaceFallbackOrTerminalArtifacts(t *testing.T) {
+	scenario := spec.ResolvedScenario{
+		Metadata:    spec.Metadata{Name: "bounded-scenario-cleanup"},
+		Cluster:     spec.ClusterSpec{Nodes: 1, Image: "local/mycel:test", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 1, ReplicaFactor: 1}},
+		Environment: spec.EnvironmentSpec{Driver: "test"},
+		Phases:      []spec.PhaseSpec{{Name: "workload"}},
+	}
+	driver := &recordingDriver{omitEndpoints: true}
+	release := make(chan struct{})
+	done := make(chan struct{})
+	result, err := RunScenario(context.Background(), scenario, Options{
+		ArtifactRoot:       t.TempDir(),
+		ConfirmDestructive: true,
+		EnvironmentDriver:  driver,
+		scenarioCleanup: func(_ context.Context, resources *provision.ScenarioResources, _ provision.Options) error {
+			<-release
+			resources.Cleanup.Attempted = true
+			resources.Cleanup.Completed = true
+			close(done)
+			return nil
+		},
+		finalizationTimeoutsOverride: &finalizationTimeouts{ScenarioCleanup: 20 * time.Millisecond},
+	})
+	if err == nil || !strings.Contains(err.Error(), "finalization stage scenario-cleanup exceeded 20ms") {
+		t.Fatalf("RunScenario() status=%s error=%v", result.Status, err)
+	}
+	if result.Status != RunFailed || !driver.deleted || !driver.verifiedDeleted {
+		t.Fatalf("result=%+v deleted=%t verified=%t", result, driver.deleted, driver.verifiedDeleted)
+	}
+	before := snapshotArtifactFiles(t, result.ArtifactRoot)
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned cleanup operation did not finish after release")
+	}
+	time.Sleep(20 * time.Millisecond)
+	after := snapshotArtifactFiles(t, result.ArtifactRoot)
+	if !mapsEqual(before, after) {
+		t.Fatalf("terminal artifacts changed after abandoned cleanup returned")
+	}
+	cleanupRaw, readErr := os.ReadFile(filepath.Join(result.ArtifactRoot, "environment", "post-run-cleanup.json"))
+	if readErr != nil || !bytes.Contains(cleanupRaw, []byte(`"scenarioCleanupInFlight": true`)) {
+		t.Fatalf("cleanup evidence err=%v: %s", readErr, cleanupRaw)
+	}
+}
+
+func TestTimedOutClusterAssertionCannotWriteAfterTerminalRedaction(t *testing.T) {
+	scenario := spec.ResolvedScenario{
+		Metadata:    spec.Metadata{Name: "late-cluster-assertion"},
+		Cluster:     spec.ClusterSpec{Nodes: 1, Image: "local/mycel:test", Raft: spec.RaftSpec{NodeCount: 1, PartitionCount: 1, ReplicaFactor: 1}},
+		Environment: spec.EnvironmentSpec{Driver: "test"},
+		Phases:      []spec.PhaseSpec{{Name: "workload"}},
+		Assertions:  map[string]any{"final": map[string]any{"requireHealthyCluster": true}},
+	}
+	release := make(chan struct{})
+	driver := &lateFinalAssertionDriver{release: release, done: make(chan struct{})}
+	result, err := RunScenario(context.Background(), scenario, Options{
+		ArtifactRoot:                 t.TempDir(),
+		ConfirmDestructive:           true,
+		EnvironmentDriver:            driver,
+		scenarioProvision:            noOpScenarioProvision,
+		scenarioCleanup:              noOpScenarioProvision,
+		finalizationTimeoutsOverride: &finalizationTimeouts{ClusterAssertions: 20 * time.Millisecond},
+	})
+	if err == nil || !strings.Contains(err.Error(), "finalization stage cluster-assertions exceeded 20ms") {
+		t.Fatalf("RunScenario() status=%s error=%v", result.Status, err)
+	}
+	before := snapshotArtifactFiles(t, result.ArtifactRoot)
+	close(release)
+	select {
+	case <-driver.done:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned cluster assertion did not finish after release")
+	}
+	time.Sleep(20 * time.Millisecond)
+	after := snapshotArtifactFiles(t, result.ArtifactRoot)
+	if !mapsEqual(before, after) {
+		t.Fatalf("terminal artifacts changed after timed-out assertion returned")
+	}
+}
+
+func TestLiveFinalOracleChecksBoundEveryAssignment(t *testing.T) {
+	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{
+		{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space-0", DomainID: "domain-0", DaemonAddr: "daemon-0"},
+		{ActorID: "writer-1", BehaviorType: "graph-transaction", SpaceID: "space-1", DomainID: "domain-1", DaemonAddr: "daemon-1"},
+	}}
+	started := time.Now()
+	checks := runLiveFinalOracleChecksWithReader(context.Background(), resources, map[string]graphCounts{}, 10*time.Millisecond, func(ctx context.Context, _ provision.ActorAssignment, _ graphCounts) (graphCounts, error) {
+		<-ctx.Done()
+		return graphCounts{}, ctx.Err()
+	})
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("bounded oracle checks took %s", elapsed)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("checks=%+v", checks)
+	}
+	for _, check := range checks {
+		if check.OK || !strings.Contains(check.Error, context.DeadlineExceeded.Error()) {
+			t.Fatalf("check=%+v, want bounded deadline failure", check)
+		}
+	}
+}
+
+func TestLiveFinalOracleChecksDoNotRequireReaderContextCooperation(t *testing.T) {
+	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{
+		{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space-0", DomainID: "domain-0", DaemonAddr: "daemon-0"},
+		{ActorID: "writer-1", BehaviorType: "graph-transaction", SpaceID: "space-1", DomainID: "domain-1", DaemonAddr: "daemon-1"},
+	}}
+	release := make(chan struct{})
+	started := time.Now()
+	checks := runLiveFinalOracleChecksWithReader(context.Background(), resources, map[string]graphCounts{}, 10*time.Millisecond, func(context.Context, provision.ActorAssignment, graphCounts) (graphCounts, error) {
+		<-release
+		return graphCounts{Nodes: 99, Edges: 99}, nil
+	})
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("non-cooperative oracle readers blocked checks for %s", elapsed)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("checks=%+v", checks)
+	}
+	for _, check := range checks {
+		if check.OK || !strings.Contains(check.Error, context.DeadlineExceeded.Error()) {
+			t.Fatalf("check=%+v, want independent deadline failure", check)
+		}
+	}
+	close(release)
+}
+
 func TestFinalOracleAssertionsEnforceNodeAndEdgeCounts(t *testing.T) {
 	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space", DomainID: "domain", DaemonAddr: "daemon"}}}
 	options := finalOracleAssertionOptions{RequireConvergedCounts: true, RequireNoAcknowledgedGraphTransactionLoss: true}
@@ -956,6 +1319,34 @@ func TestFinalOracleAssertionsEnforceNodeAndEdgeCounts(t *testing.T) {
 				t.Fatalf("AssertionsOK=%t errors=%v, want %t", report.AssertionsOK, report.AssertionErrors, tc.ok)
 			}
 		})
+	}
+}
+
+func TestDisabledRunRecorderRejectsLateActorPersistence(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	if err := st.CreateRun(ctx, store.Run{ID: "late-recorder", ScenarioName: "test", Status: "running"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &runRecorder{store: st, sink: sink.Scoped(), runID: "late-recorder"}
+	recorder.Disable()
+	event := actors.ActorEvent{Type: "graph-transaction-acknowledged", ActorID: "writer-0", Transaction: oracle.Transaction{Operations: []oracle.Operation{{Type: "createNode"}}}}
+	if err := recorder.RecordActorEvent(ctx, event); err == nil {
+		t.Fatal("disabled recorder accepted a late actor event")
+	}
+	if _, err := os.Stat(filepath.Join(sink.Root(), "events.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("late actor artifact exists: %v", err)
+	}
+	details, err := st.GetRun(ctx, "late-recorder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(details.Events) != 0 || len(recorder.acknowledged) != 0 {
+		t.Fatalf("late recorder mutation persisted: details=%+v acknowledged=%+v", details, recorder.acknowledged)
 	}
 }
 
@@ -1019,6 +1410,48 @@ func TestPhaseOracleProgressRequiresAcknowledgedWriteAndSuccessfulRead(t *testin
 	}
 }
 
+func noOpScenarioProvision(context.Context, *provision.ScenarioResources, provision.Options) error {
+	return nil
+}
+
+func snapshotArtifactFiles(t *testing.T, root string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files[relative] = string(content)
+		return nil
+	}); err != nil {
+		t.Fatalf("snapshot artifacts: %v", err)
+	}
+	return files
+}
+
+func mapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
 func resolveFixtureScenario(t *testing.T, name string) spec.ResolvedScenario {
 	t.Helper()
 	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", name)
@@ -1035,11 +1468,120 @@ func (failingActor) Start(context.Context) error                     { return er
 func (failingActor) UpdateRate(context.Context, spec.RateSpec) error { return nil }
 func (failingActor) Stop(context.Context) error                      { return nil }
 
+type failurePathActor struct {
+	startErr  error
+	updateErr error
+	stopCalls int
+}
+
+func (a *failurePathActor) Start(context.Context) error { return a.startErr }
+func (a *failurePathActor) UpdateRate(context.Context, spec.RateSpec) error {
+	return a.updateErr
+}
+func (a *failurePathActor) Stop(context.Context) error {
+	a.stopCalls++
+	return nil
+}
+
+type nonCooperativeStopActor struct {
+	release <-chan struct{}
+}
+
+func (nonCooperativeStopActor) Start(context.Context) error                     { return nil }
+func (nonCooperativeStopActor) UpdateRate(context.Context, spec.RateSpec) error { return nil }
+func (a nonCooperativeStopActor) Stop(context.Context) error {
+	<-a.release
+	return nil
+}
+
+type recordingPortForwardSession struct {
+	stop func()
+}
+
+func (s *recordingPortForwardSession) Stop(context.Context) error {
+	if s.stop != nil {
+		s.stop()
+	}
+	return nil
+}
+func (*recordingPortForwardSession) SnapshotEndpoint(string) (env.EndpointForwardSnapshot, bool) {
+	return env.EndpointForwardSnapshot{}, false
+}
+func (*recordingPortForwardSession) SnapshotEndpoints() []env.EndpointForwardSnapshot { return nil }
+func (*recordingPortForwardSession) RefreshAndAwaitEndpoint(context.Context, string, uint64) (env.EndpointRecoveryEvidence, error) {
+	return env.EndpointRecoveryEvidence{}, errors.New("endpoint recovery is unavailable")
+}
+
+type nonCooperativePortForwardSession struct {
+	release <-chan struct{}
+}
+
+func (s *nonCooperativePortForwardSession) Stop(context.Context) error {
+	<-s.release
+	return nil
+}
+func (*nonCooperativePortForwardSession) SnapshotEndpoint(string) (env.EndpointForwardSnapshot, bool) {
+	return env.EndpointForwardSnapshot{}, false
+}
+func (*nonCooperativePortForwardSession) SnapshotEndpoints() []env.EndpointForwardSnapshot {
+	return nil
+}
+func (*nonCooperativePortForwardSession) RefreshAndAwaitEndpoint(context.Context, string, uint64) (env.EndpointRecoveryEvidence, error) {
+	return env.EndpointRecoveryEvidence{}, errors.New("endpoint recovery is unavailable")
+}
+
 type clusterAssertionDriver struct {
 	recordingDriver
 	clusterIDs     []string
 	healthStatuses []string
 	healthCalls    int
+}
+
+type stageStartPersistenceFailureDriver struct {
+	recordingDriver
+}
+
+func (d *stageStartPersistenceFailureDriver) CaptureState(ctx context.Context, environment env.Environment, sink *artifacts.Sink) error {
+	if err := d.recordingDriver.CaptureState(ctx, environment, sink); err != nil {
+		return err
+	}
+	if d.captured == 1 {
+		return os.MkdirAll(filepath.Join(sink.Root(), "environment", "finalization-stages.json"), 0o700)
+	}
+	return nil
+}
+
+type blockingFinalAssertionDriver struct {
+	recordingDriver
+}
+
+func (d *blockingFinalAssertionDriver) Exec(ctx context.Context, _ env.Environment, _ env.NodeRef, _ env.ExecRequest) (env.ExecResult, error) {
+	<-ctx.Done()
+	return env.ExecResult{}, ctx.Err()
+}
+
+type lateFinalAssertionDriver struct {
+	recordingDriver
+	release <-chan struct{}
+	done    chan struct{}
+	calls   int
+}
+
+func (d *lateFinalAssertionDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
+	<-d.release
+	d.calls++
+	for _, part := range req.Command {
+		if part == "status" {
+			return env.ExecResult{Stdout: `{"cluster":{"cluster_id":"cluster-a","cluster_name":"test","mode":"clustered"},"node":{"node_id":"node","state":"clustered","admitted":true},"peers":[{}]}`}, nil
+		}
+		if part == "health" {
+			if d.calls == 2 {
+				close(d.done)
+			}
+			return env.ExecResult{Stdout: `{"status":"healthy","active_members":1,"pending_members":0,"unreachable_peers":0,"warnings":[]}`}, nil
+		}
+	}
+	return env.ExecResult{}, nil
 }
 
 func (d *clusterAssertionDriver) Exec(_ context.Context, _ env.Environment, node env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
