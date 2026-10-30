@@ -207,7 +207,11 @@ func (b *Bundle) Preflight(ctx context.Context, harness HarnessIdentity, inspect
 }
 
 func (b *Bundle) VerifyBoundFile(path, role string) ([]byte, error) {
-	canonical, err := filepath.EvalSymlinks(path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve bound %s file: %w", role, err)
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
 		return nil, fmt.Errorf("resolve bound %s file: %w", role, err)
 	}
@@ -235,7 +239,11 @@ func (b *Bundle) VerifyBoundFile(path, role string) ([]byte, error) {
 }
 
 func (b *Bundle) ScenarioNamesForSuite(path string) ([]string, error) {
-	canonical, err := filepath.EvalSymlinks(path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
 		return nil, err
 	}

@@ -164,6 +164,19 @@ func TestPreflightValidatesFilesHarnessToolsAndImages(t *testing.T) {
 	if !record.OK || len(record.ResolvedImages) != 1 || record.BundleSHA256 == "" {
 		t.Fatalf("record=%+v", record)
 	}
+	t.Cleanup(func() { _ = loaded.Close() })
+	sourceRoot, _ := loaded.ResolvedSource("lab")
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(sourceRoot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(workingDirectory) })
+	if raw, err := loaded.VerifyBoundFile("scenario.yaml", "scenario"); err != nil || string(raw) != "kind: Scenario\nmetadata:\n  name: scenario-a\n" {
+		t.Fatalf("VerifyBoundFile(relative) raw=%q error=%v", raw, err)
+	}
 }
 
 func TestPreflightSnapshotsRuntimeFilesAndTools(t *testing.T) {
