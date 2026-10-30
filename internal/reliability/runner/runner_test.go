@@ -1004,6 +1004,8 @@ func TestFinalClusterAssertionTimeoutFailsClosedAndCleansUp(t *testing.T) {
 		ArtifactRoot:                 t.TempDir(),
 		ConfirmDestructive:           true,
 		EnvironmentDriver:            driver,
+		scenarioProvision:            noOpScenarioProvision,
+		scenarioCleanup:              noOpScenarioProvision,
 		finalizationTimeoutsOverride: &finalizationTimeouts{ClusterAssertions: 20 * time.Millisecond},
 	})
 	if err == nil || !strings.Contains(err.Error(), "finalization stage cluster-assertions exceeded 20ms") {
@@ -1110,6 +1112,7 @@ func TestSuccessfulPortForwardStopFollowsScenarioCleanup(t *testing.T) {
 		consolePortForwardStarter: func(context.Context, env.Environment, []env.ConsoleEndpoint) (consolePortForwardSession, error) {
 			return session, nil
 		},
+		scenarioProvision: noOpScenarioProvision,
 		scenarioCleanup: func(context.Context, *provision.ScenarioResources, provision.Options) error {
 			order = append(order, "scenario-cleanup")
 			return nil
@@ -1142,6 +1145,8 @@ func TestPortForwardStopTimeoutFailsRunAndCleansUp(t *testing.T) {
 		consolePortForwardStarter: func(context.Context, env.Environment, []env.ConsoleEndpoint) (consolePortForwardSession, error) {
 			return session, nil
 		},
+		scenarioProvision:            noOpScenarioProvision,
+		scenarioCleanup:              noOpScenarioProvision,
 		finalizationTimeoutsOverride: &finalizationTimeouts{PortForwardStop: 20 * time.Millisecond},
 	})
 	close(release)
@@ -1172,7 +1177,7 @@ func TestScenarioCleanupTimeoutDoesNotRaceFallbackOrTerminalArtifacts(t *testing
 		Environment: spec.EnvironmentSpec{Driver: "test"},
 		Phases:      []spec.PhaseSpec{{Name: "workload"}},
 	}
-	driver := &recordingDriver{}
+	driver := &recordingDriver{omitEndpoints: true}
 	release := make(chan struct{})
 	done := make(chan struct{})
 	result, err := RunScenario(context.Background(), scenario, Options{
@@ -1226,6 +1231,8 @@ func TestTimedOutClusterAssertionCannotWriteAfterTerminalRedaction(t *testing.T)
 		ArtifactRoot:                 t.TempDir(),
 		ConfirmDestructive:           true,
 		EnvironmentDriver:            driver,
+		scenarioProvision:            noOpScenarioProvision,
+		scenarioCleanup:              noOpScenarioProvision,
 		finalizationTimeoutsOverride: &finalizationTimeouts{ClusterAssertions: 20 * time.Millisecond},
 	})
 	if err == nil || !strings.Contains(err.Error(), "finalization stage cluster-assertions exceeded 20ms") {
@@ -1401,6 +1408,10 @@ func TestPhaseOracleProgressRequiresAcknowledgedWriteAndSuccessfulRead(t *testin
 	if err := assertPhaseOracleProgress(assertions, before, before, false); err != nil {
 		t.Fatalf("dry-run progress assertion error=%v", err)
 	}
+}
+
+func noOpScenarioProvision(context.Context, *provision.ScenarioResources, provision.Options) error {
+	return nil
 }
 
 func snapshotArtifactFiles(t *testing.T, root string) map[string]string {

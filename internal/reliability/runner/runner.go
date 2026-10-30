@@ -104,6 +104,7 @@ type Options struct {
 	harnessBuildIdentityOverride *harnessBuildIdentity
 	finalizationTimeoutsOverride *finalizationTimeouts
 	consolePortForwardStarter    consolePortForwardStarter
+	scenarioProvision            func(context.Context, *provision.ScenarioResources, provision.Options) error
 	scenarioCleanup              func(context.Context, *provision.ScenarioResources, provision.Options) error
 }
 
@@ -354,6 +355,10 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 		environment.Metadata["liveSemanticProvider"] = "true"
 	}
 	cleanupEnvironment := true
+	provisionScenario := opts.scenarioProvision
+	if provisionScenario == nil {
+		provisionScenario = provision.ProvisionScenario
+	}
 	cleanupScenario := opts.scenarioCleanup
 	if cleanupScenario == nil {
 		cleanupScenario = provision.CleanupScenario
@@ -585,7 +590,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
-	provisionErr := provision.ProvisionScenario(provisionCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun, ProviderSecretObserver: func(secret string) { redactor.AddSecrets(secret) }, PersistResources: func(snapshot provision.ScenarioResources) error {
+	provisionErr := provisionScenario(provisionCtx, &resources, provision.Options{RunID: runID, DaemonAddrs: endpointAddrs, DryRun: provisionDryRun, ProviderSecretObserver: func(secret string) { redactor.AddSecrets(secret) }, PersistResources: func(snapshot provision.ScenarioResources) error {
 		_, err := sink.WriteJSON("environment/scenario-resources.json", snapshot)
 		return err
 	}})
