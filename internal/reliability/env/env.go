@@ -963,15 +963,13 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 	if _, err := sink.WriteJSON("environment/daemon-image.json", daemonImage); err != nil {
 		return err
 	}
-	if requireClosedEvidence && daemonImage.ResolutionStatus != "completed" {
-		return errors.New("daemon running image provenance is incomplete or heterogeneous")
-	}
 	captures := []struct {
 		name string
 		args []string
 	}{
 		{name: "environment/kubernetes-resources.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "get", "all,pvc", "-o", "wide"}},
 		{name: "environment/pods-describe.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "describe", "pods"}},
+		{name: "environment/kubernetes-events.txt", args: []string{"--context", environment.Context, "-n", environment.Namespace, "get", "events", "--sort-by=.metadata.creationTimestamp"}},
 	}
 	if !requireClosedEvidence {
 		captures = append(captures,
@@ -995,6 +993,13 @@ func (d K3DDriver) CaptureState(ctx context.Context, environment Environment, si
 		if _, writeErr := sink.WriteText(capture.name, content); writeErr != nil {
 			return writeErr
 		}
+	}
+	// Preserve bounded Kubernetes readiness evidence before failing closed on
+	// incomplete image provenance. Unready pods may not have a running image ID,
+	// and returning before these captures made the original readiness failure
+	// impossible to diagnose after mandatory environment cleanup.
+	if requireClosedEvidence && daemonImage.ResolutionStatus != "completed" {
+		return errors.New("daemon running image provenance is incomplete or heterogeneous")
 	}
 	if requireClosedEvidence {
 		if err := captureK3DDaemonDiagnostics(ctx, runner, environment, sink); err != nil {
