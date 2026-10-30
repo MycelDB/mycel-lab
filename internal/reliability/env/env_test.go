@@ -1126,6 +1126,16 @@ func TestComposeImageProvenanceIsAllowlisted(t *testing.T) {
 	}
 }
 
+func TestQualificationAMD64BuildIdentityIsAllowlisted(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const contextDigest = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	runner := &composeCaptureRunner{inspectOutput: `{"org.opencontainers.image.revision":"` + revision + `","org.opencontainers.image.source":"https://github.com/MycelDB/mycel","io.myceldb.source.dirty":"false","io.myceldb.build.context-digest":"` + contextDigest + `","io.myceldb.build.command":"docker-buildx-local-linux-amd64"}`}
+	provenance := (ComposeDriver{Runner: runner}).imageProvenance(context.Background(), "sha256:test")
+	if provenance.BuildCommand != "docker-buildx-local-linux-amd64" || !validImageProvenance(provenance, "https://github.com/MycelDB/mycel") {
+		t.Fatalf("provenance=%+v, want valid AMD64 qualification identity", provenance)
+	}
+}
+
 func TestComposeCaptureStateRequiresResolvedImageEvidence(t *testing.T) {
 	environment := Environment{Name: "mlab-test", Driver: "compose", Metadata: map[string]string{"composeFile": "compose.yml", "projectName": "mlab-test", "serviceNames": "myceld-a,myceld-b", "imageOverride": "local/mycel:head"}}
 	for _, tc := range []struct {

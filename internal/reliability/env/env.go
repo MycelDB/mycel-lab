@@ -1414,7 +1414,7 @@ func captureImageProvenance(ctx context.Context, runner executil.Runner, imageID
 	provenance.Source = allowlistedDiagnosticValue(labels["org.opencontainers.image.source"], "https://github.com/MycelDB/mycel", "https://github.com/MycelDB/mycel-lab")
 	provenance.Dirty = allowlistedDiagnosticValue(labels["io.myceldb.source.dirty"], "true", "false")
 	provenance.ContextDigest = safeSHA256(labels["io.myceldb.build.context-digest"])
-	provenance.BuildCommand = allowlistedDiagnosticValue(labels["io.myceldb.build.command"], "docker-buildx-local-linux-arm64", "docker-buildx-local-linux-arm64-emulator", "github-actions-buildx-multiarch")
+	provenance.BuildCommand = allowlistedDiagnosticValue(labels["io.myceldb.build.command"], "docker-buildx-local-linux-amd64", "docker-buildx-local-linux-arm64", "docker-buildx-local-linux-arm64-emulator", "github-actions-buildx-multiarch")
 	if provenance.Revision == "" || provenance.Source == "" || provenance.Dirty == "" || provenance.ContextDigest == "" || provenance.BuildCommand == "" {
 		provenance.CaptureStatus = "incomplete"
 	}
@@ -1553,6 +1553,12 @@ func canonicalImagePlatform(osName, architecture string) string {
 	default:
 		return ""
 	}
+}
+
+// IsDigestPinnedImageReference reports whether value is a complete,
+// standards-valid named sha256 image reference.
+func IsDigestPinnedImageReference(value string) bool {
+	return isDigestPinnedImageReference(value)
 }
 
 func isDigestPinnedImageReference(value string) bool {

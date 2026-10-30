@@ -16,12 +16,36 @@ import checkWorkflows
 SCRIPT = Path(__file__).resolve().with_name("verifyArtifactSafety.py")
 SEMANTIC_LIVE = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "semantic-live.yml"
 RELEASE_GATE = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release-gate.yml"
+CI = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
 
 
 class WorkflowPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.live = SEMANTIC_LIVE.read_text(encoding="utf-8")
         self.release = RELEASE_GATE.read_text(encoding="utf-8")
+        self.ci = CI.read_text(encoding="utf-8")
+
+    def check_ci_graph_commit_policy(self, text: str) -> list[str]:
+        failures: list[str] = []
+        checkWorkflows.check_ci_graph_commit_qualification(text, failures)
+        return failures
+
+    def test_ci_requires_repeated_ambiguous_commit_regression_and_qualification_dry_run(self) -> None:
+        self.assertEqual(self.check_ci_graph_commit_policy(self.ci), [])
+        without_regression = self.ci.replace(
+            "go test -count=100 ./internal/reliability/actors -run '^TestGraphCommitRetriesCommittedResponseLossWithSameIdentity$'",
+            "go test -count=1 ./internal/reliability/actors",
+            1,
+        )
+        self.assertIn(
+            "ci.yml: repeated committed-response-loss reconciliation regression is required",
+            self.check_ci_graph_commit_policy(without_regression),
+        )
+        without_qualification = self.ci.replace("k3d-graph-commit-restart-qualification", "k3d-cluster-validation", 1)
+        self.assertIn(
+            "ci.yml: pre-candidate graph commit restart qualification dry-run is required",
+            self.check_ci_graph_commit_policy(without_qualification),
+        )
 
     def check_arm64_policy(self, text: str) -> list[str]:
         failures: list[str] = []

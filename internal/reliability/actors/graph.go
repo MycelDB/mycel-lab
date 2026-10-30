@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"sort"
 	"strings"
@@ -397,6 +399,15 @@ func (a *GraphActor) executeRealTransaction(ctx context.Context, tx oracle.Trans
 	return err
 }
 
+type graphTransactionClient interface {
+	BeginIdempotentReadWriteTransaction(ctx context.Context, sessionID, spaceID, domainID, key string) (*mycel.IdempotentTransaction, error)
+	CloseTransaction(ctx context.Context, txID string) error
+	CreateNode(ctx context.Context, txID string, node *clientv1.NodeCreate) (*clientv1.Node, error)
+	UpdateNodeContent(ctx context.Context, txID, nodeID, content string) (*clientv1.Node, error)
+	CreateEdge(ctx context.Context, txID string, edge *clientv1.EdgeCreate) (*clientv1.Edge, error)
+	CommitIdempotentTransactionWithRetry(ctx context.Context, tx *mycel.IdempotentTransaction, policy mycel.IdempotentCommitRetryPolicy) (*clientv1.CommitTransactionResponse, error)
+}
+
 func (a *GraphActor) executeRealTransactionOnce(ctx context.Context, tx oracle.Transaction, forceLogin bool) error {
 	assignment := a.currentAssignment()
 	client, err := a.dialClient(ctx, forceLogin)
@@ -410,10 +421,22 @@ func (a *GraphActor) executeRealTransactionOnce(ctx context.Context, tx oracle.T
 		return err
 	}
 	defer func() { _ = client.CloseSession(context.Background(), sessionID) }()
-	graphTx, err := client.BeginReadWriteTransaction(ctx, sessionID)
+	return a.executeGraphTransaction(ctx, client, assignment, sessionID, tx)
+}
+
+func (a *GraphActor) executeGraphTransaction(ctx context.Context, client graphTransactionClient, assignment provision.ActorAssignment, sessionID string, tx oracle.Transaction) error {
+	idempotencyKey := graphCommitIdempotencyKey(a.ID, tx.Sequence)
+	idempotentTx, err := client.BeginIdempotentReadWriteTransaction(
+		ctx,
+		sessionID,
+		assignment.SpaceID,
+		assignment.DomainID,
+		idempotencyKey,
+	)
 	if err != nil {
 		return err
 	}
+	graphTx := idempotentTx.Transaction.GetTransactionId()
 	committed := false
 	defer func() {
 		if !committed {
@@ -439,11 +462,108 @@ func (a *GraphActor) executeRealTransactionOnce(ctx context.Context, tx oracle.T
 			}
 		}
 	}
-	if err := client.CommitTransaction(ctx, graphTx); err != nil {
-		return err
+	var retryErr error
+	_, err = client.CommitIdempotentTransactionWithRetry(ctx, idempotentTx, mycel.IdempotentCommitRetryPolicy{
+		MaxAttempts: a.Profile.Retry.MaxAttempts,
+		Retryable: func(commitErr error) bool {
+			retryable := graphCommitRetryable(a.Profile.Retry, commitErr)
+			if retryable {
+				retryErr = commitErr
+			}
+			return retryable
+		},
+		Backoff: func(failedAttempt int) time.Duration {
+			delay := graphCommitRetryDelay(a.Profile.Retry, failedAttempt)
+			if a.Recorder == nil || retryErr == nil {
+				return delay
+			}
+			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{
+				Type:      "graph-transaction-commit-retry",
+				ActorID:   a.ID,
+				GroupName: a.GroupName,
+				Sequence:  tx.Sequence,
+				Payload: map[string]any{
+					"transactionId":  graphTx,
+					"idempotencyKey": idempotencyKey,
+					"failedAttempt":  failedAttempt,
+					"retryDelay":     delay.String(),
+					"errorCategory":  graphCommitRetryCategory(retryErr),
+					"error":          retryErr.Error(),
+				},
+			})
+			return delay
+		},
+	})
+	if err != nil {
+		if mycel.IsAmbiguousCommitError(err) && a.Recorder != nil {
+			unresolved := tx
+			unresolved.ErrorClass = graphCommitRetryCategory(err)
+			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{
+				Type:        "graph-transaction-commit-unresolved",
+				ActorID:     a.ID,
+				GroupName:   a.GroupName,
+				Sequence:    tx.Sequence,
+				Transaction: unresolved,
+				Payload: map[string]any{
+					"transactionId":  graphTx,
+					"idempotencyKey": idempotencyKey,
+					"errorCategory":  graphCommitRetryCategory(err),
+					"error":          err.Error(),
+				},
+			})
+		}
+		return fmt.Errorf("commit idempotent graph transaction: %w", err)
 	}
 	committed = true
 	return nil
+}
+
+func graphCommitIdempotencyKey(actorID string, sequence int64) string {
+	return "mycel-lab-graph-" + stableUUID(fmt.Sprintf("%s:%d", actorID, sequence))
+}
+
+func graphCommitRetryable(profile RetryProfile, err error) bool {
+	if err == nil || !mycel.IsAmbiguousCommitError(err) {
+		return false
+	}
+	category := strings.ToLower(graphCommitRetryCategory(err))
+	for _, allowed := range profile.RetryOn {
+		if category == strings.ToLower(strings.TrimSpace(allowed)) {
+			return true
+		}
+	}
+	return false
+}
+
+func graphCommitRetryCategory(err error) string {
+	if errors.Is(err, io.EOF) {
+		return "unavailable"
+	}
+	return ClassifyError(err)
+}
+
+func graphCommitRetryDelay(profile RetryProfile, failedAttempt int) time.Duration {
+	delay := profile.InitialBackoff.Duration
+	if delay <= 0 {
+		return 0
+	}
+	maximum := profile.MaxBackoff.Duration
+	for exponent := 1; exponent < failedAttempt; exponent++ {
+		if maximum > 0 && delay >= maximum {
+			return maximum
+		}
+		if delay >= time.Duration(1<<62) {
+			if maximum > 0 {
+				return maximum
+			}
+			return time.Duration(1<<63 - 1)
+		}
+		delay *= 2
+	}
+	if maximum > 0 && delay > maximum {
+		return maximum
+	}
+	return delay
 }
 
 func (a *GraphActor) dialClient(ctx context.Context, forceLogin bool) (*mycel.Client, error) {

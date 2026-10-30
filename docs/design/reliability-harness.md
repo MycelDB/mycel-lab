@@ -257,6 +257,19 @@ The operation unit is a graph transaction. Initial operation types:
 Each actor instance tracks its own known nodes and edges because each instance
 uses a separate space/domain in v1.
 
+Every generated transaction also receives a deterministic durable idempotency
+key derived from actor identity and transaction sequence before the transaction
+begins. If commit returns an ambiguous transport outcome such as `Unavailable`
+or a lost EOF response, bounded retries call commit again with the exact same
+transaction ID, key, space, and domain. The actor does not replay mutations or
+begin a replacement transaction. Only a successful original or idempotent
+replay response makes the transaction acknowledged and eligible for expected
+count accounting. A plain `io.EOF` is classified as unavailable for this
+commit-only path; other non-allowlisted errors still fail closed. An ambiguous
+commit that remains unresolved emits `graph-transaction-commit-unresolved`.
+Qualification requires zero such events, so retry exhaustion cannot be masked
+by unchanged node/edge counts or weaken the final graph oracle.
+
 ### Graph actor profile example
 
 ```yaml
