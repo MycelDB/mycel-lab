@@ -41,6 +41,7 @@ mycel-lab run scenario three-node-short-outage --confirm-destructive
 mycel-lab run scenario compose-smoke --dry-run
 mycel-lab run suite compose-cluster-validation --dry-run
 mycel-lab run suite k3d-cluster-validation --dry-run
+mycel-lab run suite k3d-graph-commit-restart-qualification --dry-run
 mycel-lab run suite k3d-raft-disruption --dry-run
 mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
@@ -57,6 +58,17 @@ mycel-lab run suite cluster-release-gate --dry-run
 mycel-lab run scenario compose-smoke --confirm-destructive
 mycel-lab run suite compose-cluster-validation --confirm-destructive
 mycel-lab run suite k3d-cluster-validation --confirm-destructive
+# Run the qualification suite three consecutive times against one reviewed digest before assigning a candidate number.
+# Set this to the complete docker.io/...@sha256:<64-hex-digest> identity under qualification.
+MYCEL_QUALIFICATION_IMAGE='docker.io/myceldb/mycel@sha256:<64-hex-digest>'
+(
+  set -eu
+  for run in 1 2 3; do
+    mycel-lab run suite k3d-graph-commit-restart-qualification --confirm-destructive \
+      --image "$MYCEL_QUALIFICATION_IMAGE" \
+      --artifact-root "/tmp/mycel-qualification/run-$run"
+  done
+)
 mycel-lab run suite k3d-raft-disruption --confirm-destructive
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --confirm-destructive
 # Override the scenario's baseline image for candidate validation.

@@ -249,6 +249,19 @@ def check_helper_images(
         require(not secret_locations, f"{workflow_name}: cluster gate must remain credential-free", failures)
 
 
+def check_ci_graph_commit_qualification(ci: str, failures: list[str]) -> None:
+    require(
+        "go test -count=100 ./internal/reliability/actors -run '^TestGraphCommitRetriesCommittedResponseLossWithSameIdentity$'" in ci,
+        "ci.yml: repeated committed-response-loss reconciliation regression is required",
+        failures,
+    )
+    require(
+        "k3d-graph-commit-restart-qualification" in ci,
+        "ci.yml: pre-candidate graph commit restart qualification dry-run is required",
+        failures,
+    )
+
+
 def check_release_amd64_preflight(release: str, failures: list[str]) -> None:
     release_job = job_block(release, "cluster-release-gate")
     require(release_job is not None, "release-gate.yml: exactly one cluster-release-gate job is required", failures)
@@ -306,6 +319,7 @@ def main() -> int:
     require(not secret_context_references(ci), "ci.yml: default CI must not consume secrets", failures)
     require("--dry-run" in ci and "--confirm-destructive" not in ci, "ci.yml: reliability execution must remain dry-run only", failures)
     require("compose-semantic-graph-contract" in ci, "ci.yml: deterministic semantic contract dry-run is required", failures)
+    check_ci_graph_commit_qualification(ci, failures)
     require("compose-procedure-inference-control-emulator" in ci, "ci.yml: protocol-emulator dry-run is required", failures)
     require("semantic-live-provider" in ci, "ci.yml: live-profile planning dry-run is required", failures)
     require("verifyArtifactSafety.py" in ci, "ci.yml: artifact safety verification is required", failures)

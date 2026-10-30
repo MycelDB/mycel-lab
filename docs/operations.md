@@ -177,6 +177,7 @@ backup/restore, and soak/release-gate entrypoints:
 ```sh
 mycel-lab run suite k3d-raft-disruption --dry-run
 mycel-lab run suite k3d-raft-sensitive-gate --dry-run
+mycel-lab run suite k3d-graph-commit-restart-qualification --dry-run
 mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
@@ -193,9 +194,21 @@ mycel-lab run suite cluster-release-gate --dry-run
 ```
 
 Destructive/operator variants use the same suite names with
-`--confirm-destructive`. Procedure-inference suites are credential-free but still
-modify disposable Compose/k3d state; issue #50 requires fresh approval before
-each real run. Before a destructive SGT7 or procedure-inference emulator run,
+`--confirm-destructive`. Before assigning a release-candidate number, freeze the
+reviewed Lab and daemon source identities and run
+`k3d-graph-commit-restart-qualification` three consecutive times against the
+same immutable daemon digest, supplied as a complete named `@sha256` reference,
+using separate artifact roots and fresh clusters. The suite rejects mutable or
+malformed image identities and requires clean daemon and harness provenance.
+Every member must have zero unresolved ambiguous graph commits and pass the
+authoritative final graph oracle, cleanup, and redaction checks. A source,
+workflow, image, or qualification-harness change
+resets all three members. Qualification is an entry criterion only: its results
+and approvals do not transfer to candidate acceptance gates.
+
+Procedure-inference suites are credential-free but still modify disposable
+Compose/k3d state; issue #50 requires fresh approval before each real run.
+Before a destructive SGT7 or procedure-inference emulator run,
 build or supply the exact emulator image declared by the scenarios. Acceptance
 runs use revision-labelled images and a built Lab binary so artifacts bind the
 executables to clean full source revisions:

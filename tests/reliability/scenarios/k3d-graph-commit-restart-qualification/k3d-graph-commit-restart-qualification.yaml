@@ -1,0 +1,72 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-graph-commit-restart-qualification
+  description: Pre-candidate graph commit reconciliation across a fresh k3d rolling-restart cluster.
+seed: 18181
+environment:
+  driver: k3d
+  namespace: mycel-lab
+  options:
+    clusterNamePrefix: mycel-lab
+    digestPinnedImagePolicy: node-pull
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - rolling-restart
+      - logs
+clusterRef: raft-3-node
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 3
+    rate:
+      mode: group-total
+      commitsPerSecond: 12
+  - name: readers
+    profileRef: gql-reader
+    count: 3
+    target:
+      actorGroups:
+        - graph-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 6
+phases:
+  - name: bootstrap-and-write
+    duration: 2s
+    assertions:
+      requireWorkloadProgress: true
+  - name: rolling-restart
+    duration: 1s
+    events:
+      - type: rolling-restart
+        target:
+          scope: cluster
+    outcome:
+      availability: expected-degradation
+  - name: post-restart-validation
+    duration: 2s
+    assertions:
+      requireConvergedCounts: true
+      requireWorkloadProgress: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 10m
+    healthConvergenceInterval: 5s
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+    requireNoUnresolvedGraphCommits: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: true

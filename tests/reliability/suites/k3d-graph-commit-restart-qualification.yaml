@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-graph-commit-restart-qualification
+  description: One credential-free pre-candidate k3d rolling-restart qualification member.
+scenarios:
+  - path: ../scenarios/k3d-graph-commit-restart-qualification/k3d-graph-commit-restart-qualification.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

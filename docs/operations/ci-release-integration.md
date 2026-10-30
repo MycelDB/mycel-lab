@@ -81,6 +81,20 @@ If a credential may have appeared in output or artifacts:
 7. do not retry the live run under the consumed approval;
 8. require fresh candidate/gate approval when the correction changes execution identity.
 
+## Pre-candidate qualification
+
+Do not assign a new release-candidate number immediately after changing Lab, workflow, daemon, or qualification infrastructure. First freeze the reviewed source and image identities and require all of the following:
+
+1. exact-head CI, including 100 consecutive deterministic committed-response-loss reconciliation tests;
+2. a credential-free dry-run of `k3d-graph-commit-restart-qualification`;
+3. three consecutive approved destructive executions of that suite against the same immutable daemon digest, supplied as a complete named `@sha256` reference, each using a fresh k3d cluster and a separate artifact root;
+4. zero unresolved ambiguous graph commits plus authoritative graph convergence, cleanup, redaction, and clean daemon/harness source-provenance success for every member; and
+5. independent review of the exact qualified heads.
+
+The graph actor retries only the commit RPC after an ambiguous transport outcome. It reuses the original transaction ID and durable idempotency key; it never replays graph mutations as a new transaction. Exhaustion remains a failure and the final oracle remains authoritative.
+
+Any source, workflow, image, harness, or qualification-policy change resets the qualification sequence. Qualification evidence is only an entry criterion for candidate construction. It does not transfer a gate result, approval, or publication authorization to the later candidate identity.
+
 ## Promotion policy
 
 Tier 2 live execution is manual and non-gating by default. Promoting it to scheduled or required status needs a measured reliability window, documented provider quota, explicit maintainer approval, and unchanged hard ceilings. A provider outage remains a failure or separately classified infrastructure result; it must never be rewritten as product success.
