@@ -618,6 +618,33 @@ expected edges = acknowledged createEdge operations
 
 A full graph-state shadow model is deferred.
 
+### Bounded finalization
+
+After phase execution, the runner performs actor shutdown, optional provider
+observation capture, final cluster assertions, the live graph oracle, scenario
+cleanup, and explicit port-forward shutdown as separately bounded stages. The
+forward remains available until scenario resources that use its daemon address
+are cleaned up. The runner writes `environment/finalization-stages.json` before
+entering each stage and updates that record on success or failure. Cluster
+status and health commands have per-command deadlines, and every graph
+assignment receives its own live-oracle deadline under the overall final-oracle
+bound. Stage supervision also enforces its deadline independently of an
+operation's cooperation with context cancellation.
+
+Artifact-producing supervised work uses scoped write gates. Finalization
+disables the actor recorder after actor shutdown and disables each supervised
+stage sink before timeout handling continues, so abandoned work cannot add or
+overwrite artifact or store evidence after terminal redaction. Scenario cleanup
+works on an isolated resource snapshot; if it remains in flight, failure
+cleanup records that state and does not launch a concurrent duplicate cleanup.
+
+A timeout is an authoritative run failure. The runner must not infer cluster
+health or graph convergence from completed phases, and it proceeds through the
+existing bounded failure-capture and mandatory cleanup path so `result.json`,
+`environment/post-run-cleanup.json`, and `redaction-scan.json` remain terminal
+evidence. Early-return port-forward and actor-shutdown fallbacks are bounded as
+well.
+
 ## Runtime event examples
 
 Acknowledged transaction:

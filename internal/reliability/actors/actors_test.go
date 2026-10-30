@@ -2,6 +2,7 @@ package actors
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
@@ -29,6 +30,35 @@ func TestInstanceSeedIsStable(t *testing.T) {
 	if first == third {
 		t.Fatalf("different instance produced same seed %d", first)
 	}
+}
+
+func TestStopAfterPartialStartOnlyStopsAttemptedActors(t *testing.T) {
+	scenario := spec.ResolvedScenario{ActorGroups: []spec.ResolvedActorGroup{{ActorGroupSpec: spec.ActorGroupSpec{Name: "writers", Count: 3}}}}
+	created := []*partialStartActor{{}, {startErr: errors.New("boom")}, {}}
+	scheduler := NewScheduler(scenario, func(_ spec.ResolvedActorGroup, index int, _ int64, _ spec.RateSpec) Actor {
+		return created[index]
+	})
+	if err := scheduler.Start(context.Background()); err == nil {
+		t.Fatal("Start() error=nil")
+	}
+	if err := scheduler.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error=%v", err)
+	}
+	if created[0].stopCalls != 1 || created[1].stopCalls != 1 || created[2].stopCalls != 0 {
+		t.Fatalf("stop calls=%d,%d,%d", created[0].stopCalls, created[1].stopCalls, created[2].stopCalls)
+	}
+}
+
+type partialStartActor struct {
+	startErr  error
+	stopCalls int
+}
+
+func (a *partialStartActor) Start(context.Context) error                     { return a.startErr }
+func (a *partialStartActor) UpdateRate(context.Context, spec.RateSpec) error { return nil }
+func (a *partialStartActor) Stop(context.Context) error {
+	a.stopCalls++
+	return nil
 }
 
 func TestPhaseRateOverridesApplyAndRestore(t *testing.T) {

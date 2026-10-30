@@ -13,6 +13,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Run finalization now independently bounds actor shutdown, provider-observation capture, cluster assertions, each live graph-oracle assignment, scenario cleanup, and explicit port-forward shutdown even when an operation ignores context cancellation; k3d forwarding remains active through scenario cleanup, late actor/store recording and abandoned artifact writers are disabled before terminal redaction, in-flight cleanup state is isolated without concurrent retries, and mandatory cleanup still produces terminal result and redaction artifacts.
 - Graph actors now reconcile ambiguous commit responses with bounded retries of the same durable transaction identity and idempotency key instead of treating every EOF as definitively uncommitted; CI repeats a deterministic committed-response-loss regression 100 times.
 - K3d readiness failures now retain bounded Kubernetes resources, pod descriptions, and namespace events before fail-closed image-provenance validation, so mandatory cleanup no longer erases the state needed to diagnose unready workloads.
 - K3d environments now support an explicit node-pull policy for digest-pinned registry images instead of passing multiarch index references through k3d's host-local image import path, while defaulting to local import for private and development image compatibility.

@@ -99,6 +99,9 @@ func runFinalClusterAssertions(ctx context.Context, sink *artifacts.Sink, scenar
 	var deadline time.Time
 	if required.RequireHealthyCluster && timeout > 0 {
 		deadline = time.Now().Add(timeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
 	for {
 		attemptTime := time.Now().UTC()
@@ -221,7 +224,9 @@ func durationFromMap(values map[string]any, key string, defaultValue time.Durati
 
 func runClusterNodeAssertion(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, node env.Node, expectedNodes int) clusterAssertionNodeReport {
 	report := clusterAssertionNodeReport{NodeName: node.Name, Resource: node.Resource}
-	statusOut, err := driver.Exec(ctx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: []string{"mycel", "--daemon-addr", "127.0.0.1:9091", "--username", provision.DefaultAdminUsername, "--password", provision.DefaultAdminPassword, "--output", "json", "cluster", "status"}})
+	statusCtx, statusCancel := context.WithTimeout(ctx, 15*time.Second)
+	statusOut, err := driver.Exec(statusCtx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: []string{"mycel", "--daemon-addr", "127.0.0.1:9091", "--username", provision.DefaultAdminUsername, "--password", provision.DefaultAdminPassword, "--output", "json", "cluster", "status"}})
+	statusCancel()
 	if err != nil {
 		report.Errors = append(report.Errors, "cluster status command failed: "+err.Error())
 		return report
@@ -230,7 +235,9 @@ func runClusterNodeAssertion(ctx context.Context, driver env.EnvironmentDriver, 
 		report.Errors = append(report.Errors, "parse cluster status: "+err.Error())
 		return report
 	}
-	healthOut, err := driver.Exec(ctx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: []string{"mycel", "--daemon-addr", "127.0.0.1:9091", "--username", provision.DefaultAdminUsername, "--password", provision.DefaultAdminPassword, "--output", "json", "cluster", "health"}})
+	healthCtx, healthCancel := context.WithTimeout(ctx, 15*time.Second)
+	healthOut, err := driver.Exec(healthCtx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: []string{"mycel", "--daemon-addr", "127.0.0.1:9091", "--username", provision.DefaultAdminUsername, "--password", provision.DefaultAdminPassword, "--output", "json", "cluster", "health"}})
+	healthCancel()
 	if err != nil {
 		report.Errors = append(report.Errors, "cluster health command failed: "+err.Error())
 		return report

@@ -83,6 +83,21 @@ Live profiles resolve credentials only for non-dry-runs. Required provider-owned
 
 The resolved redacted profile and exact source SHA-256 are written under `provider/`. Finalization always writes `redaction-scan.json`; any prohibited-value finding or scan failure fails the run. See [Provider profiles, budgets, and artifact safety](design/provider-profiles.md).
 
+Finalization is fail-closed and bounded. The runner records actor shutdown,
+provider-observation capture when enabled, cluster assertions, the final graph
+oracle, scenario cleanup, and explicit port-forward shutdown in
+`environment/finalization-stages.json`. K3d forwarding remains active through
+scenario cleanup. Stage supervision is independent of an operation's
+context-cancellation behavior; cluster status/health probes and individual
+graph-assignment oracle reads are independently supervised as well. After actor
+shutdown begins, late actor recording is disabled; timed-out artifact-producing
+work loses write access before terminal redaction, and an in-flight scenario
+cleanup is isolated rather than retried concurrently. A
+timed-out stage fails the run and enters bounded failure capture and mandatory
+cleanup; completed phases never substitute for a missing final oracle.
+Operators should preserve the stage record, cluster report, cleanup evidence,
+result, and redaction scan together.
+
 Mycel Lab supports three initial environment drivers:
 
 - `dry-run` — validate planning, rendering, phases, actors, and artifacts without external mutation;
