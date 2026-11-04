@@ -115,7 +115,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set +e
-          ./bin/mycel-lab run suite semantic-live-provider \
+          ./bin/mycel-lab run suite semantic-graph-index-live \
             --confirm-destructive \
             --image "$DAEMON_IMAGE" \
             --provider-profile tests/reliability/provider-profiles/openai-compatible-live.yaml \

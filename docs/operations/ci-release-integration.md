@@ -10,7 +10,7 @@ Mycel Lab SGT10 separates credential-free pull-request validation from explicitl
 | `Protected semantic live acceptance` | `workflow_dispatch` | Tier 2 manual live | `semantic-live` environment | disposable Compose resources and bounded provider calls |
 | `Protected cluster release gate` | `workflow_dispatch` | release gate | none | disposable Compose and k3d resources |
 
-Default CI runs unit, race, vet, documentation, workflow-policy, and build checks. It also dry-runs the deterministic semantic contract, protocol-emulator procedure control, recovery, backup/restore, and live-profile plans. Dry-run evidence is uploaded only after every retained run reports a clean redaction scan.
+Default CI runs unit, race, vet, documentation, workflow-policy, and build checks. It also dry-runs the credential-free semantic graph-index release-gate aggregate, protocol-emulator procedure control, recovery, backup/restore, and live-profile plans. Dry-run evidence is uploaded only after every retained run reports a clean redaction scan.
 
 The live and release-gate workflows share one non-cancelling concurrency group. They cannot overlap or be silently cancelled after destructive execution begins.
 
@@ -99,4 +99,4 @@ Any source, workflow, image, harness, or qualification-policy change resets the 
 
 Tier 2 live execution is manual and non-gating by default. Promoting it to scheduled or required status needs a measured reliability window, documented provider quota, explicit maintainer approval, and unchanged hard ceilings. A provider outage remains a failure or separately classified infrastructure result; it must never be rewritten as product success.
 
-Stable release tags and publication are outside these workflows. Passing SGT10 or the cluster release gate does not itself authorize tagging, publication, issue closure, or Homebrew updates.
+Stable release tags and publication are outside these workflows. Passing SGT10, the semantic graph-index release-gate aggregate, or the cluster release gate does not itself authorize tagging, publication, issue closure, or Homebrew updates.

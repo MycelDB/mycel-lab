@@ -856,7 +856,7 @@ Repositories: `mycel-lab`; connector/pipeline/provenance additions follow `mycel
 
 Risk: high; external cost and confidentiality
 
-The direct OpenAI-compatible embedding tranche is implemented as `semantic-live-provider` / `compose-semantic-live-provider`. It performs authenticated capability discovery before credential lookup, provisions a daemon-owned budget, asserts a synthetic ranking invariant, and reconciles fixed-snapshot immutable attempt events. It is manually initiated and non-gating; no live execution has been performed or authorized. Later composition, routing, migration, and cross-provider checks remain capability-gated.
+The direct OpenAI-compatible embedding tranche is implemented as `semantic-graph-index-live` (legacy alias `semantic-live-provider`) / `compose-semantic-live-provider`. It performs authenticated capability discovery before credential lookup, provisions a daemon-owned budget, asserts a synthetic ranking invariant, and reconciles fixed-snapshot immutable attempt events. It is manually initiated and non-gating; no live execution has been performed or authorized. Later composition, routing, migration, and cross-provider checks remain capability-gated.
 
 Rules:
 

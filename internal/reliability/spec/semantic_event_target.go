@@ -120,6 +120,7 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 			"minimumScore": optional(finiteSemanticNumber), "filterNodeLabels": optional(semanticStringList),
 			"filterNodeIds": optional(semanticStringList), "filterProperties": optional(semanticStringMap),
 			"expectFailureCode": stringField, "allPages": boolField, "allowWarnings": boolField,
+			"timeout": optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
 			"expectedResultCount": nonNegativeInt, "requireProvenance": boolField, "requireActualRoute": boolField,
 			"expectedNodeIds": optional(semanticStringList), "forbiddenNodeIds": optional(semanticStringList),
 			"expectedScores": optional(semanticNumberList), "scoreTolerance": optional(nonNegativeSemanticNumber),
@@ -149,6 +150,16 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 	case "semantic-provider-budget-reconcile":
 		return map[string]semanticTargetField{
 			"minimumAttempts": nonNegativeInt, "requireTerminal": boolField,
+		}, nil
+	case "semantic-provider-emulator-assert":
+		return map[string]semanticTargetField{
+			"minimumRequests": optional(semanticInteger(0, 100000)), "maximumRequests": optional(semanticInteger(0, 100000)),
+			"maximumBatchItems": optional(semanticInteger(1, 1024)), "maximumAttemptsPerInput": optional(semanticInteger(1, 1024)),
+			"requireSingleItem": boolField, "authorization": optional(semanticProviderAuthorization), "requireCanceled": boolField,
+			"expectedOutcomes": optional(semanticIntegerMap), "expectedStatuses": optional(semanticIntegerMap),
+			"minimumOutcomes": optional(semanticIntegerMap), "minimumStatuses": optional(semanticIntegerMap),
+			"minimumResponseModels": optional(semanticIntegerMap), "requiredProviderRequestIds": optional(semanticStringList),
+			"expectedModels": optional(semanticStringList),
 		}, nil
 	case "semantic-rebuild":
 		fields := map[string]semanticTargetField{
@@ -243,6 +254,35 @@ func semanticFloat64(value any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func semanticProviderAuthorization(value any) error {
+	text, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("must be a string")
+	}
+	switch strings.TrimSpace(text) {
+	case "present", "absent", "":
+		return nil
+	default:
+		return fmt.Errorf("must be present or absent")
+	}
+}
+
+func semanticIntegerMap(value any) error {
+	mapping, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("must be an object")
+	}
+	for key, item := range mapping {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("must not contain an empty key")
+		}
+		if err := semanticInteger(0, math.MaxInt32)(item); err != nil {
+			return fmt.Errorf("value for %q: %w", key, err)
+		}
+	}
+	return nil
 }
 
 func semanticStringList(value any) error {

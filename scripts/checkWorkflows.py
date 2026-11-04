@@ -60,7 +60,7 @@ RELEASE_DESTRUCTIVE_RUN = re.compile(
 MINIO_HELPER_IMAGE = "docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff"
 MC_HELPER_IMAGE = "docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0"
 PROTECTED_WORKFLOW_SHA256 = {
-    "semantic-live.yml": "d1e1d5383374909989f390e4ea02d883d0ab51df1c16bedfb45115979d1ead05",
+    "semantic-live.yml": "d21e1f117a7c825421cd80eff608d064bb78d1f1c11c755094382d75bab181ce",
     "release-gate.yml": "2b9d5a680243617db7c4a78f4f85009762f0adc663c87fd639061438b6fbc8ca",
 }
 
@@ -107,7 +107,7 @@ LIVE_RUN_STEP = f'''      - name: Run approved live scenario once
           OPENAI_API_KEY: ${{{{ secrets.OPENAI_API_KEY }}}}
         run: |
           set +e
-          ./bin/mycel-lab run suite semantic-live-provider \\
+          ./bin/mycel-lab run suite semantic-graph-index-live \\
             --confirm-destructive \\
             --image "$DAEMON_IMAGE" \\
             --provider-profile tests/reliability/provider-profiles/openai-compatible-live.yaml \\
@@ -218,7 +218,7 @@ def check_helper_images(
     expected_preflight = helper_preflight_block(architecture)
     preflight_indexes = [index for index, step in enumerate(steps) if step == expected_preflight]
     run_indexes = [index for index, step in enumerate(steps) if step == run_step]
-    suite_target = "semantic-live-provider" if job_name == "live-semantic" else "cluster-release-gate"
+    suite_target = "semantic-graph-index-live" if job_name == "live-semantic" else "cluster-release-gate"
     normalized_workflow = normalize_shell_equivalent(workflow)
     protected_suite_invocations = normalized_workflow.count(f"./bin/mycel-lab run suite {suite_target}")
     destructive_confirmations = normalized_workflow.count("--confirm-destructive")
@@ -318,10 +318,10 @@ def main() -> int:
     require("pull_request:" in ci and "branches: [develop, main]" in ci, "ci.yml: PR and protected-branch triggers are required", failures)
     require(not secret_context_references(ci), "ci.yml: default CI must not consume secrets", failures)
     require("--dry-run" in ci and "--confirm-destructive" not in ci, "ci.yml: reliability execution must remain dry-run only", failures)
-    require("compose-semantic-graph-contract" in ci, "ci.yml: deterministic semantic contract dry-run is required", failures)
+    require("semantic-graph-index-release-gate" in ci, "ci.yml: semantic release-gate dry-run is required", failures)
     check_ci_graph_commit_qualification(ci, failures)
-    require("compose-procedure-inference-control-emulator" in ci, "ci.yml: protocol-emulator dry-run is required", failures)
-    require("semantic-live-provider" in ci, "ci.yml: live-profile planning dry-run is required", failures)
+    require("compose-procedure-inference-control-emulator" in ci, "ci.yml: procedure protocol-emulator dry-run is required", failures)
+    require("semantic-graph-index-live" in ci, "ci.yml: live-profile planning dry-run is required", failures)
     require("verifyArtifactSafety.py" in ci, "ci.yml: artifact safety verification is required", failures)
 
     live = texts.get("semantic-live.yml", "")

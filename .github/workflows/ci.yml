@@ -96,15 +96,16 @@ jobs:
           ARTIFACT_ROOT: ${{ runner.temp }}/mycel-lab-sgt10-dry-runs
         run: |
           set -euo pipefail
-          ./bin/mycel-lab run suite compose-semantic-graph-contract \
+          ./bin/mycel-lab run suite semantic-graph-index-release-gate \
             --dry-run \
             --image local/mycel:sgt10-ci-dry-run \
-            --artifact-root "$ARTIFACT_ROOT/semantic-contract"
+            --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
+            --artifact-root "$ARTIFACT_ROOT/semantic-release-gate"
           ./bin/mycel-lab run suite compose-procedure-inference-control-emulator \
             --dry-run \
             --image local/mycel:sgt10-ci-dry-run \
             --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
-            --artifact-root "$ARTIFACT_ROOT/protocol-emulator"
+            --artifact-root "$ARTIFACT_ROOT/procedure-protocol-emulator"
           ./bin/mycel-lab run suite k3d-graph-commit-restart-qualification \
             --dry-run \
             --image local/mycel:sgt10-ci-dry-run \
@@ -119,7 +120,7 @@ jobs:
             --image local/mycel:sgt10-ci-dry-run \
             --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
             --artifact-root "$ARTIFACT_ROOT/backup-restore"
-          ./bin/mycel-lab run suite semantic-live-provider \
+          ./bin/mycel-lab run suite semantic-graph-index-live \
             --dry-run \
             --image local/mycel:sgt10-ci-dry-run \
             --artifact-root "$ARTIFACT_ROOT/live-profile"

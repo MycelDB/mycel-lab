@@ -228,6 +228,7 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 			return nil, errors.New("semantic rule projection is unavailable")
 		}
 		rule.Source.IncludeProperties = stringSliceTarget(target, "includeProperties")
+		rule.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		callCtx, cancel = admin.AuthCallContext(ctx)
 		updated, err := admin.Semantic.UpdateSemanticRule(callCtx, &adminv1.UpdateSemanticRuleRequest{SpaceId: semanticResources.SpaceID, SemanticRuleId: semanticResources.SemanticRuleID, Rule: rule})
 		cancel()
@@ -1163,7 +1164,28 @@ func executeSemanticUnauthorizedSearch(ctx context.Context, resources *provision
 	return result, nil
 }
 
+func semanticSearchRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	code := status.Code(err)
+	if code == codes.Unavailable || code == codes.DeadlineExceeded {
+		return true
+	}
+	if code == codes.Internal {
+		message := strings.ToLower(err.Error())
+		return strings.Contains(message, "not ready") || strings.Contains(message, "semantic maintenance request failed")
+	}
+	return false
+}
+
 func executeSemanticSearchAssertion(ctx context.Context, resources *provision.ScenarioResources, target map[string]any) (SemanticSearchEvidence, error) {
+	searchTimeout := durationTarget(target, "timeout", 0)
+	if searchTimeout > 0 {
+		searchCtx, cancel := context.WithTimeout(ctx, searchTimeout)
+		defer cancel()
+		ctx = searchCtx
+	}
 	client, assignment, err := dialSemanticActor(ctx, resources)
 	if err != nil {
 		return SemanticSearchEvidence{}, err
@@ -1201,43 +1223,60 @@ func executeSemanticSearchAssertion(ctx context.Context, resources *provision.Sc
 	var warnings []string
 	filterMode := ""
 	var examinedCandidates, eligibleCandidates int32
-	seenRecords := map[string]bool{}
-	for page := 0; ; page++ {
-		if page >= 1000 {
-			return SemanticSearchEvidence{}, errors.New("semantic search page limit reached")
-		}
-		callCtx, cancel := client.AuthCallContext(ctx)
-		response, callErr := client.Semantic.SemanticSearch(callCtx, request)
-		cancel()
-		if callErr != nil {
-			expectedCode := strings.TrimSpace(fmt.Sprint(target["expectFailureCode"]))
-			actualCode := status.Code(callErr).String()
-			if expectedCode != "" && expectedCode != "<nil>" && strings.EqualFold(expectedCode, actualCode) {
-				return SemanticSearchEvidence{Query: query, RejectedCode: actualCode}, nil
+	searchPollInterval := durationTarget(target, "pollInterval", 250*time.Millisecond)
+retrySearch:
+	for {
+		searchResults = nil
+		warnings = nil
+		filterMode = ""
+		examinedCandidates = 0
+		eligibleCandidates = 0
+		seenRecords := map[string]bool{}
+		request.PageToken = nil
+		for page := 0; ; page++ {
+			if page >= 1000 {
+				return SemanticSearchEvidence{}, errors.New("semantic search page limit reached")
 			}
-			return SemanticSearchEvidence{}, fmt.Errorf("direct semantic search: %w", callErr)
-		}
-		warnings = append(warnings, response.GetWarnings()...)
-		if response.GetFilterExecutionMode() != "" {
-			if filterMode != "" && filterMode != response.GetFilterExecutionMode() {
-				return SemanticSearchEvidence{}, errors.New("semantic filter execution mode changed between pages")
+			callCtx, cancel := client.AuthCallContext(ctx)
+			response, callErr := client.Semantic.SemanticSearch(callCtx, request)
+			cancel()
+			if callErr != nil {
+				expectedCode := strings.TrimSpace(fmt.Sprint(target["expectFailureCode"]))
+				actualCode := status.Code(callErr).String()
+				if expectedCode != "" && expectedCode != "<nil>" && strings.EqualFold(expectedCode, actualCode) {
+					return SemanticSearchEvidence{Query: query, RejectedCode: actualCode}, nil
+				}
+				if searchTimeout > 0 && semanticSearchRetryable(callErr) && ctx.Err() == nil {
+					if err := sleepContext(ctx, searchPollInterval); err != nil {
+						return SemanticSearchEvidence{}, err
+					}
+					continue retrySearch
+				}
+				return SemanticSearchEvidence{}, fmt.Errorf("direct semantic search: %w", callErr)
 			}
-			filterMode = response.GetFilterExecutionMode()
-		}
-		examinedCandidates = response.GetExaminedSemanticCandidates()
-		eligibleCandidates = response.GetEligibleSemanticCandidates()
-		for _, item := range response.GetResults() {
-			if seenRecords[item.GetRecordId()] {
-				return SemanticSearchEvidence{}, fmt.Errorf("semantic pagination returned duplicate record %q", item.GetRecordId())
+			warnings = append(warnings, response.GetWarnings()...)
+			if response.GetFilterExecutionMode() != "" {
+				if filterMode != "" && filterMode != response.GetFilterExecutionMode() {
+					return SemanticSearchEvidence{}, errors.New("semantic filter execution mode changed between pages")
+				}
+				filterMode = response.GetFilterExecutionMode()
 			}
-			seenRecords[item.GetRecordId()] = true
-			searchResults = append(searchResults, item)
+			examinedCandidates = response.GetExaminedSemanticCandidates()
+			eligibleCandidates = response.GetEligibleSemanticCandidates()
+			for _, item := range response.GetResults() {
+				if seenRecords[item.GetRecordId()] {
+					return SemanticSearchEvidence{}, fmt.Errorf("semantic pagination returned duplicate record %q", item.GetRecordId())
+				}
+				seenRecords[item.GetRecordId()] = true
+				searchResults = append(searchResults, item)
+			}
+			next := strings.TrimSpace(response.GetNextPageToken())
+			if next == "" || !boolTarget(target, "allPages", false) {
+				break
+			}
+			request.PageToken = proto.String(next)
 		}
-		next := strings.TrimSpace(response.GetNextPageToken())
-		if next == "" || !boolTarget(target, "allPages", false) {
-			break
-		}
-		request.PageToken = proto.String(next)
+		break
 	}
 	if expectedCode := strings.TrimSpace(fmt.Sprint(target["expectFailureCode"])); expectedCode != "" && expectedCode != "<nil>" {
 		return SemanticSearchEvidence{Query: query, Results: make([]SemanticSearchResultItem, 0, len(searchResults)), Warnings: warnings}, fmt.Errorf("semantic search succeeded, want failure code %s", expectedCode)
