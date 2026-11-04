@@ -1,0 +1,13 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: semantic-graph-index-release-gate
+  description: Credential-free semantic graph-index release-gate aggregate for deterministic contract, recovery, and protocol-emulator coverage.
+scenarios:
+  - path: ../scenarios/compose-semantic-graph-contract/compose-semantic-graph-contract.yaml
+  - path: ../scenarios/compose-semantic-graph-recovery/compose-semantic-graph-recovery.yaml
+  - path: ../scenarios/compose-semantic-openai-emulator/compose-semantic-openai-emulator.yaml
+execution:
+  mode: sequential
+  parallelism: 1
+  stopOnFailure: true

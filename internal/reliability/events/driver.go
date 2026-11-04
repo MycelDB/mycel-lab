@@ -221,6 +221,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "procedure-inference-emulator-assert":
 		result, err := executeSemanticProviderEmulatorAssert(ctx, r.Driver, r.Environment, event.Target)
 		return map[string]any{"procedureInferenceEmulator": result}, err
+	case "semantic-provider-emulator-assert":
+		result, err := executeSemanticProviderEmulatorAssert(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"semanticProviderEmulator": result}, err
 	case "commonfolio-automation-seed", "commonfolio-automation-diagnostics":
 		result, err := executeCommonFolioAutomationEvent(ctx, r.Driver, r.Environment, r.Resources, event.Type, event.Target)
 		return map[string]any{"commonfolioAutomation": result}, err

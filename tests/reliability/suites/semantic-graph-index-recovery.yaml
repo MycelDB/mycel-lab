@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: semantic-graph-index-recovery
+  description: Canonical credential-free deterministic semantic graph-index recovery, restart persistence, rebuild, and delta catch-up suite.
+scenarios:
+  - path: ../scenarios/compose-semantic-graph-recovery/compose-semantic-graph-recovery.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

@@ -1,0 +1,10 @@
+services:
+  myceld-a:
+    ports:
+      - "19791:9091"
+  myceld-b:
+    ports:
+      - "19792:9091"
+  myceld-c:
+    ports:
+      - "19793:9091"

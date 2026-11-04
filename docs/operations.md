@@ -298,9 +298,58 @@ mycel-lab run suite-file tests/reliability/suites/raft-reliability-baseline.yaml
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```
 
-Suites execute scenarios sequentially and honor `stopOnFailure`. Use `--image`
-to replace every resolved scenario's daemon image while preserving the rest of
-the scenario, which supports exact A/B candidate validation. For example:
+Suites execute scenarios sequentially and honor `stopOnFailure`. The canonical semantic graph-index suites for #46 are:
+
+- `semantic-graph-index-contract` — Tranche A contract/lifecycle convergence.
+- `semantic-graph-index-recovery` — Tranche B restart persistence, rebuild, and
+  delta catch-up.
+- `semantic-graph-index-protocol` — Tranche C OpenAI-compatible provider
+  protocol-emulator coverage with sanitized observation evidence.
+- `semantic-graph-index-live` — Tranche D manually gated live-provider
+  coverage with bounded budgets and invariant-based ranking.
+- `semantic-graph-index-release-gate` — Tranche E credential-free aggregate of
+  contract, recovery, and protocol-emulator coverage for release qualification.
+
+They currently run Compose-backed deterministic, emulator, or manually gated live-provider scenarios:
+
+```sh
+mycel-lab run suite semantic-graph-index-contract --dry-run
+mycel-lab run suite semantic-graph-index-contract \
+  --confirm-destructive \
+  --image myceldb/mycel:<candidate>
+
+mycel-lab run suite semantic-graph-index-recovery --dry-run
+mycel-lab run suite semantic-graph-index-recovery \
+  --confirm-destructive \
+  --image myceldb/mycel:<candidate>
+
+mycel-lab run suite semantic-graph-index-protocol --dry-run
+mycel-lab run suite semantic-graph-index-protocol \
+  --confirm-destructive \
+  --image myceldb/mycel:<candidate>
+
+mycel-lab run suite semantic-graph-index-release-gate --dry-run
+mycel-lab run suite semantic-graph-index-release-gate \
+  --confirm-destructive \
+  --image myceldb/mycel:<candidate>
+
+mycel-lab run suite semantic-graph-index-live --dry-run
+OPENAI_API_KEY=<approved-key> \
+  mycel-lab run suite semantic-graph-index-live \
+  --confirm-destructive \
+  --image myceldb/mycel:<candidate>
+```
+
+`semantic-graph-index-release-gate` is credential-free and intentionally excludes
+live-provider credentials. `semantic-graph-index-live` is manual-only: dry-run
+performs no credential lookup and no provider call; destructive execution
+requires an approved daemon image, explicit operator approval, an approved
+outbound provider route/budget, and an operator-provided live provider
+credential.
+
+Use `--image` to replace every resolved scenario's daemon image while preserving
+the rest of the scenario, which supports exact A/B candidate validation. For
+example:
 
 ```sh
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery \

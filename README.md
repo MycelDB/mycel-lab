@@ -12,6 +12,8 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Mycel Lab model](docs/design/model.md)
 - [Environment driver abstraction design](docs/design/environment-drivers.md)
 - [Provider profiles, budgets, and artifact safety](docs/design/provider-profiles.md)
+- [Semantic graph-index reliability suites](docs/design/semantic-graph-index-reliability-suites.md)
+- [Semantic suite implementation and validation](docs/implementation/semantic-graph-index-reliability-suites-plan.md)
 - [Structured reliability harness implementation plan](docs/implementation/reliability-harness-implementation-plan.md)
 - [Environment driver abstraction implementation plan](docs/implementation/environment-driver-abstraction-plan.md)
 - [MycelDB system integration migration plan](docs/implementation/system-integration-migration-plan.md)
@@ -49,6 +51,8 @@ mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --dry-run
+mycel-lab run suite semantic-graph-index-release-gate --dry-run
+mycel-lab run suite semantic-graph-index-live --dry-run
 mycel-lab run suite compose-procedure-inference-control-emulator --dry-run
 mycel-lab run suite k3d-procedure-inference-recovery --dry-run
 mycel-lab run suite k3d-procedure-inference-backup-restore --dry-run

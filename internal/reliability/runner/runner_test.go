@@ -931,6 +931,109 @@ func TestAllReliabilitySuiteFilesDryRun(t *testing.T) {
 	}
 }
 
+func TestSemanticGraphIndexContractSuiteCanonicalNameDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-contract.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-contract" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-contract", result.SuiteName)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("scenario count=%d want 1", len(result.Results))
+	}
+	if got := result.Results[0].ScenarioName; got != "compose-semantic-graph-contract" {
+		t.Fatalf("ScenarioName=%q want compose-semantic-graph-contract", got)
+	}
+	if result.Results[0].Status != RunPassed {
+		t.Fatalf("scenario result=%+v", result.Results[0])
+	}
+}
+
+func TestSemanticGraphIndexRecoverySuiteCanonicalNameDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-recovery.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-recovery" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-recovery", result.SuiteName)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("scenario count=%d want 1", len(result.Results))
+	}
+	if got := result.Results[0].ScenarioName; got != "compose-semantic-graph-recovery" {
+		t.Fatalf("ScenarioName=%q want compose-semantic-graph-recovery", got)
+	}
+	if result.Results[0].Status != RunPassed {
+		t.Fatalf("scenario result=%+v", result.Results[0])
+	}
+}
+
+func TestSemanticGraphIndexProtocolSuiteCanonicalNameDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-protocol.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-protocol" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-protocol", result.SuiteName)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("scenario count=%d want 1", len(result.Results))
+	}
+	if got := result.Results[0].ScenarioName; got != "compose-semantic-openai-emulator" {
+		t.Fatalf("ScenarioName=%q want compose-semantic-openai-emulator", got)
+	}
+	if result.Results[0].Status != RunPassed {
+		t.Fatalf("scenario result=%+v", result.Results[0])
+	}
+}
+
+func TestSemanticGraphIndexLiveSuiteCanonicalNameDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-live.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-live" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-live", result.SuiteName)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("scenario count=%d want 1", len(result.Results))
+	}
+	if got := result.Results[0].ScenarioName; got != "compose-semantic-live-provider" {
+		t.Fatalf("ScenarioName=%q want compose-semantic-live-provider", got)
+	}
+	if result.Results[0].Status != RunPassed {
+		t.Fatalf("scenario result=%+v", result.Results[0])
+	}
+}
+
+func TestSemanticGraphIndexReleaseGateSuiteDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-release-gate.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-release-gate" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-release-gate", result.SuiteName)
+	}
+	want := []string{"compose-semantic-graph-contract", "compose-semantic-graph-recovery", "compose-semantic-openai-emulator"}
+	if len(result.Results) != len(want) {
+		t.Fatalf("scenario count=%d want %d", len(result.Results), len(want))
+	}
+	for index, scenario := range want {
+		if got := result.Results[index].ScenarioName; got != scenario {
+			t.Fatalf("result[%d].ScenarioName=%q want %q", index, got, scenario)
+		}
+		if result.Results[index].Status != RunPassed {
+			t.Fatalf("result[%d]=%+v", index, result.Results[index])
+		}
+	}
+}
+
 func TestFinalClusterAssertionsPassForHealthySharedIdentity(t *testing.T) {
 	sink, err := artifacts.NewSink(t.TempDir())
 	if err != nil {
