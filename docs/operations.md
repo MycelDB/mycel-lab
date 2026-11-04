@@ -301,14 +301,27 @@ mycel-lab run suite raft-reliability-baseline --dry-run
 Suites execute scenarios sequentially and honor `stopOnFailure`. The canonical semantic graph-index suites for #46 are:
 
 - `semantic-graph-index-contract` — Tranche A contract/lifecycle convergence.
-- `semantic-graph-index-recovery` — Tranche B restart persistence, rebuild, and
-  delta catch-up.
+- `semantic-graph-index-recovery` — Tranche B restart persistence, rebuild,
+  delta catch-up, and controlled retained pending-work resumption.
 - `semantic-graph-index-protocol` — Tranche C OpenAI-compatible provider
   protocol-emulator coverage with sanitized observation evidence.
 - `semantic-graph-index-live` — Tranche D manually gated live-provider
   coverage with bounded budgets and invariant-based ranking.
 - `semantic-graph-index-release-gate` — Tranche E credential-free aggregate of
-  contract, recovery, and protocol-emulator coverage for release qualification.
+  contract, recovery, pending-work restart, and protocol-emulator definitions for
+  release qualification (four scenarios / 25 phases; fresh acceptance required).
+
+Canonical semantic scenarios now default to the immutable **v0.21.4** index
+`docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7`.
+This is a target selection, not a transferred qualification result. The earlier
+clean v0.21.3 three-scenario pass does not qualify this expanded aggregate.
+
+The [pending-work restart scenario](../tests/reliability/scenarios/compose-semantic-pending-restart/compose-semantic-pending-restart.md)
+uses deliberately disabled background scheduling to capture durable pending work.
+Post-restart `semantic-work-assert` comparisons are read-only and cannot analyze
+or reconstruct a missing queue; normal public maintenance resumes only after the
+preserved work ID, generation, revision range, and attempts are verified. This is
+not automatic/in-flight provider recovery or out-of-order completion proof.
 
 They currently run Compose-backed deterministic, emulator, or manually gated live-provider scenarios:
 

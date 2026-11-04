@@ -13,6 +13,7 @@ environment:
       - ../mycel/tests/compose/cluster/compose.yml
       - tests/compose/semantic-protocol-ports.yml
     projectNamePrefix: mycel-lab-semantic-protocol
+    imageOverride: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
     providerEmulatorImage: local/mycel-provider-emulator:dev
     serviceNames:
       - myceld-a
@@ -29,6 +30,8 @@ environment:
       - logs
       - provider-emulator
 clusterRef: raft-3-node
+clusterOverrides:
+  image: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
 actorGroups:
   - name: semantic-controller
     profileRef: semantic-controller

@@ -1,0 +1,13 @@
+# Controlled pending-work boundary for the dedicated durability scenario only.
+# Public Analyze/Process RPCs remain available; background scheduling is disabled
+# so neither a timer nor a restarted replica can consume work before capture.
+services:
+  myceld-a:
+    environment:
+      MYCELD_SEMANTIC_MAINTENANCE_ENABLED: "false"
+  myceld-b:
+    environment:
+      MYCELD_SEMANTIC_MAINTENANCE_ENABLED: "false"
+  myceld-c:
+    environment:
+      MYCELD_SEMANTIC_MAINTENANCE_ENABLED: "false"

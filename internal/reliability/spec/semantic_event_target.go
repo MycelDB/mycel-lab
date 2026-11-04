@@ -39,6 +39,14 @@ func ValidateSemanticEventTarget(eventType string, target map[string]any) error 
 			return fmt.Errorf("%s target.%s: %w", eventType, key, err)
 		}
 	}
+	if eventType == "semantic-work-assert" && target["analyze"] == true {
+		if _, preserving := target["expectWorkFrom"]; preserving {
+			return fmt.Errorf("semantic-work-assert preservation checks must not analyze or reconstruct work")
+		}
+		if target["expectedStatus"] != "pending" {
+			return fmt.Errorf("semantic-work-assert analysis is allowed only when capturing pending work")
+		}
+	}
 	if eventType == "semantic-rebuild" {
 		if nested, ok := target["concurrentMutation"]; ok {
 			mutation, _ := nested.(map[string]any)
@@ -110,6 +118,15 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 			"force": boolField, "limit": optional(semanticInteger(1, 4096)), "nodeIds": optional(semanticStringList),
 			"expectedSelected": nonNegativeInt, "minimumGenerated": nonNegativeInt,
 		}, nil
+	case "semantic-work-assert":
+		return map[string]semanticTargetField{
+			"nodeId": required(canonicalSemanticUUID), "expectedStatus": required(semanticWorkStatus),
+			"expectRevisionFrom": required(semanticCaptureName),
+			"captureWorkAs":      optional(semanticCaptureName), "expectWorkFrom": optional(semanticCaptureName),
+			"analyze": boolField, "expectBackgroundMaintenanceEnabled": boolField,
+			"expectedAttemptCount": optional(semanticInteger(0, 4096)),
+			"timeout":              optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
+		}, nil
 	case "semantic-maintenance-await":
 		return map[string]semanticTargetField{
 			"timeout": optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
@@ -172,6 +189,62 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 	default:
 		return nil, fmt.Errorf("unsupported semantic event type %q", eventType)
 	}
+}
+
+func canonicalSemanticUUID(value any) error {
+	text, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("must be a canonical nonzero UUID")
+	}
+	if !IsCanonicalSemanticUUID(text) {
+		return fmt.Errorf("must be a canonical nonzero UUID")
+	}
+	return nil
+}
+
+// IsCanonicalSemanticUUID accepts lowercase, nonzero UUID text without adding
+// a dependency or accepting UUID URNs, braces, aliases, or surrounding spaces.
+func IsCanonicalSemanticUUID(text string) bool {
+	if len(text) != 36 {
+		return false
+	}
+	nonzero := false
+	for index, char := range text {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if char != '-' {
+				return false
+			}
+			continue
+		}
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+			return false
+		}
+		if char != '0' {
+			nonzero = true
+		}
+	}
+	return nonzero
+}
+
+func semanticCaptureName(value any) error {
+	text, ok := value.(string)
+	if !ok || len(text) == 0 || len(text) > 128 {
+		return fmt.Errorf("must be a bounded capture name")
+	}
+	for _, char := range text {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-' || char == '_' || char == '.' {
+			continue
+		}
+		return fmt.Errorf("must be a bounded capture name")
+	}
+	return nil
+}
+
+func semanticWorkStatus(value any) error {
+	if value != "pending" && value != "complete" {
+		return fmt.Errorf("must be pending or complete")
+	}
+	return nil
 }
 
 func semanticString(value any) error {

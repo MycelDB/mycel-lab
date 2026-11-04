@@ -98,7 +98,7 @@ jobs:
           set -euo pipefail
           ./bin/mycel-lab run suite semantic-graph-index-release-gate \
             --dry-run \
-            --image local/mycel:sgt10-ci-dry-run \
+            --image docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7 \
             --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
             --artifact-root "$ARTIFACT_ROOT/semantic-release-gate"
           ./bin/mycel-lab run suite compose-procedure-inference-control-emulator \
@@ -122,7 +122,7 @@ jobs:
             --artifact-root "$ARTIFACT_ROOT/backup-restore"
           ./bin/mycel-lab run suite semantic-graph-index-live \
             --dry-run \
-            --image local/mycel:sgt10-ci-dry-run \
+            --image docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7 \
             --artifact-root "$ARTIFACT_ROOT/live-profile"
       - name: Verify artifacts are safe to upload
         working-directory: mycel-lab

@@ -53,6 +53,7 @@ mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --dry-run
 mycel-lab run suite semantic-graph-index-release-gate --dry-run
 mycel-lab run suite semantic-graph-index-live --dry-run
+mycel-lab run scenario compose-semantic-pending-restart --dry-run
 mycel-lab run suite compose-procedure-inference-control-emulator --dry-run
 mycel-lab run suite k3d-procedure-inference-recovery --dry-run
 mycel-lab run suite k3d-procedure-inference-backup-restore --dry-run
@@ -81,6 +82,13 @@ mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --confirm-destruct
 mycel-lab run suite compose-cluster-soak --confirm-destructive
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```
+
+Canonical semantic scenarios now default to the immutable **v0.21.4** daemon
+image. Recovery includes a [controlled pending-work restart case](tests/reliability/scenarios/compose-semantic-pending-restart/compose-semantic-pending-restart.md),
+with read-only work-identity/generation checks before normal maintenance resumes.
+The expanded four-scenario aggregate requires fresh approved execution; the
+previous v0.21.3 pass is not qualification for this new baseline. Dry-runs do not
+authorize destructive or hosted-provider execution.
 
 Catalog commands require Postgres via `--database-url`, `MYCEL_LAB_DATABASE_URL`,
 `MYCEL_RELIABILITY_DATABASE_URL`, or `DATABASE_URL`:

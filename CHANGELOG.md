@@ -8,8 +8,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added a controlled semantic pending-work restart scenario and strict version-1 work checkpoints binding public work ID, scope, generation, graph revision range, and attempts. Post-restart preservation checks are read-only and cannot reconstruct missing work; normal maintenance resumes only after preservation is proved. Unknown capabilities, ambiguous/truncated lists, changed identity, false freshness, and replayed attempts fail closed (#46).
 - Added a pre-candidate graph-commit restart qualification suite and policy requiring repeated fresh credential-free k3d clusters, one digest-pinned provenance-validated daemon identity, and zero unresolved ambiguous commits before assigning another candidate identity.
 - Added SGT10 CI/release integration with credential-free pull-request checks, deterministic/emulator/live-profile dry-runs, protected exact-candidate live and cluster release-gate workflows, immutable action/image inputs, serialized destructive execution, fail-closed sanitized artifact uploads, and credential incident-response guidance (#46).
+
+### Changed
+
+- Canonical semantic scenarios and semantic CI planning now target the immutable v0.21.4 daemon index. Recovery includes the new pending-work case, and the semantic aggregate expands from three scenarios / 20 phases to four / 25. Earlier v0.21.3 qualification does not transfer; fresh approved execution is still required. The controlled fixture does not claim automatic/in-flight provider recovery or out-of-order completion (#46).
 
 ### Fixed
 
