@@ -1,6 +1,6 @@
 # Semantic graph-index reliability suites implementation plan
 
-Status: initial canonical slices implemented; v0.21.3 execution passed on the development harness
+Status: v0.21.4 continuation; controlled pending-work restart implemented, environment-backed acceptance pending
 
 Tracking issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
@@ -11,21 +11,37 @@ Validation record: [Semantic suite validation checkpoint](semantic-graph-index-r
 ## Implementation checkpoint
 
 The canonical contract, recovery, protocol, live, and release-gate suite names
-are implemented. Recovery currently covers converged-index restart persistence,
-post-restart catch-up, projection rebuild, concurrent rebuild delta catch-up,
-and persistence after rebuild. Protocol coverage currently proves the local
-OpenAI-compatible embedding success path and sanitized request accounting.
-Live coverage reuses the existing manually gated, bounded embedding scenario;
-it has not been executed against a hosted provider as part of this work.
+are implemented. Their current default daemon is the immutable v0.21.4 index
+`docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7`.
+Both manifest and Compose image selection are pinned; explicit CLI overrides
+remain visible operator choices, not transferable qualification.
 
-The milestone acceptance lists below remain the broader roadmap, not a claim
-that every planned scenario is implemented. Pending-work restart, stale or
-out-of-order provider completion, the full protocol failure matrix, and broader
-provider composition remain follow-up work. A freshly approved aggregate run
-against the immutable published v0.21.3 image passed all three scenarios, final
-oracles, cleanup, and artifact safety. The harness was a development working tree,
-so this is real published-image execution evidence, not clean-source harness
-release qualification; see the validation record for exact identities and limits.
+Recovery includes converged-index persistence, catch-up, projection rebuild,
+and concurrent rebuild delta catch-up. The new dedicated
+`compose-semantic-pending-restart` scenario captures durable work ID, scope,
+generation, revision range, and attempts before and after retained-data restart.
+Background scheduling is deliberately disabled in this fixture; read-only
+post-restart checks must prove preservation before normal public maintenance
+resumes the same work. It proves controlled durable-work resumption, not automatic
+background scheduling or interruption during a provider call. A second restart
+checks completed-work and semantic-record identity without replay.
+
+The recovery suite now contains two scenarios, and the credential-free aggregate
+contains four scenarios / 25 phases. These expanded definitions need fresh
+approved v0.21.4 execution; unit/fake-RPC tests and dry-runs do not establish daemon
+restart behavior. Protocol coverage still proves only the local OpenAI-compatible
+embedding success path. Live profiles remain manual, separately approved, and
+non-gating; no hosted execution is part of this continuation.
+
+The earlier clean committed Lab `9b42793` aggregate passed three scenarios / 20
+phases against immutable v0.21.3, with successful final oracles, cleanup, and
+artifact safety. That clean-source run superseded the earlier development-harness
+qualification gap, but does not qualify this new harness, expanded scenario set,
+or v0.21.4 image. See the validation record for identities and limits.
+
+Actual remaining implementation gaps include stale/out-of-order provider
+completion, the full protocol failure matrix, and broader provider composition.
+The milestone checklists remain acceptance gates, not implementation-only claims.
 
 ## 1. Purpose
 
@@ -371,11 +387,16 @@ stale response, and retry behavior.
 ### 6.4 Acceptance criteria
 
 - [ ] Pending semantic work resumes after restart.
-- [ ] Fully converged semantic index survives restart.
-- [ ] Rebuild produces equivalent expected semantic results.
+- [x] Fully converged semantic index survives restart (accepted v0.21.3 baseline).
+- [x] Rebuild produces equivalent expected semantic results (accepted v0.21.3 baseline).
 - [ ] Stale older response cannot replace newer content.
 - [ ] Retry/degraded states are observable and bounded.
 - [ ] Recovery artifacts explain every interruption and convergence verdict.
+
+The pending-work scenario is implemented with strict work-identity/generation
+checks and a controlled scheduling boundary. Its acceptance item stays unchecked
+until a freshly approved v0.21.4 environment run is retained and reviewed. Do not
+substitute its unit tests for the first or last checklist item.
 
 ## 7. Milestone 4 — Provider protocol emulators
 

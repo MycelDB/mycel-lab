@@ -274,6 +274,10 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 			return result, fmt.Errorf("semantic backfill generated %d records, want at least %d", result.Generated, minimum)
 		}
 		return result, nil
+	case "semantic-work-assert":
+		callCtx, cancel := admin.AuthCallContext(ctx)
+		defer cancel()
+		return awaitSemanticWork(callCtx, admin.SemanticMaintenance, semanticResources, target)
 	case "semantic-maintenance-await":
 		return awaitSemanticMaintenance(ctx, admin, semanticResources, target)
 	default:

@@ -6,6 +6,7 @@ metadata:
 scenarios:
   - path: ../scenarios/compose-semantic-graph-contract/compose-semantic-graph-contract.yaml
   - path: ../scenarios/compose-semantic-graph-recovery/compose-semantic-graph-recovery.yaml
+  - path: ../scenarios/compose-semantic-pending-restart/compose-semantic-pending-restart.yaml
   - path: ../scenarios/compose-semantic-openai-emulator/compose-semantic-openai-emulator.yaml
 execution:
   mode: sequential

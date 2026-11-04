@@ -1,0 +1,214 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-semantic-pending-restart
+  description: Preserve public durable semantic work identity across retained-data restart, then resume through normal maintenance without repair backfill.
+seed: 4614
+providerProfileRef: deterministic-token-basis-v1
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+      - tests/compose/semantic-pending-restart.yml
+    projectNamePrefix: mycel-lab-semantic-pending
+    imageOverride: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
+    serviceNames: [myceld-a, myceld-b, myceld-c]
+    grpcPorts: [19091, 19092, 19093]
+  capabilities:
+    required: [per-node-endpoints, node-exec, rolling-restart, logs]
+clusterRef: raft-3-node
+clusterOverrides:
+  image: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
+actorGroups:
+  - name: semantic-controller
+    profileRef: semantic-controller
+    count: 3
+    rate:
+      mode: per-actor
+      commitsPerSecond: 1
+semantic:
+  targetActorGroup: semantic-controller
+  rule:
+    deferProvisioning: true
+    key: durable-pending-restart-search
+    displayName: Durable pending restart search
+    targetLabels: [Document]
+    bindingKey: search
+    purpose: semantic_search
+    sourceMode: self
+    includeProperties: [text]
+    minimumTextLength: 1
+    physicalIndex: exact
+    dirtyCooldown: 1ms
+    maxBatchSize: 16
+    workerConcurrency: 1
+  maintenance:
+    timeout: 30s
+    pollInterval: 100ms
+    analyzeLimit: 64
+    processLimit: 64
+phases:
+  - name: establish-ready-semantic-baseline
+    duration: 1ms
+    events:
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000004614
+          labels: [Document]
+          text: axis-0
+      - type: semantic-rule-create
+        target:
+          semantic: deferred
+      - type: semantic-backfill
+        target:
+          force: true
+          limit: 8
+          expectedSelected: 1
+          minimumGenerated: 1
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          captureGenerationAs: baseline-generation
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds: [00000000-0000-4000-8000-000000004614]
+          requireProvenance: true
+          expectGenerationFrom: baseline-generation
+          captureRecordAs: baseline-record
+          captureConfigurationHashAs: baseline-configuration
+  - name: commit-and-capture-pending-work
+    duration: 1ms
+    events:
+      - type: semantic-node-update
+        target:
+          nodeId: 00000000-0000-4000-8000-000000004614
+          text: axis-2
+          captureRevisionAs: pending-commit
+      - type: semantic-work-assert
+        target:
+          nodeId: 00000000-0000-4000-8000-000000004614
+          expectedStatus: pending
+          expectedAttemptCount: 0
+          expectRevisionFrom: pending-commit
+          analyze: true
+          expectBackgroundMaintenanceEnabled: false
+          captureWorkAs: pending-before-restart
+  - name: restart-with-pending-work-and-prove-preservation
+    duration: 1ms
+    events:
+      - type: rolling-restart
+        target:
+          scope: cluster
+      - type: cluster-recovery-wait
+        target:
+          timeout: 60s
+          interval: 200ms
+          commandTimeout: 3s
+          minimumStablePolls: 3
+          reuseEndpointSessions: true
+      - type: semantic-work-assert
+        target:
+          nodeId: 00000000-0000-4000-8000-000000004614
+          expectedStatus: pending
+          expectedAttemptCount: 0
+          expectRevisionFrom: pending-commit
+          expectWorkFrom: pending-before-restart
+          expectBackgroundMaintenanceEnabled: false
+    outcome:
+      availability: expected-degradation
+  - name: resume-the-same-work-and-prove-current-index
+    duration: 1ms
+    events:
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-work-assert
+        target:
+          nodeId: 00000000-0000-4000-8000-000000004614
+          expectedStatus: complete
+          expectedAttemptCount: 1
+          expectRevisionFrom: pending-commit
+          expectWorkFrom: pending-before-restart
+          expectBackgroundMaintenanceEnabled: false
+          captureWorkAs: completed-after-restart
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          expectFreshRevisionFrom: pending-commit
+      - type: semantic-search-assert
+        target:
+          query: axis-2
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds: [00000000-0000-4000-8000-000000004614]
+          requireProvenance: true
+          expectSourceRevisionFrom: pending-commit
+          expectGenerationFrom: baseline-generation
+          expectConfigurationHashFrom: baseline-configuration
+          rejectRecordFrom: baseline-record
+          captureRecordAs: replayed-record
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          minimumScore: 0.99
+          expectedResultCount: 0
+          forbiddenNodeIds: [00000000-0000-4000-8000-000000004614]
+  - name: restart-completed-work-without-replay
+    duration: 1ms
+    events:
+      - type: rolling-restart
+        target:
+          scope: cluster
+      - type: cluster-recovery-wait
+        target:
+          timeout: 60s
+          interval: 200ms
+          commandTimeout: 3s
+          minimumStablePolls: 3
+          reuseEndpointSessions: true
+      - type: semantic-work-assert
+        target:
+          nodeId: 00000000-0000-4000-8000-000000004614
+          expectedStatus: complete
+          expectedAttemptCount: 1
+          expectRevisionFrom: pending-commit
+          expectWorkFrom: completed-after-restart
+          expectBackgroundMaintenanceEnabled: false
+      - type: semantic-search-assert
+        target:
+          query: axis-2
+          timeout: 30s
+          pollInterval: 250ms
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds: [00000000-0000-4000-8000-000000004614]
+          requireProvenance: true
+          expectSourceRevisionFrom: pending-commit
+          expectGenerationFrom: baseline-generation
+          expectConfigurationHashFrom: baseline-configuration
+          expectRecordFrom: replayed-record
+    outcome:
+      availability: expected-degradation
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 60s
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
