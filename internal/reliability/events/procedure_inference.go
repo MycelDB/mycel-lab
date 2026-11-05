@@ -696,7 +696,7 @@ func runProcedureInferenceDiagnosticCommand(ctx context.Context, name string, ar
 func collectProcedureInferenceCapacityDiagnostics(ctx context.Context, environment env.Environment, tail int, run procedureInferenceDiagnosticCommandRunner) ([]byte, error) {
 	switch environment.Driver {
 	case "compose":
-		baseArgs := []string{"compose"}
+		baseArgs := []string{}
 		for _, file := range filepath.SplitList(environment.Metadata["composeFiles"]) {
 			if strings.TrimSpace(file) != "" {
 				baseArgs = append(baseArgs, "-f", file)
@@ -717,7 +717,7 @@ func collectProcedureInferenceCapacityDiagnostics(ctx context.Context, environme
 			}
 			args := append([]string(nil), baseArgs...)
 			args = append(args, "exec", "-T", service, "sh", "-c", env.BoundedDaemonLogCommand("/data/mycel/log/myceld.log", tail))
-			serviceOutput, err := run(ctx, "docker", args...)
+			serviceOutput, err := run(ctx, "docker-compose", args...)
 			if err != nil {
 				return nil, errors.New("collect compose daemon diagnostic log")
 			}

@@ -297,6 +297,24 @@ func TestK3DClusterNameHonorsK3DLengthLimit(t *testing.T) {
 	}
 }
 
+func TestK3DClusterNamePreservesCompleteAllocationIdentity(t *testing.T) {
+	identityPart := func(value string) string { return value[:len(value)-13] }
+	candidateA := k3dClusterName("k3d-cluster-validation", "shared-candidate-prefix-a-k3d-cluster-validation")
+	candidateB := k3dClusterName("k3d-cluster-validation", "shared-candidate-prefix-b-k3d-cluster-validation")
+	backup := k3dClusterName("k3d-system-backup-restore", "shared-candidate-prefix-a-k3d-system-backup-restore")
+	if identityPart(candidateA) == identityPart(candidateB) {
+		t.Fatalf("distinct candidates collapsed: %q and %q", candidateA, candidateB)
+	}
+	if identityPart(candidateA) == identityPart(backup) {
+		t.Fatalf("distinct scenarios collapsed: %q and %q", candidateA, backup)
+	}
+	for _, name := range []string{candidateA, candidateB, backup} {
+		if len(name) > k3dClusterNameMaxLength {
+			t.Fatalf("cluster name %q exceeds limit", name)
+		}
+	}
+}
+
 func TestK3DDriverCaptureStateWritesArtifacts(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner}
@@ -1097,7 +1115,7 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 		t.Fatalf("RestartNode() error=%v", err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"docker compose version", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test down --volumes --remove-orphans", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test up -d --wait", "env MYCEL_IMAGE=local/mycel:head docker compose -f " + composeFile + " -p mlab-test restart myceld-b"} {
+	for _, want := range []string{"docker-compose version", "env MYCEL_IMAGE=local/mycel:head docker-compose -f " + composeFile + " -p mlab-test down --volumes --remove-orphans", "env MYCEL_IMAGE=local/mycel:head docker-compose -f " + composeFile + " -p mlab-test up -d --wait", "env MYCEL_IMAGE=local/mycel:head docker-compose -f " + composeFile + " -p mlab-test restart myceld-b"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q\n%s", want, joined)
 		}
