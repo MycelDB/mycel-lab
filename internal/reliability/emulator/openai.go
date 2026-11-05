@@ -228,7 +228,8 @@ func (h *OpenAIHandler) serveEmbeddings(response http.ResponseWriter, request *h
 		response.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(response).Encode(map[string]any{"error": map[string]any{"message": "scripted content policy refusal", "type": "content_policy", "code": "content_policy_refusal"}})
 	case "connection-drop":
-		dropProviderConnection(response, &observation)
+		dropProviderConnection(response, &observation, func() { h.finishObservation(&observation, started) })
+		return
 	case "wrong-dimensions", "success":
 		dimensions := h.config.Dimensions
 		if outcome.Kind == "wrong-dimensions" {
@@ -357,7 +358,8 @@ func (h *OpenAIHandler) serveChat(response http.ResponseWriter, request *http.Re
 		response.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(response).Encode(map[string]any{"error": map[string]any{"message": "scripted content policy refusal", "type": "content_policy", "code": "content_policy_refusal"}})
 	case "connection-drop":
-		dropProviderConnection(response, &observation)
+		dropProviderConnection(response, &observation, func() { h.finishObservation(&observation, started) })
+		return
 	case "success":
 		model := payload.Model
 		if outcome.Model != "" {

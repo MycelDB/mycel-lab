@@ -95,6 +95,23 @@ A changed clean candidate must be reviewed/landed, frozen anew, and explicitly
 approved before another destructive execution. The one-run 6615c17 approval is
 consumed; its source, manifest and failed evidence remain unchanged.
 
+### Retained merged-head CI failure: connection-drop evidence ordering
+
+PR #94 CI passed. Its merged head `a1caa8e` then failed the unchanged emulator
+`TestConnectionDropIsRealTransportFailure` at `gate_test.go:155` with
+`transport evidence missing` (run `41962591407`, attempt 1). Planning passed;
+quality stopped at tests, so later checks were not claimed as run. That failure
+is retained, not relabelled as a pass or hidden by an unchanged-source CI retry.
+
+The drop helper closed its hijacked socket before the handler recorded evidence,
+allowing the client to observe EOF first. The follow-up records exactly once
+before close and returns immediately from both embedding/generation handlers.
+Tests still demand real transport failure and immediate finite evidence without
+sleep/retry; a deterministic close witness checks ordering and unsupported
+transports remain rejected. No provider-script/scenario assertions are weakened.
+The blocked `a1caa8e` preparation did not create an approval manifest or execute a
+suite. A later changed clean candidate needs its own passing CI and frozen identity.
+
 ### Completion batch: earlier local harness validation only
 
 The uncommitted `issue/46-completion-protocol-composition` implementation passed
