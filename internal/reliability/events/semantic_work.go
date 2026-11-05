@@ -47,6 +47,8 @@ type SemanticWorkEvidenceV1 struct {
 	SchemaVersion                 int                                `json:"schemaVersion"`
 	Work                          SemanticWorkCheckpointV1           `json:"work"`
 	Reliability                   *SemanticWorkReliabilityEvidenceV1 `json:"reliability,omitempty"`
+	NodeHealth                    *SemanticMaintenanceHealthV1       `json:"nodeHealth,omitempty"`
+	NodeHealthHistory             []*SemanticMaintenanceHealthV1     `json:"nodeHealthHistory,omitempty"`
 	Observations                  int                                `json:"observations"`
 	AnalyzeCalls                  int                                `json:"analyzeCalls"`
 	BackgroundMaintenanceEnabled  bool                               `json:"backgroundMaintenanceEnabled"`
@@ -145,7 +147,16 @@ func awaitSemanticWork(ctx context.Context, client adminv1.AdminSemanticMaintena
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		if !errors.Is(err, errSemanticWorkNotReady) && status.Code(err) != codes.Unavailable {
+		if errors.Is(err, errSemanticNodeHealthPending) {
+			// A complete work certificate already exists. Pin it locally and
+			// wait read-only; do not analyze/reconstruct it while health refreshes.
+			analyze = false
+			if previous == nil {
+				checkpoint := result.Work
+				previous = &checkpoint
+			}
+		}
+		if !errors.Is(err, errSemanticWorkNotReady) && !errors.Is(err, errSemanticNodeHealthPending) && status.Code(err) != codes.Unavailable {
 			// Never retain raw RPC/provider error messages in the evidence.
 			if rpcStatus, ok := status.FromError(err); ok {
 				return result, fmt.Errorf("semantic work RPC rejected: %s", rpcStatus.Code())
@@ -193,10 +204,15 @@ func observeSemanticWork(ctx context.Context, client adminv1.AdminSemanticMainte
 	work := SemanticWorkCheckpointV1{SchemaVersion: 1, WorkItemID: selected.GetWorkItemId(), SpaceID: selected.GetSpaceId(), DomainID: selected.GetDomainId(), SemanticRuleID: selected.GetSemanticRuleId(), EmbeddingBindingKey: selected.GetEmbeddingBindingKey(), TargetNodeID: selected.GetTargetNodeId(), Action: selected.GetAction(), Status: selected.GetStatus(), AttemptCount: selected.GetAttemptCount(), FirstGraphRevision: selected.GetFirstGraphRevision(), LastGraphRevision: selected.GetLastGraphRevision(), WorkGeneration: selected.GetWorkGeneration()}
 	maintenance, err := client.GetSemanticMaintenanceStatus(ctx, &adminv1.GetSemanticMaintenanceStatusRequest{SpaceId: resources.SpaceID})
 	if err != nil {
+		result.NodeHealth = captureMaintenanceHealth(nil)
+		result.NodeHealth.RPCCode = status.Code(err).String()
+		result.NodeHealthHistory = append(result.NodeHealthHistory, result.NodeHealth)
 		return status.Error(status.Code(err), "semantic work maintenance-status RPC failed")
 	}
-	if maintenance == nil || maintenance.GetDegraded() || maintenance.GetQueueDepthFailedPermanent() != 0 {
-		return errors.New("semantic work maintenance evidence is absent, degraded, or permanently failed")
+	result.NodeHealth = captureMaintenanceHealth(maintenance)
+	result.NodeHealthHistory = append(result.NodeHealthHistory, result.NodeHealth)
+	if maintenance == nil || maintenance.GetQueueDepthFailedPermanent() != 0 {
+		return errors.New("semantic work maintenance evidence is absent or permanently failed")
 	}
 	if enabled, ok := target["expectBackgroundMaintenanceEnabled"].(bool); ok && maintenance.GetEnabled() != enabled {
 		return errors.New("semantic background-maintenance configuration does not match the fixture")
@@ -224,6 +240,9 @@ func observeSemanticWork(ctx context.Context, client adminv1.AdminSemanticMainte
 	result.ConfiguredGapIntervalLimit, result.ConfiguredRevisionSpanLimit = proof.ConfiguredGapIntervalLimit, proof.ConfiguredRevisionSpanLimit
 	result.ConfiguredSerializedByteLimit = proof.ConfiguredSerializedByteLimit
 	if err := validateSemanticWorkReliability(proof, false); err != nil {
+		return err
+	}
+	if err := validateMaintenanceHealth(result.NodeHealth); err != nil {
 		return err
 	}
 	work.SemanticGeneration = proof.SemanticGeneration
@@ -262,6 +281,9 @@ func observeSemanticWork(ctx context.Context, client adminv1.AdminSemanticMainte
 		}
 	} else {
 		return errors.New("semantic work expected status must be pending or complete")
+	}
+	if result.NodeHealth.Degraded {
+		return errSemanticNodeHealthPending
 	}
 	return nil
 }

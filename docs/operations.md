@@ -340,8 +340,19 @@ reliability scalars and fixed rejection reasons are retained before validation;
 unpopulated zeros must not be interpreted as a daemon capability response.
 
 The approved clean `6615c17` aggregate stopped at the old pending-capture guard
-after contract/recovery passed; thirteen later cases were not run. A corrected
-harness needs a new frozen identity and fresh approval, not an automatic rerun.
+after contract/recovery passed; thirteen later cases were not run. The separately
+approved clean `574e690` run passed contract, then failed recovery's second restart
+at the first degraded maintenance observation; fourteen later cases were not run.
+Both approvals are consumed. A corrected harness needs a new frozen identity and
+fresh approval, not an automatic rerun.
+
+The [v0.21.4 maintenance-health contract](design/semantic-maintenance-health.md)
+separates entry-node background history from the owner/scoped reliability proof.
+Only exact bounded ownership/startup reasons may wait; the node's degraded bit
+must still clear before passing. Unknown/persistent errors, unsafe current scope,
+generation drift and false freshness fail closed. Once current work is certified,
+health-refresh polls are read-only. Safe cause classes, counters, timestamps and
+current reliability evidence are retained without raw error/provider text.
 
 The new ordering/failure cases use finite request sequences and local emulator
 controls; build a clean emulator from the same exact Lab source and supply its

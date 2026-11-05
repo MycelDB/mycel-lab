@@ -32,19 +32,22 @@ type SemanticBackfillResult struct {
 }
 
 type SemanticMaintenanceObservation struct {
-	Sequence            int    `json:"sequence"`
-	ObservedAt          string `json:"observedAt"`
-	ProcessedEvents     int32  `json:"processedEvents"`
-	EnqueuedItems       int32  `json:"enqueuedItems"`
-	ProcessedItems      int32  `json:"processedItems"`
-	CompletedItems      int32  `json:"completedItems"`
-	FailedItems         int32  `json:"failedItems"`
-	QueueDepthPending   int32  `json:"queueDepthPending"`
-	QueueDepthRunning   int32  `json:"queueDepthRunning"`
-	QueueDepthRetryable int32  `json:"queueDepthRetryable"`
-	QueueDepthPermanent int32  `json:"queueDepthPermanent"`
-	Degraded            bool   `json:"degraded"`
-	DegradedReason      string `json:"degradedReason,omitempty"`
+	Sequence            int                                `json:"sequence"`
+	ObservedAt          string                             `json:"observedAt"`
+	ProcessedEvents     int32                              `json:"processedEvents"`
+	EnqueuedItems       int32                              `json:"enqueuedItems"`
+	ProcessedItems      int32                              `json:"processedItems"`
+	CompletedItems      int32                              `json:"completedItems"`
+	FailedItems         int32                              `json:"failedItems"`
+	QueueDepthPending   int32                              `json:"queueDepthPending"`
+	QueueDepthRunning   int32                              `json:"queueDepthRunning"`
+	QueueDepthRetryable int32                              `json:"queueDepthRetryable"`
+	QueueDepthPermanent int32                              `json:"queueDepthPermanent"`
+	Degraded            bool                               `json:"degraded"`
+	DegradedReason      string                             `json:"degradedReason,omitempty"`
+	ReadOnly            bool                               `json:"readOnly"`
+	NodeHealth          *SemanticMaintenanceHealthV1       `json:"nodeHealth,omitempty"`
+	Reliability         *SemanticWorkReliabilityEvidenceV1 `json:"reliability,omitempty"`
 }
 
 type SemanticMaintenanceResult struct {
@@ -1548,59 +1551,5 @@ func awaitSemanticMaintenance(ctx context.Context, admin *mycel.AdminClient, res
 	}
 	ctx, cancelOperation := context.WithTimeout(ctx, timeout)
 	defer cancelOperation()
-	deadline := time.Now().Add(timeout)
-	result := SemanticMaintenanceResult{}
-	for sequence := 1; ; sequence++ {
-		if len(result.Observations) >= maxSemanticMaintenanceObservations {
-			return result, errors.New("semantic maintenance observation limit reached")
-		}
-		callCtx, cancel := admin.AuthCallContext(ctx)
-		analyzed, analyzeErr := admin.SemanticMaintenance.AnalyzeSemanticDirtyWork(callCtx, &adminv1.AnalyzeSemanticDirtyWorkRequest{
-			SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, Limit: int32(resources.MaintenanceAnalyzeLimit),
-		})
-		cancel()
-		if analyzeErr != nil || analyzed == nil {
-			return result, fmt.Errorf("analyze semantic maintenance RPC rejected: %s", status.Code(analyzeErr))
-		}
-		callCtx, cancel = admin.AuthCallContext(ctx)
-		processed, processErr := admin.SemanticMaintenance.ProcessSemanticDirtyWork(callCtx, &adminv1.ProcessSemanticDirtyWorkRequest{SpaceId: resources.SpaceID, Limit: int32(resources.MaintenanceProcessLimit)})
-		cancel()
-		if processErr != nil || processed == nil {
-			return result, fmt.Errorf("process semantic maintenance RPC rejected: %s", status.Code(processErr))
-		}
-		callCtx, cancel = admin.AuthCallContext(ctx)
-		statusResponse, statusErr := admin.SemanticMaintenance.GetSemanticMaintenanceStatus(callCtx, &adminv1.GetSemanticMaintenanceStatusRequest{SpaceId: resources.SpaceID})
-		cancel()
-		if statusErr != nil || statusResponse == nil {
-			return result, fmt.Errorf("get semantic maintenance status RPC rejected: %s", status.Code(statusErr))
-		}
-		observation := SemanticMaintenanceObservation{
-			Sequence: sequence, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), ProcessedEvents: analyzed.GetProcessedEvents(), EnqueuedItems: analyzed.GetEnqueuedItems(),
-			ProcessedItems: processed.GetProcessedItems(), CompletedItems: processed.GetCompletedItems(), FailedItems: processed.GetFailedItems(),
-			QueueDepthPending: statusResponse.GetQueueDepthPending(), QueueDepthRunning: statusResponse.GetQueueDepthRunning(),
-			QueueDepthRetryable: statusResponse.GetQueueDepthFailedRetryable(), QueueDepthPermanent: statusResponse.GetQueueDepthFailedPermanent(),
-			Degraded: statusResponse.GetDegraded(),
-		}
-		if observation.Degraded {
-			observation.DegradedReason = "maintenance-degraded"
-		}
-		result.Observations = append(result.Observations, observation)
-		if observation.Degraded || observation.QueueDepthPermanent > 0 {
-			return result, fmt.Errorf("semantic maintenance failed closed: degraded=%t permanent=%d", observation.Degraded, observation.QueueDepthPermanent)
-		}
-		if observation.QueueDepthPending == 0 && observation.QueueDepthRunning == 0 && observation.QueueDepthRetryable == 0 && observation.QueueDepthPermanent == 0 {
-			result.Converged = true
-			return result, nil
-		}
-		if !time.Now().Before(deadline) {
-			return result, fmt.Errorf("semantic maintenance did not converge within %s", timeout)
-		}
-		timer := time.NewTimer(pollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return result, ctx.Err()
-		case <-timer.C:
-		}
-	}
+	return awaitScopedSemanticMaintenance(ctx, admin, resources, pollInterval)
 }

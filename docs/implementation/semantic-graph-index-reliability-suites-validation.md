@@ -41,8 +41,8 @@ pre-deployment capability rejection for unsupported native composition. See the
 [acceptance audit](semantic-graph-index-issue46-acceptance-audit.md) for precise
 coverage, evidence levels, and remaining gaps.
 
-One explicitly approved v0.21.4 environment-backed aggregate ran against clean
-Lab `6615c17` after PR #93. It **failed and stopped**, not qualifying the aggregate.
+Two separately approved v0.21.4 environment-backed aggregates ran against clean
+Lab `6615c17` and `574e690`. Both **failed and stopped**, not qualifying the aggregate.
 The previously prepared `3b1c222` four-case bundle remains unexecuted and does not
 transfer evidence or approval. Unit/fake-RPC and planning checks validate the
 harness only. Native semantic enrichment remains API/adapter-blocked; no hosted
@@ -111,6 +111,45 @@ sleep/retry; a deterministic close witness checks ordering and unsupported
 transports remain rejected. No provider-script/scenario assertions are weakened.
 The blocked `a1caa8e` preparation did not create an approval manifest or execute a
 suite. A later changed clean candidate needs its own passing CI and frozen identity.
+
+### Approved clean 574e690 execution: failed, no rerun
+
+Retained evidence:
+`artifacts/destructive/semantic-graph-index-v0214-clean-574e690-20261105T034945Z/`.
+
+The approved one-shot invocation on 2026-11-05 passed contract's 11 phases and
+four recovery phases, then failed `semantic-maintenance-await` in
+`restart-after-rebuild-and-prove-persistence`: `degraded=true permanent=0`.
+Totals: **one scenario passed, one failed, fourteen not run; 15 phases passed,
+one failed, 49 unexecuted**. Pending-restart, ordering, protocol faults, domain
+isolation and migration were not reached. The reader/transport corrections remain
+runtime-unqualified. Final/cluster oracles, cleanup/absence, six native daemon
+observations and artifact safety (two runs / 76 files) passed, not acceptance.
+
+Read-only diagnosis against the exact released source reproduced cached node-wide
+background errors surviving restored leadership and successful manual empty
+maintenance. The entry node's historical health can accompany current owner
+queues from another node/scope. The exact original error was not retained, so
+this is a confirmed mechanism, not proof that the actual failure was transient
+or that post-restart semantic search succeeded. The failed evidence is unchanged.
+
+### Maintenance-health correction: harness evidence only
+
+The [explicit v0.21.4 contract](../design/semantic-maintenance-health.md) keeps the
+daemon/API/SDK immutable. Lab records node-background health independently from
+current scoped reliability. Only exact bounded ownership/startup reasons can
+wait; actual node degradation must clear before passing. Completion additionally
+requires empty queues and a complete current scope/generation/capacity/rebuild/
+freshness certificate. Unknown, persistent, disabled-loop, permanent-work and
+unsafe scoped conditions fail; ambiguous mutations are not retried. Health-only
+waits and pending preservation are read-only, with bounded safe metadata.
+
+Authenticated fake-RPC and unit regressions are harness evidence, not runtime
+acceptance. The first focused race stress exposed lost standard deadline identity
+when expiry occurred inside an RPC; the corrected path preserves parent/operation
+context errors. That original failed test log is retained separately from later
+changed-source validation. Both runtime approvals are consumed. No new destructive
+execution or release publication is performed by this correction.
 
 ### Completion batch: earlier local harness validation only
 
