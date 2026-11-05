@@ -383,8 +383,24 @@ disabled-search rejection or re-enable indexing/freshness assertions. Unknown mo
 missing captures, drift or actual enablement fail closed.
 
 The new ordering/failure cases use finite request sequences and local emulator
-controls; build a clean emulator from the same exact Lab source and supply its
-immutable image ID with `--environment-option providerEmulatorImage=<image-id>`.
+controls. Standalone non-candidate suites accept a clean same-source emulator
+image ID via `--environment-option providerEmulatorImage=<image-id>`; **the
+release-candidate aggregate does not**. Its maintained
+[`semantic-graph-index-release-gate.draft.yaml.tmpl`](../tests/reliability/release-bundles/semantic-graph-index-release-gate.draft.yaml.tmpl)
+binds the 16 ordered cases, all referenced profiles and Compose overlays, exact
+local emulator identity, daemon/MinIO images, tools, and finite bounds. Build the
+emulator from the same clean Lab revision with the draft's explicit
+`local/mycel-provider-emulator:issue46-reviewed` capture tag, correct source,
+revision, clean, method and archive-digest labels. A tag is never sufficient:
+`release-bundle build` captures the exact image/config ID and preflight checks
+it again. A changed image, source, tool, profile, overlay or environment needs a
+new bundle and review. The bundle must be outside its clean `mycel-lab`/`mycel`
+source checkouts; only an exact registry daemon digest can be passed at build.
+During preflight set `MINIO_IMAGE` and `MINIO_MC_IMAGE` to the template's exact
+helper references. Inspect the fresh resource/port baseline first; the ordinary
+Compose cases publish host gRPC 19091–19093 on all interfaces and the protocol
+case uses 19791–19793. No destructive run, hosted-provider access or approval
+is implied by building, validating or dry-running a bundle.
 A forced older backfill is held before a newer record is published and searched;
 release must report superseded skip with unchanged newer record identity. Fault
 cases require failure/gap/freshness evidence before normal or explicitly authorized
@@ -425,23 +441,29 @@ mycel-lab run suite semantic-graph-index-protocol \
   --image myceldb/mycel:<candidate>
 
 mycel-lab run suite semantic-graph-index-release-gate --dry-run
-mycel-lab run suite semantic-graph-index-release-gate \
-  --confirm-destructive \
-  --image myceldb/mycel:<candidate>
+# For a separately reviewed, clean, exact-identity candidate only:
+/candidate/bin/mycel-lab release-bundle build /candidate/semantic-draft.yaml \
+  /candidate/semantic-bundle.yaml \
+  --daemon-image docker.io/myceldb/mycel@sha256:<exact-64-hex-digest> \
+  --candidate-id <unique-reviewed-id>
+/candidate/bin/mycel-lab release-bundle validate /candidate/semantic-bundle.yaml
+# Requires fresh explicit destructive approval; NOT an instruction to run now:
+/candidate/bin/mycel-lab run suite semantic-graph-index-release-gate \
+  --release-bundle /candidate/semantic-bundle.yaml \
+  --confirm-destructive --artifact-root /candidate/unique-evidence-root
 
 mycel-lab run suite semantic-graph-index-live --dry-run
-OPENAI_API_KEY=<approved-key> \
-  mycel-lab run suite semantic-graph-index-live \
-  --confirm-destructive \
-  --image myceldb/mycel:<candidate>
+# Separately protected and credentialed; uses its own exact live-provider bundle.
 ```
 
 `semantic-graph-index-release-gate` is credential-free and intentionally excludes
-live-provider credentials. `semantic-graph-index-live` is manual-only: dry-run
-performs no credential lookup and no provider call; destructive execution
-requires an approved daemon image, explicit operator approval, an approved
-outbound provider route/budget, and an operator-provided live provider
-credential.
+live-provider credentials. Its destructive path now **requires a hermetic bundle**;
+`--image` and independent environment/profile overrides are rejected before
+provisioning, even with `--confirm-destructive`. `semantic-graph-index-live` is
+manual-only: dry-run performs no credential lookup and no provider call;
+destructive execution likewise needs its separate hermetic live-provider bundle,
+approved daemon image, explicit operator approval, an approved outbound provider
+route/budget, and an operator-provided live provider credential.
 
 Use `--image` to replace every resolved scenario's daemon image while preserving
 the rest of the scenario, which supports exact A/B candidate validation. For
