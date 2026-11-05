@@ -140,18 +140,26 @@ func TestGateCancellationAndDeadlineAreBounded(t *testing.T) {
 	}
 }
 func TestConnectionDropIsRealTransportFailure(t *testing.T) {
-	h := mustOpenAIHandler(t, provider.ProtocolEmulatorScript{Version: "v1", MaxRequests: 1, RequestSequence: []provider.ProtocolEmulatorOutcome{{Kind: "connection-drop"}}})
-	server := httptest.NewServer(h)
-	defer server.Close()
-	response, err := http.Post(server.URL+"/v1/embeddings", "application/json", strings.NewReader(`{"model":"embedding-v1","input":"axis-0"}`))
-	if response != nil {
-		response.Body.Close()
-	}
-	if err == nil {
-		t.Fatal("connection drop became an ordinary HTTP response")
-	}
-	observations := h.observationSnapshot()
-	if len(observations) != 1 || observations[0].Outcome != "connection-drop" {
-		t.Fatal("transport evidence missing")
+	for path, body := range map[string]string{
+		"/v1/embeddings":       `{"model":"embedding-v1","input":"axis-0"}`,
+		"/v1/chat/completions": `{"model":"generation-v1","messages":[{"role":"user","content":"axis-0"}]}`,
+	} {
+		t.Run(path, func(t *testing.T) {
+			h := mustOpenAIHandler(t, provider.ProtocolEmulatorScript{Version: "v1", MaxRequests: 1, RequestSequence: []provider.ProtocolEmulatorOutcome{{Kind: "connection-drop"}}})
+			server := httptest.NewServer(h)
+			defer server.Close()
+			response, err := http.Post(server.URL+path, "application/json", strings.NewReader(body))
+			if response != nil {
+				response.Body.Close()
+			}
+			if err == nil {
+				t.Fatal("connection drop became an ordinary HTTP response")
+			}
+			// No sleep/retry: evidence must already exist when EOF reaches the client.
+			observations := h.observationSnapshot()
+			if len(observations) != 1 || observations[0].Outcome != "connection-drop" || observations[0].Status != 503 {
+				t.Fatal("transport evidence missing")
+			}
+		})
 	}
 }
