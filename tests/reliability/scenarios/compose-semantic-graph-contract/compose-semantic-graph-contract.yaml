@@ -299,6 +299,8 @@ phases:
         target:
           requireFreshAtLatest: true
           maximumUnresolvedGapCount: 0
+          captureGenerationAs: before-disable-generation
+          captureFreshRevisionAs: before-disable-fresh
       - type: semantic-search-assert
         target:
           query: axis-3
@@ -317,8 +319,13 @@ phases:
           nodeId: 00000000-0000-4000-8000-000000000104
           labels: [Document]
           text: axis-4
+          captureRevisionAs: disabled-node-revision
       - type: semantic-maintenance-await
         target:
+          completion: disabled-quiescent
+          expectGenerationFrom: before-disable-generation
+          expectFreshRevisionFrom: before-disable-fresh
+          expectRevisionFrom: disabled-node-revision
           timeout: 30s
           pollInterval: 100ms
       - type: semantic-search-assert

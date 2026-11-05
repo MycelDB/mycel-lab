@@ -13,18 +13,29 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Completion requires BOTH a clear node-background signal and a current,
-// same-generation owner/scoped reliability certificate. Queue zeros alone never
-// prove convergence. Recognized historical ownership errors may wait, not pass.
-func awaitScopedSemanticMaintenance(ctx context.Context, admin *mycel.AdminClient, resources *provision.SemanticResources, poll time.Duration) (SemanticMaintenanceResult, error) {
-	result := SemanticMaintenanceResult{}
+// Indexed completion requires both clear background health and current scoped
+// freshness. Explicit disabled quiescence instead preserves captured pre-disable
+// frontiers, brackets status with disabled-rule reads, and never invokes work.
+func awaitScopedSemanticMaintenance(ctx context.Context, admin *mycel.AdminClient, resources *provision.SemanticResources, poll time.Duration, disabled *disabledSemanticQuiescence) (SemanticMaintenanceResult, error) {
+	result := SemanticMaintenanceResult{Completion: "indexed"}
+	if disabled != nil {
+		result.Completion = "disabled-quiescent"
+	}
 	var previous *SemanticWorkReliabilityEvidenceV1
-	readOnly := false
+	readOnly := disabled != nil
 	for sequence := 1; sequence <= maxSemanticMaintenanceObservations; sequence++ {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		observation := SemanticMaintenanceObservation{Sequence: sequence, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), ReadOnly: readOnly}
+		if disabled != nil {
+			var err error
+			observation.DisabledRuleBefore, err = readDisabledSemanticRule(ctx, admin, resources)
+			if err != nil {
+				result.Observations = append(result.Observations, observation)
+				return result, err
+			}
+		}
 		var analyzed *adminv1.AnalyzeSemanticDirtyWorkResponse
 		var processed *adminv1.ProcessSemanticDirtyWorkResponse
 		if !readOnly {
@@ -96,14 +107,29 @@ func awaitScopedSemanticMaintenance(ctx context.Context, admin *mycel.AdminClien
 			return result, err
 		}
 		queuesEmpty := current.QueueDepthPending == 0 && current.QueueDepthRunning == 0 && current.QueueDepthRetryable == 0
-		scopeFresh := proof.UnresolvedGapCount == 0 && !proof.RebuildRequired && proof.FreshThroughGraphRevision == proof.LatestObservedGraphRevision
-		if queuesEmpty && scopeFresh && !current.NodeHealth.Degraded {
+		scopeComplete := proof.UnresolvedGapCount == 0 && !proof.RebuildRequired && proof.FreshThroughGraphRevision == proof.LatestObservedGraphRevision
+		if disabled != nil {
+			// Quiescence only; never a freshness claim.
+			scopeComplete, err = disabled.validate(proof)
+			if err != nil {
+				return result, err
+			}
+			current.DisabledRuleAfter, err = readDisabledSemanticRule(ctx, admin, resources)
+			if err != nil {
+				return result, err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if queuesEmpty && scopeComplete && !current.NodeHealth.Degraded {
 			result.Converged = true
+			result.FreshnessProved = disabled == nil
 			return result, nil
 		}
 		// Once current work is certified, waiting for a periodic background health
 		// refresh is read-only. New work/frontier lag re-enables normal maintenance.
-		readOnly = queuesEmpty && scopeFresh
+		readOnly = disabled != nil || (queuesEmpty && scopeComplete)
 		timer := time.NewTimer(poll)
 		select {
 		case <-ctx.Done():

@@ -343,8 +343,11 @@ The approved clean `6615c17` aggregate stopped at the old pending-capture guard
 after contract/recovery passed; thirteen later cases were not run. The separately
 approved clean `574e690` run passed contract, then failed recovery's second restart
 at the first degraded maintenance observation; fourteen later cases were not run.
-Both approvals are consumed. A corrected harness needs a new frozen identity and
-fresh approval, not an automatic rerun.
+A third approved clean `cbc4274` invocation then failed the disabled-rule wait:
+160 healthy, empty-queue observations kept analyzed/fresh frontiers at 7 after
+revision 8 committed while the rule was disabled. Fifteen later cases were not
+run. All three approvals are consumed. A corrected harness needs a new frozen
+identity and fresh approval, not an automatic rerun.
 
 The [v0.21.4 maintenance-health contract](design/semantic-maintenance-health.md)
 separates entry-node background history from the owner/scoped reliability proof.
@@ -353,6 +356,16 @@ must still clear before passing. Unknown/persistent errors, unsafe current scope
 generation drift and false freshness fail closed. Once current work is certified,
 health-refresh polls are read-only. Safe cause classes, counters, timestamps and
 current reliability evidence are retained without raw error/provider text.
+
+Default maintenance completion remains `indexed` and requires full freshness.
+The intentional disabled-rule negative control alone uses explicit
+`completion: disabled-quiescent`, with captured generation/pre-disable fresh
+revision and the later acknowledged commit. Authenticated rule reads must prove
+the exact rule disabled before/after status; its old frontiers must be unchanged,
+with healthy scope, no gaps, empty queues and clear background health. The wait
+is read-only and reports `freshnessProved: false`. It does not replace the following
+disabled-search rejection or re-enable indexing/freshness assertions. Unknown modes,
+missing captures, drift or actual enablement fail closed.
 
 The new ordering/failure cases use finite request sequences and local emulator
 controls; build a clean emulator from the same exact Lab source and supply its

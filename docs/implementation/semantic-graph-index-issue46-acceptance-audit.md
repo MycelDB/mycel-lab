@@ -3,9 +3,9 @@
 Issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
 Completion batch: PR #93, clean merge `6615c17`. Follow-up corrections: PR #94
-(pending reliability), PR #95 (transport evidence), and maintenance-health
-convergence. This audit separates implementation, both failed approved executions,
-and new harness-only evidence; it is not issue closure.
+(pending reliability), PR #95 (transport evidence), PR #96 (maintenance health),
+and disabled-rule quiescence. This audit separates implementation, all three
+failed approved executions and new harness-only evidence; it is not issue closure.
 
 ## Evidence levels
 
@@ -36,6 +36,13 @@ and new harness-only evidence; it is not issue closure.
   and waits only on exact bounded ownership reasons. The bit must actually clear;
   queue zeros cannot bypass a scoped freshness certificate. No daemon/API change,
   rerun, approval transfer or inference that the original cause was transient.
+- **Third approved v0.21.4 run (failed):** clean `cbc4274` stopped at the
+  intentionally disabled-rule maintenance wait. Zero scenarios passed, one failed,
+  fifteen not run; nine phases passed, one failed, 55 unexecuted. Healthy empty
+  queues accompanied latest revision 8 and analyzed/fresh 7/7 while disabled.
+  Cleanup and artifact safety passed, not acceptance. The narrow local correction
+  explicitly proves disabled quiescence, not indexing; default enabled freshness,
+  disabled-search rejection and re-enable catch-up remain strict. No rerun is implied.
 - **Unsupported:** pinned v0.21.4 semantic rule APIs have no native generation /
   enrichment projection stage. Unsupported compositions fail resolution with a
   typed capability error, including during dry-run. They never become a passed
@@ -105,9 +112,10 @@ is held. No backfill, analysis, or repair follows release to hide a stale overwr
   criterion passed**. The two identified coverage gaps now have independent Lab
   scenarios, strict public-API assertions, local regressions, and planning evidence.
   Their runtime acceptance remains open rather than hidden behind a checklist tick.
-- Neither approved aggregate completed. The `574e690` recovery failure is not
-  overridden by `6615c17`'s earlier recovery pass; pending/ordering/fault/domain/
-  migration acceptance remains unexecuted or unqualified. Both approvals are consumed.
+- None of the three approved aggregates completed. The `574e690` recovery failure
+  and `cbc4274` disabled-rule failure are not overridden by older partial passes;
+  pending/ordering/fault/domain/migration acceptance remains unexecuted or
+  unqualified. All three approvals are consumed.
 - #46 stays open. Final checklist closure requires fresh exact-source runtime
   evidence and reconciliation against each criterion; native composed execution
   remains explicitly capability-blocked rather than silently substituted.

@@ -50,6 +50,9 @@ func TestMaintenanceHealthClassifiesOnlyExactBoundedOwnershipErrors(t *testing.T
 
 type maintenanceHealthProbe struct {
 	*boundedMaintenanceProbe
+	adminv1.UnimplementedAdminSemanticServiceServer
+	ruleCalls                                                 int
+	rule                                                      func(context.Context, int) (*adminv1.GetSemanticRuleResponse, error)
 	mu                                                        sync.Mutex
 	analyzeCalls, processCalls, statusCalls, reliabilityCalls int
 	analyzeError, processError                                error
@@ -110,6 +113,9 @@ func healthProbeFixture(t *testing.T) (context.Context, *mycel.AdminClient, *pro
 	completeSemanticWork(work)
 	proof := work.reliability
 	p := &maintenanceHealthProbe{boundedMaintenanceProbe: &boundedMaintenanceProbe{}}
+	p.rule = func(context.Context, int) (*adminv1.GetSemanticRuleResponse, error) {
+		return &adminv1.GetSemanticRuleResponse{Rule: &adminv1.SemanticGenerationRule{SpaceId: resources.SpaceID, DomainId: resources.DomainID, SemanticRuleId: resources.SemanticRuleID, Enabled: true, Embeddings: []*adminv1.SemanticEmbeddingBinding{{Key: resources.EmbeddingBindingKey, Enabled: true}}}}, nil
+	}
 	p.node = func(int) (*adminv1.GetSemanticMaintenanceStatusResponse, error) { return clearMaintenanceNode(), nil }
 	p.reliability = func(context.Context, int) (*adminv1.GetSemanticReliabilityStatusResponse, error) {
 		return proto.Clone(proof).(*adminv1.GetSemanticReliabilityStatusResponse), nil
@@ -121,6 +127,7 @@ func healthProbeFixture(t *testing.T) (context.Context, *mycel.AdminClient, *pro
 	server := grpc.NewServer()
 	commonv1.RegisterAuthServiceServer(server, p)
 	adminv1.RegisterAdminSemanticMaintenanceServiceServer(server, p)
+	adminv1.RegisterAdminSemanticServiceServer(server, p)
 	done := make(chan struct{})
 	go func() { defer close(done); _ = server.Serve(listener) }()
 	t.Cleanup(func() { server.Stop(); listener.Close(); <-done })
