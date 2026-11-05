@@ -2,9 +2,10 @@
 
 Issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
-Completion batch: PR #93, clean merge `6615c17`. Follow-up correction:
-`fix/46-pending-reliability-contract`. This audit separates implementation, the
-failed approved execution, and new harness-only evidence; it is not issue closure.
+Completion batch: PR #93, clean merge `6615c17`. Follow-up corrections: PR #94
+(pending reliability), PR #95 (transport evidence), and maintenance-health
+convergence. This audit separates implementation, both failed approved executions,
+and new harness-only evidence; it is not issue closure.
 
 ## Evidence levels
 
@@ -25,6 +26,16 @@ failed approved execution, and new harness-only evidence; it is not issue closur
   unresolved-gap boolean from actual required/running/failed rebuild state, retain
   safe diagnostics before rejection, and preserve all identity/freshness fences.
   Local regressions are not a replacement qualification or approval transfer.
+- **Second approved v0.21.4 run (failed):** clean `574e690` passed contract,
+  then failed recovery at the first degraded maintenance observation after its
+  second restart. One scenario passed, one failed, fourteen not run; 15 phases
+  passed, one failed, 49 unexecuted. Pending/fault corrections were not reached.
+  Cleanup and artifact safety passed, not aggregate acceptance.
+- **Maintenance-health correction (harness only):** distinguishes node-global
+  background history from current scope/generation health, retains safe metadata,
+  and waits only on exact bounded ownership reasons. The bit must actually clear;
+  queue zeros cannot bypass a scoped freshness certificate. No daemon/API change,
+  rerun, approval transfer or inference that the original cause was transient.
 - **Unsupported:** pinned v0.21.4 semantic rule APIs have no native generation /
   enrichment projection stage. Unsupported compositions fail resolution with a
   typed capability error, including during dry-run. They never become a passed
@@ -94,6 +105,9 @@ is held. No backfill, analysis, or repair follows release to hide a stale overwr
   criterion passed**. The two identified coverage gaps now have independent Lab
   scenarios, strict public-API assertions, local regressions, and planning evidence.
   Their runtime acceptance remains open rather than hidden behind a checklist tick.
+- Neither approved aggregate completed. The `574e690` recovery failure is not
+  overridden by `6615c17`'s earlier recovery pass; pending/ordering/fault/domain/
+  migration acceptance remains unexecuted or unqualified. Both approvals are consumed.
 - #46 stays open. Final checklist closure requires fresh exact-source runtime
   evidence and reconciliation against each criterion; native composed execution
   remains explicitly capability-blocked rather than silently substituted.
