@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -738,9 +739,17 @@ func semanticOperationFailed(resources *SemanticResources, resource string, err 
 }
 
 func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, resources *SemanticResources) []string {
+	return cleanupSemanticResourceGraph(ctx, admin, resources, map[*SemanticResources]bool{})
+}
+
+func cleanupSemanticResourceGraph(ctx context.Context, admin *mycel.AdminClient, resources *SemanticResources, seen map[*SemanticResources]bool) []string {
 	if resources == nil {
 		return nil
 	}
+	if seen[resources] || len(seen) >= 32 {
+		return []string{"semantic owned-resource graph is cyclic, aliased, or exceeds its finite bound"}
+	}
+	seen[resources] = true
 	var failures []string
 	steps := []struct {
 		resource string
@@ -816,6 +825,18 @@ func cleanupSemanticResources(ctx context.Context, admin *mycel.AdminClient, res
 			continue
 		}
 		setSemanticCleanupStatus(resources, step.resource, "completed", "", nil)
+	}
+	// Delete the owning rule before an alternate route's resources: migration
+	// deliberately makes that rule reference the child's profile/vector store.
+	for _, children := range []map[string]*SemanticResources{resources.DomainPeers, resources.Routes} {
+		keys := make([]string, 0, len(children))
+		for key := range children {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			failures = append(failures, cleanupSemanticResourceGraph(ctx, admin, children[key], seen)...)
+		}
 	}
 	return failures
 }

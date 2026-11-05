@@ -34,6 +34,8 @@ func main() {
 		err = runDump(os.Args[2:])
 	case "health":
 		err = runHealth(os.Args[2:])
+	case "gate":
+		err = runGate(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -143,5 +145,5 @@ func envValue(name, fallback string) string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: mycel-provider-emulator <serve|dump|health> [flags]")
+	fmt.Fprintln(os.Stderr, "Usage: mycel-provider-emulator <serve|dump|health|gate> [flags]")
 }

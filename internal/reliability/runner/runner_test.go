@@ -940,14 +940,14 @@ func TestSemanticGraphIndexContractSuiteCanonicalNameDryRuns(t *testing.T) {
 	if result.SuiteName != "semantic-graph-index-contract" {
 		t.Fatalf("SuiteName=%q want semantic-graph-index-contract", result.SuiteName)
 	}
-	if len(result.Results) != 1 {
-		t.Fatalf("scenario count=%d want 1", len(result.Results))
+	want := []string{"compose-semantic-graph-contract"}
+	if len(result.Results) != len(want) {
+		t.Fatalf("contract scenarios=%d want %d", len(result.Results), len(want))
 	}
-	if got := result.Results[0].ScenarioName; got != "compose-semantic-graph-contract" {
-		t.Fatalf("ScenarioName=%q want compose-semantic-graph-contract", got)
-	}
-	if result.Results[0].Status != RunPassed {
-		t.Fatalf("scenario result=%+v", result.Results[0])
+	for i, name := range want {
+		if result.Results[i].ScenarioName != name || result.Results[i].Status != RunPassed || !result.Results[i].DryRun {
+			t.Fatalf("contract result[%d]=%+v", i, result.Results[i])
+		}
 	}
 }
 
@@ -960,7 +960,7 @@ func TestSemanticGraphIndexRecoverySuiteCanonicalNameDryRuns(t *testing.T) {
 	if result.SuiteName != "semantic-graph-index-recovery" {
 		t.Fatalf("SuiteName=%q want semantic-graph-index-recovery", result.SuiteName)
 	}
-	want := []string{"compose-semantic-graph-recovery", "compose-semantic-pending-restart"}
+	want := []string{"compose-semantic-graph-recovery", "compose-semantic-pending-restart", "compose-semantic-out-of-order"}
 	if len(result.Results) != len(want) {
 		t.Fatalf("scenario count=%d want %d", len(result.Results), len(want))
 	}
@@ -980,14 +980,14 @@ func TestSemanticGraphIndexProtocolSuiteCanonicalNameDryRuns(t *testing.T) {
 	if result.SuiteName != "semantic-graph-index-protocol" {
 		t.Fatalf("SuiteName=%q want semantic-graph-index-protocol", result.SuiteName)
 	}
-	if len(result.Results) != 1 {
-		t.Fatalf("scenario count=%d want 1", len(result.Results))
+	want := append([]string{"compose-semantic-openai-emulator"}, semanticFaultScenarioNames()...)
+	if len(result.Results) != len(want) {
+		t.Fatalf("scenario count=%d want %d", len(result.Results), len(want))
 	}
-	if got := result.Results[0].ScenarioName; got != "compose-semantic-openai-emulator" {
-		t.Fatalf("ScenarioName=%q want compose-semantic-openai-emulator", got)
-	}
-	if result.Results[0].Status != RunPassed {
-		t.Fatalf("scenario result=%+v", result.Results[0])
+	for i, name := range want {
+		if result.Results[i].ScenarioName != name || result.Results[i].Status != RunPassed {
+			t.Fatalf("protocol result[%d]=%+v, want %s", i, result.Results[i], name)
+		}
 	}
 }
 
@@ -1020,17 +1020,22 @@ func TestSemanticGraphIndexReleaseGateSuiteDryRuns(t *testing.T) {
 	if result.SuiteName != "semantic-graph-index-release-gate" {
 		t.Fatalf("SuiteName=%q want semantic-graph-index-release-gate", result.SuiteName)
 	}
-	want := []string{"compose-semantic-graph-contract", "compose-semantic-graph-recovery", "compose-semantic-pending-restart", "compose-semantic-openai-emulator"}
+	want := append([]string{"compose-semantic-graph-contract", "compose-semantic-graph-recovery", "compose-semantic-pending-restart", "compose-semantic-openai-emulator", "compose-semantic-out-of-order"}, semanticFaultScenarioNames()...)
 	if len(result.Results) != len(want) {
 		t.Fatalf("scenario count=%d want %d", len(result.Results), len(want))
 	}
+	phases := 0
 	for index, scenario := range want {
 		if got := result.Results[index].ScenarioName; got != scenario {
 			t.Fatalf("result[%d].ScenarioName=%q want %q", index, got, scenario)
 		}
-		if result.Results[index].Status != RunPassed {
+		if result.Results[index].Status != RunPassed || !result.Results[index].DryRun {
 			t.Fatalf("result[%d]=%+v", index, result.Results[index])
 		}
+		phases += len(result.Results[index].Phases)
+	}
+	if phases != 55 {
+		t.Fatalf("planned phases=%d want 55", phases)
 	}
 }
 

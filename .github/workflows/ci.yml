@@ -13,6 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  GOWORK: 'off'
   GOFLAGS: -mod=readonly
 
 jobs:
@@ -30,7 +31,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: MycelDB/mycel
-          ref: 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+          ref: 034ae41f78721b112a5b8284593b2652bab12c53
           path: mycel
           persist-credentials: false
       - name: Set up Go
@@ -40,7 +41,7 @@ jobs:
           cache-dependency-path: mycel-lab/go.sum
       - name: Verify pinned daemon identity
         working-directory: mycel
-        run: test "$(git rev-parse HEAD)" = 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+        run: test "$(git rev-parse HEAD)" = 034ae41f78721b112a5b8284593b2652bab12c53
       - name: Test
         working-directory: mycel-lab
         run: go test -count=1 ./...
@@ -76,7 +77,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: MycelDB/mycel
-          ref: 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+          ref: 034ae41f78721b112a5b8284593b2652bab12c53
           path: mycel
           persist-credentials: false
       - name: Set up Go
@@ -86,7 +87,7 @@ jobs:
           cache-dependency-path: mycel-lab/go.sum
       - name: Verify pinned daemon identity
         working-directory: mycel
-        run: test "$(git rev-parse HEAD)" = 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+        run: test "$(git rev-parse HEAD)" = 034ae41f78721b112a5b8284593b2652bab12c53
       - name: Build exact harness
         working-directory: mycel-lab
         run: go build -trimpath -o ./bin/mycel-lab ./cmd/mycel-lab

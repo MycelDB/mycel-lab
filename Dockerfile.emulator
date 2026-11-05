@@ -4,6 +4,7 @@ ARG BUILD_CONTEXT_DIGEST
 ARG BUILD_IDENTITY
 
 FROM golang:1.25.5-alpine AS build
+ENV GOWORK=off GOFLAGS=-mod=readonly
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

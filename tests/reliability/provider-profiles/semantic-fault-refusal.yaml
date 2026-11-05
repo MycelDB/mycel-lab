@@ -1,0 +1,41 @@
+apiVersion: "reliability.mycel.io/v1alpha1"
+kind: "ProviderProfile"
+metadata:
+  name: "semantic-fault-refusal"
+  description: "Generated finite local provider sequence; no hosted credentials."
+mode: "emulator"
+capabilities:
+  embedding:
+    connectorType: "openai-compatible"
+    endpointKey: "local-openai-emulator"
+    baseURL: "http://mycel-provider-emulator:18080/v1"
+    modelKey: "emulator/embedding-v1"
+    providerModelName: "embedding-v1"
+    dimensions: 8
+    vectorSpaceKey: "emulator/embedding-v1/8"
+    emulatorScript:
+      version: "v1"
+      requireMatch: false
+      maxRequests: 3
+      entries: []
+      requestSequence:
+        -
+          kind: "refusal"
+        -
+          kind: "success"
+        -
+          kind: "success"
+    batching:
+      mode: "single"
+      maxItems: 1
+budgets:
+  enforcement: "advisory"
+  maxOperations: 4096
+  maxRequests: 3
+  maxConcurrentOperations: 16
+  maxConcurrentRequests: 2
+  requestTimeout: "5s"
+  totalTimeout: "10m"
+artifacts:
+  captureBodies: false
+  captureHeaders: false
