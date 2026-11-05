@@ -44,25 +44,26 @@ type SemanticWorkCheckpointV1 struct {
 }
 
 type SemanticWorkEvidenceV1 struct {
-	SchemaVersion                 int                      `json:"schemaVersion"`
-	Work                          SemanticWorkCheckpointV1 `json:"work"`
-	Observations                  int                      `json:"observations"`
-	AnalyzeCalls                  int                      `json:"analyzeCalls"`
-	BackgroundMaintenanceEnabled  bool                     `json:"backgroundMaintenanceEnabled"`
-	QueueDepthPending             int32                    `json:"queueDepthPending"`
-	QueueDepthRunning             int32                    `json:"queueDepthRunning"`
-	QueueDepthRetryable           int32                    `json:"queueDepthRetryable"`
-	QueueDepthPermanent           int32                    `json:"queueDepthPermanent"`
-	LatestObservedGraphRevision   uint64                   `json:"latestObservedGraphRevision"`
-	FreshThroughGraphRevision     uint64                   `json:"freshThroughGraphRevision"`
-	AnalyzedThroughGraphRevision  uint64                   `json:"analyzedThroughGraphRevision"`
-	UnresolvedGapCount            uint64                   `json:"unresolvedGapCount"`
-	OldestUnresolvedGraphRevision uint64                   `json:"oldestUnresolvedGraphRevision"`
-	CapacityState                 string                   `json:"capacityState"`
-	ConfiguredFrontierLimit       uint64                   `json:"configuredFrontierLimit"`
-	ConfiguredGapIntervalLimit    uint64                   `json:"configuredGapIntervalLimit"`
-	ConfiguredRevisionSpanLimit   uint64                   `json:"configuredRevisionSpanLimit"`
-	ConfiguredSerializedByteLimit uint64                   `json:"configuredSerializedByteLimit"`
+	SchemaVersion                 int                                `json:"schemaVersion"`
+	Work                          SemanticWorkCheckpointV1           `json:"work"`
+	Reliability                   *SemanticWorkReliabilityEvidenceV1 `json:"reliability,omitempty"`
+	Observations                  int                                `json:"observations"`
+	AnalyzeCalls                  int                                `json:"analyzeCalls"`
+	BackgroundMaintenanceEnabled  bool                               `json:"backgroundMaintenanceEnabled"`
+	QueueDepthPending             int32                              `json:"queueDepthPending"`
+	QueueDepthRunning             int32                              `json:"queueDepthRunning"`
+	QueueDepthRetryable           int32                              `json:"queueDepthRetryable"`
+	QueueDepthPermanent           int32                              `json:"queueDepthPermanent"`
+	LatestObservedGraphRevision   uint64                             `json:"latestObservedGraphRevision"`
+	FreshThroughGraphRevision     uint64                             `json:"freshThroughGraphRevision"`
+	AnalyzedThroughGraphRevision  uint64                             `json:"analyzedThroughGraphRevision"`
+	UnresolvedGapCount            uint64                             `json:"unresolvedGapCount"`
+	OldestUnresolvedGraphRevision uint64                             `json:"oldestUnresolvedGraphRevision"`
+	CapacityState                 string                             `json:"capacityState"`
+	ConfiguredFrontierLimit       uint64                             `json:"configuredFrontierLimit"`
+	ConfiguredGapIntervalLimit    uint64                             `json:"configuredGapIntervalLimit"`
+	ConfiguredRevisionSpanLimit   uint64                             `json:"configuredRevisionSpanLimit"`
+	ConfiguredSerializedByteLimit uint64                             `json:"configuredSerializedByteLimit"`
 }
 
 func awaitSemanticWork(ctx context.Context, client adminv1.AdminSemanticMaintenanceServiceClient, resources *provision.SemanticResources, target map[string]any) (SemanticWorkEvidenceV1, error) {
@@ -208,18 +209,24 @@ func observeSemanticWork(ctx context.Context, client adminv1.AdminSemanticMainte
 	}
 	reliability, err := client.GetSemanticReliabilityStatus(ctx, &adminv1.GetSemanticReliabilityStatusRequest{SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey})
 	if err != nil {
+		result.Reliability = &SemanticWorkReliabilityEvidenceV1{SchemaVersion: 1, RPCCode: status.Code(err).String(), RejectionReason: "rpc-failure"}
 		return status.Error(status.Code(err), "semantic work reliability-status RPC failed")
 	}
-	if reliability == nil || reliability.GetDegraded() || reliability.GetRebuildRequired() || reliability.GetSemanticGeneration() == 0 || reliability.GetConfiguredFrontierLimit() == 0 || reliability.GetConfiguredGapIntervalLimit() == 0 || reliability.GetConfiguredRevisionSpanLimit() == 0 || reliability.GetConfiguredSerializedByteLimit() == 0 || reliability.GetCapacityState() != "ok" {
-		return errors.New("semantic work requires supported, nondegraded bounded reliability evidence")
+	// Preserve safe observed values before any rejection, rather than reporting
+	// unpopulated zeros as if the daemon returned them. Raw error/state text and
+	// foreign scope IDs never enter this evidence.
+	proof := captureSemanticWorkReliability(reliability, resources)
+	result.Reliability = proof
+	result.LatestObservedGraphRevision, result.FreshThroughGraphRevision = proof.LatestObservedGraphRevision, proof.FreshThroughGraphRevision
+	result.AnalyzedThroughGraphRevision = proof.AnalyzedThroughGraphRevision
+	result.UnresolvedGapCount, result.OldestUnresolvedGraphRevision = proof.UnresolvedGapCount, proof.OldestUnresolvedGraphRevision
+	result.CapacityState, result.ConfiguredFrontierLimit = proof.CapacityState, proof.ConfiguredFrontierLimit
+	result.ConfiguredGapIntervalLimit, result.ConfiguredRevisionSpanLimit = proof.ConfiguredGapIntervalLimit, proof.ConfiguredRevisionSpanLimit
+	result.ConfiguredSerializedByteLimit = proof.ConfiguredSerializedByteLimit
+	if err := validateSemanticWorkReliability(proof, false); err != nil {
+		return err
 	}
-	if reliability.GetSpaceId() != resources.SpaceID || reliability.GetSemanticRuleId() != resources.SemanticRuleID || reliability.GetEmbeddingBindingKey() != resources.EmbeddingBindingKey {
-		return errors.New("semantic work reliability evidence is out of scope")
-	}
-	if state := reliability.GetRebuild().GetState(); state != "" && state != "completed" {
-		return errors.New("semantic work reliability evidence has an unsafe or unknown rebuild state")
-	}
-	work.SemanticGeneration = reliability.GetSemanticGeneration()
+	work.SemanticGeneration = proof.SemanticGeneration
 	if err := validateSemanticWorkCheckpoint(work); err != nil {
 		return err
 	}
@@ -232,12 +239,6 @@ func observeSemanticWork(ctx context.Context, client adminv1.AdminSemanticMainte
 		}
 	}
 	result.Work = work
-	result.LatestObservedGraphRevision, result.FreshThroughGraphRevision = reliability.GetLatestObservedGraphRevision(), reliability.GetFreshThroughGraphRevision()
-	result.AnalyzedThroughGraphRevision = reliability.GetAnalyzedThroughGraphRevision()
-	result.UnresolvedGapCount, result.OldestUnresolvedGraphRevision = reliability.GetUnresolvedGapCount(), reliability.GetOldestUnresolvedGraphRevision()
-	result.CapacityState, result.ConfiguredFrontierLimit = reliability.GetCapacityState(), reliability.GetConfiguredFrontierLimit()
-	result.ConfiguredGapIntervalLimit, result.ConfiguredRevisionSpanLimit = reliability.GetConfiguredGapIntervalLimit(), reliability.GetConfiguredRevisionSpanLimit()
-	result.ConfiguredSerializedByteLimit = reliability.GetConfiguredSerializedByteLimit()
 	if result.LatestObservedGraphRevision < revision || result.AnalyzedThroughGraphRevision < revision || result.AnalyzedThroughGraphRevision > result.LatestObservedGraphRevision || result.FreshThroughGraphRevision > result.AnalyzedThroughGraphRevision {
 		return errors.New("semantic work reliability frontiers contradict the committed revision")
 	}

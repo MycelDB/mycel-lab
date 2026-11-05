@@ -331,6 +331,18 @@ or reconstruct a missing queue; normal public maintenance resumes only after the
 preserved work ID, generation, revision range, and attempts are verified. This is
 not automatic/in-flight provider recovery or out-of-order completion proof.
 
+For pinned v0.21.4, `rebuild_required` is also true for unresolved backlog. A
+pending/failure witness must pair that flag with positive gaps, stale freshness,
+healthy bounded capacity, and an explicit idle/completed rebuild status. It does
+not authorize a repair rebuild. Required/running/failed/unknown rebuild states
+remain rejected. Completion still requires zero gaps and a false flag. Safe
+reliability scalars and fixed rejection reasons are retained before validation;
+unpopulated zeros must not be interpreted as a daemon capability response.
+
+The approved clean `6615c17` aggregate stopped at the old pending-capture guard
+after contract/recovery passed; thirteen later cases were not run. A corrected
+harness needs a new frozen identity and fresh approval, not an automatic rerun.
+
 The new ordering/failure cases use finite request sequences and local emulator
 controls; build a clean emulator from the same exact Lab source and supply its
 immutable image ID with `--environment-option providerEmulatorImage=<image-id>`.

@@ -52,8 +52,12 @@ and vector space independently, requiring a new generation, rebuild-required sta
 and rejected pre-rebuild search before each explicit authorized rebuild. Final search
 must retain the acknowledged graph revision and exact configured identity/shape.
 
-These are implementations and local harness regressions, not daemon acceptance.
-Fresh approved v0.21.4 execution is still required. Live profiles remain manual,
+These implementations and local harness regressions are not full daemon acceptance.
+The approved clean 6615c17 aggregate passed contract/recovery, then failed pending
+capture before restart; thirteen cases were not reached. Its work/fault readers
+incorrectly rejected v0.21.4's unresolved-gap boolean. The correction preserves
+actual rebuild/capacity/freshness fences and retains safe rejection diagnostics.
+Fresh approved execution of the changed clean harness is still required. Live profiles remain manual,
 separately approved, and non-gating; no hosted execution is part of this batch.
 
 The earlier clean committed Lab `9b42793` aggregate passed three scenarios / 20
