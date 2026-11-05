@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myceldb.io/schemas/release-execution-bundle/v1.schema.json",
+  "title": "Mycel Lab release execution bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "sourceRoot", "sources", "harness", "images", "files", "tools", "scenarios"],
+  "properties": {
+    "apiVersion": {"const": "myceldb.io/release-execution-bundle/v1"},
+    "kind": {"const": "ReleaseExecutionBundle"},
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "candidateId", "createdAt"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "candidateId": {"type": "string", "minLength": 1},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "sourceRoot": {"type": "string", "minLength": 1},
+    "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
+    "harness": {"$ref": "#/$defs/harness"},
+    "images": {
+      "type": "object", "additionalProperties": false, "required": ["daemon"],
+      "properties": {
+        "daemon": {"$ref": "#/$defs/nativeRegistryImage"},
+        "providerEmulator": {"$ref": "#/$defs/image"},
+        "helpers": {"type": "array", "items": {"$ref": "#/$defs/helperImage"}}
+      }
+    },
+    "files": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/file"}},
+    "tools": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/tool"}},
+    "scenarios": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/scenario"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "gitObject": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "duration": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "path", "revision", "tree"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "revision": {"$ref": "#/$defs/gitObject"},
+        "tree": {"$ref": "#/$defs/gitObject"},
+        "dirty": {"const": false}
+      }
+    },
+    "harness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "executableSHA256", "revision", "tree", "modulePath", "goVersion"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "executableSHA256": {"$ref": "#/$defs/sha256"},
+        "revision": {"$ref": "#/$defs/gitObject"},
+        "tree": {"$ref": "#/$defs/gitObject"},
+        "modulePath": {"type": "string", "minLength": 1},
+        "goVersion": {"type": "string", "minLength": 1},
+        "modified": {"const": false}
+      }
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "revision", "evidenceSource", "evidencePath"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "revision": {"$ref": "#/$defs/gitObject"},
+        "dirty": {"const": false},
+        "buildMethod": {"type": "string", "minLength": 1},
+        "buildContextSHA256": {"$ref": "#/$defs/sha256"},
+        "evidenceSource": {"type": "string", "minLength": 1},
+        "evidencePath": {"type": "string", "minLength": 1}
+      }
+    },
+    "platform": {
+      "type": "object", "additionalProperties": false,
+      "required": ["os", "architecture", "configDigest"],
+      "properties": {
+        "os": {"type": "string", "minLength": 1},
+        "architecture": {"type": "string", "minLength": 1},
+        "manifestDigest": {"$ref": "#/$defs/digest"},
+        "configDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "reference", "platforms", "provenance"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "reference": {"type": "string", "minLength": 1},
+        "local": {"type": "boolean"},
+        "imageId": {"$ref": "#/$defs/digest"},
+        "indexDigest": {"$ref": "#/$defs/digest"},
+        "platforms": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/platform"}},
+        "sideManifests": {"type": "array", "items": {"$ref": "#/$defs/digest"}},
+        "anonymousPull": {"type": "boolean"},
+        "runtimeEnvironmentVariable": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$"},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["local"], "properties": {"local": {"const": true}}},
+          "then": {"required": ["imageId"]},
+          "else": {"required": ["indexDigest", "anonymousPull"], "properties": {"anonymousPull": {"const": true}}}
+        }
+      ]
+    },
+    "registryImage": {
+      "allOf": [
+        {"$ref": "#/$defs/image"},
+        {
+          "type": "object",
+          "required": ["indexDigest", "anonymousPull"],
+          "properties": {
+            "local": {"const": false},
+            "anonymousPull": {"const": true}
+          }
+        }
+      ]
+    },
+    "nativeRegistryImage": {
+      "allOf": [
+        {"$ref": "#/$defs/registryImage"},
+        {
+          "type": "object",
+          "properties": {
+            "platforms": {
+              "allOf": [
+                {"contains": {"type": "object", "required": ["os", "architecture"], "properties": {"os": {"const": "linux"}, "architecture": {"const": "amd64"}}}},
+                {"contains": {"type": "object", "required": ["os", "architecture"], "properties": {"os": {"const": "linux"}, "architecture": {"const": "arm64"}}}}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "helperImage": {
+      "allOf": [
+        {"$ref": "#/$defs/nativeRegistryImage"},
+        {"type": "object", "required": ["runtimeEnvironmentVariable"]}
+      ]
+    },
+    "file": {
+      "type": "object", "additionalProperties": false, "required": ["source", "role", "path", "sha256"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "role": {"enum": ["source", "suite", "scenario", "cluster", "actor-profile", "provider-profile", "workflow", "runtime-config", "provenance"]},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "tool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "path", "executableSHA256", "versionArguments", "versionOutputSHA256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "executableSHA256": {"$ref": "#/$defs/sha256"},
+        "versionArguments": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "versionOutputSHA256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "finalization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sensitiveHostCleanup", "actorStop", "providerObservation", "clusterAssertions", "finalOracle", "portForwardStop", "scenarioCleanup", "environmentDelete", "deletionVerification"],
+      "properties": {
+        "sensitiveHostCleanup": {"$ref": "#/$defs/duration"},
+        "actorStop": {"$ref": "#/$defs/duration"},
+        "providerObservation": {"$ref": "#/$defs/duration"},
+        "clusterAssertions": {"$ref": "#/$defs/duration"},
+        "finalOracle": {"$ref": "#/$defs/duration"},
+        "portForwardStop": {"$ref": "#/$defs/duration"},
+        "scenarioCleanup": {"$ref": "#/$defs/duration"},
+        "environmentDelete": {"$ref": "#/$defs/duration"},
+        "deletionVerification": {"$ref": "#/$defs/duration"}
+      }
+    },
+    "runtimeFile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["option", "source", "path"],
+      "properties": {
+        "option": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1}
+      }
+    },
+    "scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "source", "scenarioPath", "resolvedScenarioSHA256", "environment", "daemonImage", "requiredTools", "outerTimeout", "finalization"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "scenarioPath": {"type": "string", "minLength": 1},
+        "suitePath": {"type": "string", "minLength": 1},
+        "resolvedScenarioSHA256": {"$ref": "#/$defs/sha256"},
+        "environment": {
+          "type": "object", "additionalProperties": false, "required": ["driver", "namespace", "options"],
+          "properties": {
+            "driver": {"enum": ["compose", "k3d"]},
+            "namespace": {"type": "string", "minLength": 1},
+            "keepOnFailure": {"type": "boolean"},
+            "options": {"type": "object"},
+            "runtimeFiles": {"type": "array", "items": {"$ref": "#/$defs/runtimeFile"}}
+          }
+        },
+        "daemonImage": {"type": "string", "minLength": 1},
+        "providerEmulatorImage": {"type": "string", "minLength": 1},
+        "requiredTools": {"type": "array", "minItems": 1, "items": {"enum": ["git", "docker", "docker-buildx", "docker-compose", "k3d", "kubectl"]}},
+        "outerTimeout": {"$ref": "#/$defs/duration"},
+        "finalization": {"$ref": "#/$defs/finalization"}
+      }
+    }
+  }
+}

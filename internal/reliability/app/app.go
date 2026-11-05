@@ -2,21 +2,30 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/catalog"
 	"github.com/MycelDB/mycel-lab/internal/reliability/metrics"
+	"github.com/MycelDB/mycel-lab/internal/reliability/releasebundle"
 	"github.com/MycelDB/mycel-lab/internal/reliability/runner"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 )
 
 const commandName = "mycel-lab"
+
+var (
+	candidateIDPattern = regexp.MustCompile(`^(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,30}[a-z0-9])$`)
+	allocationPattern  = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+)
 
 // Run executes the mycel-lab command and returns a process exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
@@ -42,6 +51,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runRun(args[1:], stdout, stderr)
 	case "runs":
 		return runRuns(args[1:], stdout, stderr)
+	case "release-bundle":
+		return runReleaseBundle(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, "mycel-lab development")
 		return 0
@@ -271,7 +282,7 @@ func runDelete(args []string, stdout, stderr io.Writer) int {
 
 func runRun(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--image <tag>] [--provider-profile <name-or-path>] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
+		fmt.Fprintln(stdout, "Usage: mycel-lab run <scenario|scenario-file|suite|suite-file> <name-or-path> [--dry-run] [--confirm-destructive] [--release-bundle <bundle.yaml> | --image <reference>] [--provider-profile <name-or-path>] [--console-endpoints] [--console-port-base <port>] [--environment-driver <driver>] [--environment-option key=value]")
 		return 0
 	}
 	if len(nonFlagArgs(args)) < 2 {
@@ -282,6 +293,9 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return 2
 	}
+	if runOpts.ReleaseBundle != nil {
+		defer runOpts.ReleaseBundle.Close()
+	}
 	positional := nonFlagArgs(args)
 	switch positional[0] {
 	case "scenario-file":
@@ -290,6 +304,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "resolve scenario-file: %v\n", err)
 			return 1
 		}
+		runOpts.ScenarioSourcePath = positional[1]
 		result, err := runner.RunScenario(context.Background(), resolved, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "run scenario-file: %v\n", err)
@@ -333,6 +348,7 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "resolve scenario: %v\n", err)
 			return 1
 		}
+		runOpts.ScenarioSourcePath = scenarioPath
 		result, err := runner.RunScenario(context.Background(), resolved, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "run scenario: %v\n", err)
@@ -344,6 +360,135 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "unknown run target %q\n", positional[0])
 		return 2
 	}
+}
+
+func applyCandidateAllocations(bundle *releasebundle.Bundle, candidateID string) error {
+	for index := range bundle.Scenarios {
+		binding := &bundle.Scenarios[index]
+		allocation := candidateID + "-" + binding.Name
+		if len(allocation) > 63 || !allocationPattern.MatchString(allocation) {
+			return fmt.Errorf("allocation %q is not a valid DNS label", allocation)
+		}
+		binding.Environment.Namespace = allocation
+		if binding.Environment.Options == nil {
+			binding.Environment.Options = map[string]any{}
+		}
+		delete(binding.Environment.Options, "projectNamePrefix")
+		delete(binding.Environment.Options, "clusterNamePrefix")
+		switch binding.Environment.Driver {
+		case "compose":
+			binding.Environment.Options["projectNamePrefix"] = allocation
+		case "k3d":
+			binding.Environment.Options["clusterNamePrefix"] = allocation
+		default:
+			return fmt.Errorf("scenario %q has unsupported environment driver %q", binding.Name, binding.Environment.Driver)
+		}
+	}
+	return nil
+}
+
+func runReleaseBundle(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprintln(stdout, "Usage: mycel-lab release-bundle <build <draft.yaml> <output.yaml>|validate <bundle.yaml>>")
+		return 0
+	}
+	if args[0] == "build" {
+		positional := nonFlagArgs(args)
+		if len(positional) != 3 {
+			fmt.Fprintln(stderr, "release-bundle build requires <draft.yaml> <output.yaml>")
+			return 2
+		}
+		bundle, err := releasebundle.LoadDraft(positional[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "load release bundle draft: %v\n", err)
+			return 1
+		}
+		if image := strings.TrimSpace(flagValue(args, "--daemon-image")); image != "" {
+			bundle.Images.Daemon.Reference = image
+		}
+		if bundle.Images.Daemon.Reference == "" {
+			fmt.Fprintln(stderr, "release-bundle build requires --daemon-image")
+			return 2
+		}
+		candidateID := strings.TrimSpace(flagValue(args, "--candidate-id"))
+		if !candidateIDPattern.MatchString(candidateID) {
+			fmt.Fprintln(stderr, "release-bundle build requires a lowercase DNS-label --candidate-id of at most 32 characters")
+			return 2
+		}
+		bundle.Metadata.Name = "release-execution-" + candidateID
+		bundle.Metadata.CandidateID = candidateID
+		bundle.Metadata.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := applyCandidateAllocations(bundle, candidateID); err != nil {
+			fmt.Fprintf(stderr, "release-bundle build: %v\n", err)
+			return 2
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), releasebundle.MaximumOuterBound)
+		defer cancel()
+		if err := bundle.Capture(ctx, nil, nil); err != nil {
+			fmt.Fprintf(stderr, "capture release bundle: %v\n", err)
+			return 1
+		}
+		for index := range bundle.Scenarios {
+			binding := &bundle.Scenarios[index]
+			sourceRoot, ok := bundle.ResolvedSource(binding.Source)
+			if !ok {
+				fmt.Fprintf(stderr, "capture release bundle: scenario %s has unknown source\n", binding.Name)
+				return 1
+			}
+			scenarioPath := filepath.Join(sourceRoot, binding.ScenarioPath)
+			resolved, resolveErr := catalog.ResolveScenarioFile(scenarioPath, catalog.ResolveOptions{ProviderDryRun: true, DeferLiveProviderValidation: true})
+			if resolveErr != nil {
+				fmt.Fprintf(stderr, "resolve bundled scenario %s: %v\n", binding.Name, resolveErr)
+				return 1
+			}
+			binding.ResolvedScenarioSHA256, err = runner.ResolvedScenarioSHA256(resolved)
+			if err != nil {
+				fmt.Fprintf(stderr, "hash bundled scenario %s: %v\n", binding.Name, err)
+				return 1
+			}
+			if len(binding.RequiredTools) == 0 {
+				binding.RequiredTools = []string{"git", "docker", "docker-buildx", "docker-compose"}
+				if binding.Environment.Driver == "k3d" {
+					binding.RequiredTools = append(binding.RequiredTools, "k3d", "kubectl")
+				}
+			}
+		}
+		if err := bundle.ValidateStructure(); err != nil {
+			fmt.Fprintf(stderr, "validate captured release bundle: %v\n", err)
+			return 1
+		}
+		if err := bundle.Write(positional[2]); err != nil {
+			fmt.Fprintf(stderr, "write release bundle: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "wrote release execution bundle %s\n", positional[2])
+		return 0
+	}
+	if args[0] != "validate" || len(nonFlagArgs(args)) != 2 {
+		fmt.Fprintln(stderr, "release-bundle requires build or validate")
+		return 2
+	}
+	path := nonFlagArgs(args)[1]
+	bundle, err := releasebundle.Load(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "load release bundle: %v\n", err)
+		return 1
+	}
+	defer bundle.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), bundle.MaximumOuterTimeout())
+	defer cancel()
+	record, err := bundle.Preflight(ctx, releasebundle.CurrentHarnessIdentityContext(ctx, bundle), nil, nil)
+	encoded, encodeErr := json.MarshalIndent(record, "", "  ")
+	if encodeErr != nil {
+		fmt.Fprintf(stderr, "encode release bundle validation: %v\n", encodeErr)
+		return 1
+	}
+	fmt.Fprintln(stdout, string(encoded))
+	if err != nil {
+		fmt.Fprintf(stderr, "validate release bundle: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options, bool) {
@@ -366,6 +511,19 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 		fmt.Fprintf(stderr, "invalid --image: %v\n", err)
 		return runner.Options{}, false
 	}
+	var bundle *releasebundle.Bundle
+	bundlePath := strings.TrimSpace(flagValue(args, "--release-bundle"))
+	if hasFlag(args, "--release-bundle") && (bundlePath == "" || strings.HasPrefix(bundlePath, "-")) {
+		fmt.Fprintln(stderr, "invalid --release-bundle: requires a nonempty path that does not begin with '-'")
+		return runner.Options{}, false
+	}
+	if bundlePath != "" {
+		bundle, err = releasebundle.Load(bundlePath)
+		if err != nil {
+			fmt.Fprintf(stderr, "invalid --release-bundle: %v\n", err)
+			return runner.Options{}, false
+		}
+	}
 	return runner.Options{
 		DryRun:                   hasFlag(args, "--dry-run"),
 		ArtifactRoot:             flagValue(args, "--artifact-root"),
@@ -378,6 +536,7 @@ func runOptionsFromArgs(args []string, stdout, stderr io.Writer) (runner.Options
 		ProviderProfileOverride:  strings.TrimSpace(flagValue(args, "--provider-profile")),
 		ProfileDirs:              flagValues(args, "--profile-dir"),
 		ProgressWriter:           stdout,
+		ReleaseBundle:            bundle,
 	}, true
 }
 
@@ -526,6 +685,7 @@ Commands:
   delete   Delete one unused catalog definition version
   run      Run scenarios or suites
   runs     List, show, and compare persisted runs
+  release-bundle  Validate a hermetic release execution bundle
   version  Print version information
 
 Use "mycel-lab <command> --help" for command-specific help.
@@ -559,7 +719,7 @@ func flagTakesValue(arg string) bool {
 		return false
 	}
 	switch arg {
-	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base", "--image", "--provider-profile":
+	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base", "--image", "--provider-profile", "--release-bundle", "--environment-driver", "--environment-namespace", "--environment-option", "--daemon-image", "--candidate-id":
 		return true
 	default:
 		return false

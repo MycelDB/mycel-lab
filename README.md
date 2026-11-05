@@ -14,6 +14,7 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Provider profiles, budgets, and artifact safety](docs/design/provider-profiles.md)
 - [Semantic graph-index reliability suites](docs/design/semantic-graph-index-reliability-suites.md)
 - [Semantic suite implementation and validation](docs/implementation/semantic-graph-index-reliability-suites-plan.md)
+- [Hermetic release execution bundles](docs/design/release-execution-bundles.md)
 - [Structured reliability harness implementation plan](docs/implementation/reliability-harness-implementation-plan.md)
 - [Environment driver abstraction implementation plan](docs/implementation/environment-driver-abstraction-plan.md)
 - [MycelDB system integration migration plan](docs/implementation/system-integration-migration-plan.md)
@@ -21,6 +22,15 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Native wrapper transition inventory](docs/implementation/native-wrapper-transition-inventory.md)
 - [Operations guide](docs/operations.md)
 - [CI and protected reliability execution](docs/operations/ci-release-integration.md)
+
+## Branch integration
+
+New work targets `develop`; release promotion goes from `develop` to `main`.
+If a release fix lands directly on `main`, merge `main` back into `develop` through
+a reviewed merge PR, preserving both histories and testing the combined tree.
+Do not reset either branch or squash away the back-merge ancestry. Check that
+`git merge-base --is-ancestor origin/main origin/develop` succeeds after syncing.
+Branch synchronization does not transfer runtime evidence or authorize a release.
 
 ## Current commands
 
@@ -34,6 +44,10 @@ mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml --d
 mycel-lab run scenario-file tests/reliability/scenarios/example/example.yaml --dry-run \
   --provider-profile tests/reliability/provider-profiles/deterministic-token-basis-v1.yaml
 mycel-lab run suite-file tests/reliability/suites/raft-baseline.yaml --dry-run
+# Capture and validate a release bundle from a maintained draft placed above clean source checkouts.
+mycel-lab release-bundle build /candidate/release-bundle-draft.yaml /candidate/release-bundle.yaml \
+  --daemon-image 'docker.io/myceldb/mycel@sha256:<64-hex-digest>' --candidate-id '<approved-id>'
+mycel-lab release-bundle validate /candidate/release-bundle.yaml
 # Non-dry runs require local k3d + kubectl and create disposable clusters.
 mycel-lab run scenario actor-noop --confirm-destructive
 mycel-lab run scenario graph-actor-smoke --confirm-destructive

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/MycelDB/mycel-lab/internal/reliability/releasebundle"
 )
 
 func TestRunHelp(t *testing.T) {
@@ -19,6 +21,28 @@ func TestRunHelp(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr=%q, want empty", stderr.String())
+	}
+}
+
+func TestApplyCandidateAllocationsUsesDriverSpecificOptions(t *testing.T) {
+	bundle := &releasebundle.Bundle{Scenarios: []releasebundle.ScenarioBinding{
+		{Name: "compose-gate", Environment: releasebundle.EnvironmentBinding{Driver: "compose", Options: map[string]any{"clusterNamePrefix": "draft"}}},
+		{Name: "k3d-gate", Environment: releasebundle.EnvironmentBinding{Driver: "k3d", Options: map[string]any{"projectNamePrefix": "draft"}}},
+	}}
+	if err := applyCandidateAllocations(bundle, "candidate-21"); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := bundle.Scenarios[0].Environment.Options["clusterNamePrefix"]; exists {
+		t.Fatalf("Compose options=%v", bundle.Scenarios[0].Environment.Options)
+	}
+	if got := bundle.Scenarios[0].Environment.Options["projectNamePrefix"]; got != "candidate-21-compose-gate" {
+		t.Fatalf("Compose allocation=%v", got)
+	}
+	if _, exists := bundle.Scenarios[1].Environment.Options["projectNamePrefix"]; exists {
+		t.Fatalf("k3d options=%v", bundle.Scenarios[1].Environment.Options)
+	}
+	if got := bundle.Scenarios[1].Environment.Options["clusterNamePrefix"]; got != "candidate-21-k3d-gate" {
+		t.Fatalf("k3d allocation=%v", got)
 	}
 }
 
