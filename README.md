@@ -86,7 +86,9 @@ mycel-lab run suite raft-reliability-baseline --dry-run
 Canonical semantic scenarios now default to the immutable **v0.21.4** daemon
 image. Recovery includes a [controlled pending-work restart case](tests/reliability/scenarios/compose-semantic-pending-restart/compose-semantic-pending-restart.md),
 with read-only work-identity/generation checks before normal maintenance resumes.
-The expanded four-scenario aggregate requires fresh approved execution; the
+The expanded 16-scenario / 65-phase aggregate adds controlled out-of-order
+publication, nine protocol-failure cases, same-space domain isolation, and independent
+configured model/dimension/vector-space migration. It requires fresh approved execution; the
 previous v0.21.3 pass is not qualification for this new baseline. Dry-runs do not
 authorize destructive or hosted-provider execution.
 

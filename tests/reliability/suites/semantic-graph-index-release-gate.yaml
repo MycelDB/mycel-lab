@@ -19,6 +19,7 @@ scenarios:
   - path: ../scenarios/compose-semantic-fault-deadline/compose-semantic-fault-deadline.yaml
   - path: ../scenarios/compose-semantic-fault-cancel/compose-semantic-fault-cancel.yaml
   - path: ../scenarios/compose-semantic-domain-isolation/compose-semantic-domain-isolation.yaml
+  - path: ../scenarios/compose-semantic-model-migration/compose-semantic-model-migration.yaml
 execution:
   mode: sequential
   parallelism: 1

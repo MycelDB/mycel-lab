@@ -1,0 +1,322 @@
+apiVersion: "myceldb.io/reliability/v1"
+kind: "Scenario"
+metadata:
+  name: "compose-semantic-model-migration"
+  description: "Generated controlled semantic provider correctness case; requires fresh runtime qualification."
+seed: 4680
+providerProfileRef: "deterministic-token-basis-v1"
+environment:
+  driver: "compose"
+  namespace: "mycel-lab"
+  options:
+    composeFiles:
+      - "../mycel/tests/compose/cluster/compose.yml"
+      - "tests/compose/ports.yml"
+      - "tests/compose/semantic-pending-restart.yml"
+    projectNamePrefix: "mycel-lab-semantic-model-migration"
+    imageOverride: "docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7"
+    serviceNames:
+      - "myceld-a"
+      - "myceld-b"
+      - "myceld-c"
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - "per-node-endpoints"
+      - "node-exec"
+      - "rolling-restart"
+      - "logs"
+clusterRef: "raft-3-node"
+clusterOverrides:
+  image: "docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7"
+actorGroups:
+  -
+    name: "semantic-controller"
+    profileRef: "semantic-controller"
+    count: 3
+    rate:
+      mode: "per-actor"
+      commitsPerSecond: 1
+semantic:
+  targetActorGroup: "semantic-controller"
+  rule:
+    deferProvisioning: true
+    key: "compose-semantic-model-migration"
+    targetLabels:
+      - "Document"
+    bindingKey: "search"
+    sourceMode: "self"
+    includeProperties:
+      - "text"
+    minimumTextLength: 1
+    physicalIndex: "exact"
+    dirtyCooldown: "1ms"
+    maxBatchSize: 16
+    workerConcurrency: 1
+  maintenance:
+    timeout: "30s"
+    pollInterval: "100ms"
+    analyzeLimit: 64
+    processLimit: 64
+phases:
+  -
+    name: "establish-old-configured-model-and-vector-shape"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-node-create"
+        target:
+          nodeId: "00000000-0000-4000-8000-000000004680"
+          labels:
+            - "Document"
+          text: "axis-0"
+          captureRevisionAs: "graph-commit"
+      -
+        type: "semantic-rule-create"
+        target:
+          semantic: "deferred"
+      -
+        type: "semantic-backfill"
+        target:
+          force: true
+          limit: 1
+          expectedSelected: 1
+          minimumGenerated: 1
+      -
+        type: "semantic-maintenance-await"
+        target:
+          timeout: "30s"
+          pollInterval: "100ms"
+      -
+        type: "semantic-reliability-assert"
+        target:
+          requireFreshAtLatest: true
+          captureGenerationAs: "baseline-generation"
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds:
+            - "00000000-0000-4000-8000-000000004680"
+          requireProvenance: true
+          expectSourceRevisionFrom: "graph-commit"
+          timeout: "30s"
+          pollInterval: "100ms"
+          requireConfiguredRoute: true
+          expectedDimensions: 8
+          expectedVectorSpaceKey: "mycel/token-basis-v1/8"
+          captureRecordAs: "baseline-record"
+          captureConfigurationHashAs: "baseline-config"
+  -
+    name: "configured-model-identity-migration-requires-explicit-rebuild"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-route-create"
+        target:
+          name: "model-v2"
+          dimensions: 8
+          vectorSpaceKey: "mycel/token-basis-v1/8"
+      -
+        type: "semantic-reliability-assert"
+        target:
+          requireFreshAtLatest: true
+          expectGenerationFrom: "baseline-generation"
+      -
+        type: "semantic-route-bind"
+        target:
+          route: "model-v2"
+      -
+        type: "semantic-reliability-assert"
+        target:
+          expectRebuildRequired: true
+          requireGenerationAfter: "baseline-generation"
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          expectFailureCode: "FailedPrecondition"
+      -
+        type: "semantic-rebuild"
+        target:
+          backfillLimit: 16
+          maintenanceBatchLimit: 64
+          maxCatchupIterations: 64
+          captureGenerationAs: "model-generation"
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds:
+            - "00000000-0000-4000-8000-000000004680"
+          requireProvenance: true
+          expectSourceRevisionFrom: "graph-commit"
+          timeout: "30s"
+          pollInterval: "100ms"
+          requireConfiguredRoute: true
+          configuredRoute: "model-v2"
+          expectedDimensions: 8
+          expectedVectorSpaceKey: "mycel/token-basis-v1/8"
+          expectedPayloadText: "axis-0"
+          expectGenerationFrom: "model-generation"
+          rejectRecordFrom: "baseline-record"
+          rejectConfigurationHashFrom: "baseline-config"
+          captureRecordAs: "model-record"
+          captureConfigurationHashAs: "model-config"
+  -
+    name: "dimension-change-alone-invalidates-old-generation"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-model-config-update"
+        target:
+          route: "model-v2"
+          dimensions: 16
+      -
+        type: "semantic-reliability-assert"
+        target:
+          expectRebuildRequired: true
+          requireGenerationAfter: "model-generation"
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          expectFailureCode: "FailedPrecondition"
+      -
+        type: "semantic-rebuild"
+        target:
+          backfillLimit: 16
+          maintenanceBatchLimit: 64
+          maxCatchupIterations: 64
+          captureGenerationAs: "dimension-generation"
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds:
+            - "00000000-0000-4000-8000-000000004680"
+          requireProvenance: true
+          expectSourceRevisionFrom: "graph-commit"
+          timeout: "30s"
+          pollInterval: "100ms"
+          requireConfiguredRoute: true
+          configuredRoute: "model-v2"
+          expectedDimensions: 16
+          expectedVectorSpaceKey: "mycel/token-basis-v1/8"
+          expectedPayloadText: "axis-0"
+          expectGenerationFrom: "dimension-generation"
+          rejectRecordFrom: "model-record"
+          rejectConfigurationHashFrom: "model-config"
+          captureRecordAs: "dimension-record"
+          captureConfigurationHashAs: "dimension-config"
+  -
+    name: "vector-space-change-alone-invalidates-old-generation"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-model-config-update"
+        target:
+          route: "model-v2"
+          vectorSpaceKey: "mycel/migrated-space-v3"
+      -
+        type: "semantic-reliability-assert"
+        target:
+          expectRebuildRequired: true
+          requireGenerationAfter: "dimension-generation"
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          expectFailureCode: "FailedPrecondition"
+      -
+        type: "semantic-rebuild"
+        target:
+          backfillLimit: 16
+          maintenanceBatchLimit: 64
+          maxCatchupIterations: 64
+          captureGenerationAs: "space-generation"
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds:
+            - "00000000-0000-4000-8000-000000004680"
+          requireProvenance: true
+          expectSourceRevisionFrom: "graph-commit"
+          timeout: "30s"
+          pollInterval: "100ms"
+          requireConfiguredRoute: true
+          configuredRoute: "model-v2"
+          expectedDimensions: 16
+          expectedVectorSpaceKey: "mycel/migrated-space-v3"
+          expectedPayloadText: "axis-0"
+          expectGenerationFrom: "space-generation"
+          rejectRecordFrom: "dimension-record"
+          rejectConfigurationHashFrom: "dimension-config"
+          captureRecordAs: "space-record"
+          captureConfigurationHashAs: "space-config"
+  -
+    name: "migrated-identity-shape-and-record-survive-retained-restart"
+    duration: "1ms"
+    events:
+      -
+        type: "rolling-restart"
+        target:
+          scope: "cluster"
+      -
+        type: "cluster-recovery-wait"
+        target:
+          timeout: "60s"
+          interval: "200ms"
+          commandTimeout: "3s"
+          minimumStablePolls: 3
+          reuseEndpointSessions: true
+      -
+        type: "semantic-reliability-assert"
+        target:
+          requireFreshAtLatest: true
+          expectGenerationFrom: "space-generation"
+          expectFreshRevisionFrom: "graph-commit"
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds:
+            - "00000000-0000-4000-8000-000000004680"
+          requireProvenance: true
+          expectSourceRevisionFrom: "graph-commit"
+          timeout: "30s"
+          pollInterval: "100ms"
+          requireConfiguredRoute: true
+          configuredRoute: "model-v2"
+          expectedDimensions: 16
+          expectedVectorSpaceKey: "mycel/migrated-space-v3"
+          expectedPayloadText: "axis-0"
+          expectGenerationFrom: "space-generation"
+          expectRecordFrom: "space-record"
+          expectConfigurationHashFrom: "space-config"
+    outcome:
+      availability: "expected-degradation"
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: "60s"
+    healthConvergenceInterval: "2s"
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

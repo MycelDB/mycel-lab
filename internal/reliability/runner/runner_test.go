@@ -940,7 +940,7 @@ func TestSemanticGraphIndexContractSuiteCanonicalNameDryRuns(t *testing.T) {
 	if result.SuiteName != "semantic-graph-index-contract" {
 		t.Fatalf("SuiteName=%q want semantic-graph-index-contract", result.SuiteName)
 	}
-	want := []string{"compose-semantic-graph-contract", "compose-semantic-domain-isolation"}
+	want := []string{"compose-semantic-graph-contract", "compose-semantic-domain-isolation", "compose-semantic-model-migration"}
 	if len(result.Results) != len(want) {
 		t.Fatalf("contract scenarios=%d want %d", len(result.Results), len(want))
 	}
@@ -1021,7 +1021,7 @@ func TestSemanticGraphIndexReleaseGateSuiteDryRuns(t *testing.T) {
 		t.Fatalf("SuiteName=%q want semantic-graph-index-release-gate", result.SuiteName)
 	}
 	want := append([]string{"compose-semantic-graph-contract", "compose-semantic-graph-recovery", "compose-semantic-pending-restart", "compose-semantic-openai-emulator", "compose-semantic-out-of-order"}, semanticFaultScenarioNames()...)
-	want = append(want, "compose-semantic-domain-isolation")
+	want = append(want, "compose-semantic-domain-isolation", "compose-semantic-model-migration")
 	if len(result.Results) != len(want) {
 		t.Fatalf("scenario count=%d want %d", len(result.Results), len(want))
 	}
@@ -1035,8 +1035,8 @@ func TestSemanticGraphIndexReleaseGateSuiteDryRuns(t *testing.T) {
 		}
 		phases += len(result.Results[index].Phases)
 	}
-	if phases != 60 {
-		t.Fatalf("planned phases=%d want 60", phases)
+	if phases != 65 {
+		t.Fatalf("planned phases=%d want 65", phases)
 	}
 }
 

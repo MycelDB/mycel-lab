@@ -1,6 +1,6 @@
 # Semantic graph-index reliability suites implementation plan
 
-Status: v0.21.4 continuation; controlled pending-work restart implemented, environment-backed acceptance pending
+Status: v0.21.4 batch defines 16 scenarios / 65 phases; runtime acceptance pending, native composition capability-blocked
 
 Tracking issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
@@ -26,12 +26,35 @@ resumes the same work. It proves controlled durable-work resumption, not automat
 background scheduling or interruption during a provider call. A second restart
 checks completed-work and semantic-record identity without replay.
 
-The recovery suite now contains two scenarios, and the credential-free aggregate
-contains four scenarios / 25 phases. These expanded definitions need fresh
-approved v0.21.4 execution; unit/fake-RPC tests and dry-runs do not establish daemon
-restart behavior. Protocol coverage still proves only the local OpenAI-compatible
-embedding success path. Live profiles remain manual, separately approved, and
-non-gating; no hosted execution is part of this continuation.
+The contract suite contains three scenarios, recovery three, protocol ten, the
+standalone failure matrix nine, and the credential-free aggregate
+contains **16 scenarios / 65 phases**. The out-of-order case holds an older pinned
+backfill response until a newer maintenance publication is searched successfully,
+then requires explicit superseded skip and unchanged newer record identity after
+release. It does not rely on racing two ordinary rule-fenced workers.
+
+Nine finite emulator cases cover 429/Retry-After, 503, real connection loss,
+malformed/truncated JSON, invalid dimensions, refusal, caller deadline, and
+observed in-flight cancellation. Failure must be proved before bounded recovery
+of the same work/generation; permanent/interrupted cases use an explicit public
+retry, not a rebuild or graph repair.
+
+Provider-neutral ordered stage contracts now preserve per-stage profile/model /
+endpoint/source identity and reject unsupported runtime adapters before deployment
+or secret lookup. Native generation/enrichment semantic execution remains blocked
+by the pinned v0.21.4 API; see the [composition contract](../design/semantic-provider-composition.md).
+
+Two dedicated deterministic cases close the audit's implementation gaps. Same-space
+multi-domain isolation keeps the actor/principal/node UUID fixed, proves independent
+indexes with broad positive and negative searches, and checks hydration, peer-only
+updates, and retained restart. Configured migration changes model identity, dimensions,
+and vector space independently, requiring a new generation, rebuild-required state,
+and rejected pre-rebuild search before each explicit authorized rebuild. Final search
+must retain the acknowledged graph revision and exact configured identity/shape.
+
+These are implementations and local harness regressions, not daemon acceptance.
+Fresh approved v0.21.4 execution is still required. Live profiles remain manual,
+separately approved, and non-gating; no hosted execution is part of this batch.
 
 The earlier clean committed Lab `9b42793` aggregate passed three scenarios / 20
 phases against immutable v0.21.3, with successful final oracles, cleanup, and
@@ -39,9 +62,13 @@ artifact safety. That clean-source run superseded the earlier development-harnes
 qualification gap, but does not qualify this new harness, expanded scenario set,
 or v0.21.4 image. See the validation record for identities and limits.
 
-Actual remaining implementation gaps include stale/out-of-order provider
-completion, the full protocol failure matrix, and broader provider composition.
-The milestone checklists remain acceptance gates, not implementation-only claims.
+The [criterion-by-criterion acceptance audit](semantic-graph-index-issue46-acceptance-audit.md)
+separates delivered code, historical qualification, new local tests, missing
+runtime proof, and actual remaining gaps. Same-space multi-domain isolation and
+configured model/dimension/vector-space migration now have independent definitions,
+not substitutions using cross-space isolation or a malformed provider vector. Native composed execution
+must remain explicitly blocked until real API/adapter support exists. Milestone
+checklists are acceptance gates, not implementation-only claims.
 
 ## 1. Purpose
 
@@ -177,12 +204,12 @@ prerequisite issue/PR and keep Mycel Lab assertions behind a capability gate.
 
 ### 4.3 Acceptance criteria
 
-- [ ] Provider profiles can be decoded, validated, and resolved in dry-run mode.
-- [ ] Secret values are never persisted in resolved artifacts.
-- [ ] Deterministic, emulator, and live profile validation paths are distinct.
-- [ ] Missing required live credentials fail before deployment.
-- [ ] Placeholder semantic suites are visible to the CLI/listing path.
-- [ ] Unit tests cover validation failures and artifact redaction rules.
+- [x] Provider profiles decode, validate, and resolve in dry-run mode.
+- [x] Resolved artifacts exclude secret values; negative tests cover redaction.
+- [x] Deterministic, emulator, and live validation paths are distinct.
+- [x] Missing live credentials fail configuration after authenticated capability discovery and before provider use.
+- [x] Canonical semantic suites are visible to the CLI/listing path.
+- [x] Unit tests cover validation failures and artifact redaction rules.
 
 ### 4.4 Suggested validation
 

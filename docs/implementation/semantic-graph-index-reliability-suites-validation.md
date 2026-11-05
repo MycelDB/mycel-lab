@@ -33,13 +33,63 @@ No post-boundary repair backfill, forced rebuild, reset, or reconstruction is
 allowed. Unknown capabilities, truncated/ambiguous evidence, falsely fresh work,
 changed identity/generation, and replayed attempts fail closed.
 
-The aggregate is now four scenarios / 25 phases rather than three / 20. Its new
-v0.21.4 environment-backed acceptance remains **not run** until fresh approval
-and execution against an exact reviewed harness. Unit/fake-RPC and planning-only
-checks validate the harness, not daemon restart behavior. No hosted-provider run
-is part of this continuation.
+The completion batch expands the aggregate from the landed four cases /
+25 phases to **16 scenarios / 65 phases**: true controlled out-of-order publication,
+nine finite provider-failure cases, independent same-space domain isolation, and
+configured model/dimension/vector-space migration. It also adds provider-stage planning and
+pre-deployment capability rejection for unsupported native composition. See the
+[acceptance audit](semantic-graph-index-issue46-acceptance-audit.md) for precise
+coverage, evidence levels, and remaining gaps.
 
-### Implementation-only validation
+No v0.21.4 environment-backed qualification has run. The previously prepared clean
+`3b1c222` four-case bundle was not executed and cannot qualify this expanded source
+or scope. Unit/fake-RPC and planning checks validate the harness only. Native
+semantic enrichment remains API/adapter-blocked; no hosted-provider run is part
+of this batch. Landing/CI status is recorded separately from these runtime claims.
+
+### Current batch: local harness validation only
+
+The uncommitted `issue/46-completion-protocol-composition` implementation passed
+all of the following with `GOWORK=off` and read-only module resolution:
+
+- Full Go tests and full race-enabled Go tests, both with `-count=1`.
+- Twenty race-enabled repetitions of ordering/failure, maintenance-deadline,
+  real HTTP gate/cancellation/connection-drop, composition, and finite-script
+  regression tests.
+- `go vet ./...` and trimpath/VCS-aware builds of both Lab and the provider emulator.
+- Twenty race-enabled repetitions of the new domain isolation, configured model
+  mutation/public-RPC, complete bounded model listing, generation-fence, provenance,
+  scoped identity, resource clone/cleanup, catalog, and target-validation regressions.
+- `python3 scripts/generateSemanticFaultMatrix.py --check` (31 fixture files) and
+  `python3 scripts/generateSemanticCompatibilityCases.py --check` (four fixture files).
+- Documentation checks, workflow policy, all 36 workflow-script tests, and
+  `git diff --check`.
+
+The real CLI also rejected an unsupported generation-plus-embedding composition
+with the expected missing-adapter error **before creating any run artifacts**.
+Catalog tests additionally prove this rejection precedes live credential lookup,
+and provisioning rejects a forged resolved plan that bypasses catalog checks.
+
+Latest planning-only evidence:
+`artifacts/dry-runs/issue46-domain-model-final-20261105T015350Z`.
+The credential-free aggregate resolves 16 scenarios / 65 phases; manual-live
+planning resolves one / four. All 17 terminal results declare `dryRun: true`,
+all manifest/Compose daemon selections match immutable v0.21.4, and provider
+request counts are zero. Artifact safety passed for 17 runs / 361 files.
+The executable is a dirty development harness, not a clean candidate. The older
+frozen four-case manifest's SHA-256 is unchanged; its approval remains pending.
+
+Earlier planning-only checkpoint retained separately:
+`artifacts/dry-runs/issue46-completion-batch-20261105T004317Z` covered the prior
+14-scenario / 55-phase aggregate plus live planning (15 runs / 317 files). It does
+not cover the subsequently added domain-isolation and configured-migration cases.
+
+These checks do not prove the new daemon interleavings, failure classifications,
+retry/cancellation recovery, or migration/isolation behavior in a real environment.
+They do not qualify native composition, open a PR, grant destructive approval,
+or transfer the older four-case bundle's identity to this batch.
+
+### Landed pending-restart implementation validation
 
 On branch `issue/46-v0214-pending-restart`, the working-tree implementation passed:
 
@@ -216,8 +266,9 @@ The clean v0.21.3 checkpoint above supersedes the original development-harness
 qualification gap. The current expanded v0.21.4 aggregate still needs its own
 reviewed-source approval and execution; no earlier pass transfers to it.
 
-Controlled pending-work restart is now defined with harness regressions but lacks
-fresh environment-backed acceptance. Stale/out-of-order provider completion,
-automatic/in-flight provider recovery, broader provider composition, and the full
-protocol error matrix remain actual implementation follow-ups. Nothing in this
+Pending restart, controlled out-of-order publication, and the nine-case failure
+matrix are defined with local harness regressions, but lack fresh environment-backed
+acceptance. Native composed semantic execution remains explicitly unsupported by
+the pinned API. Same-space domain isolation and configured model/dimension migration
+remain distinct coverage gaps identified by the acceptance audit. Nothing in this
 record authorizes publication, issue closure, or another destructive/live run.
