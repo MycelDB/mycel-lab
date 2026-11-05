@@ -2,8 +2,9 @@
 
 Issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
-Branch: `issue/46-completion-protocol-composition`. This is an implementation and
-evidence audit for the completion batch, not issue closure or runtime acceptance.
+Completion batch: PR #93, clean merge `6615c17`. Follow-up correction:
+`fix/46-pending-reliability-contract`. This audit separates implementation, the
+failed approved execution, and new harness-only evidence; it is not issue closure.
 
 ## Evidence levels
 
@@ -16,6 +17,14 @@ evidence audit for the completion batch, not issue closure or runtime acceptance
   domain isolation, and independent configured model/dimension/vector-space migration.
   Canonical aggregate definitions are **16 scenarios / 65 phases**. Local tests
   and dry-runs are harness evidence, never daemon/runtime evidence.
+- **Approved v0.21.4 run (failed):** clean `6615c17` passed contract/recovery,
+  then stopped at pending capture before any pending-case restart. Two scenarios
+  passed, one failed, thirteen were not run; 17 phases passed, one failed, 47
+  unexecuted. Cleanup, provenance and artifact safety passed, not aggregate acceptance.
+- **Pending-state correction:** work/fault readers now distinguish v0.21.4's
+  unresolved-gap boolean from actual required/running/failed rebuild state, retain
+  safe diagnostics before rejection, and preserve all identity/freshness fences.
+  Local regressions are not a replacement qualification or approval transfer.
 - **Unsupported:** pinned v0.21.4 semantic rule APIs have no native generation /
   enrichment projection stage. Unsupported compositions fail resolution with a
   typed capability error, including during dry-run. They never become a passed
@@ -25,9 +34,9 @@ evidence audit for the completion batch, not issue closure or runtime acceptance
 
 | # | Criterion | Implementation / evidence | Remaining acceptance |
 | --- | --- | --- | --- |
-| 1 | Committed content is projected, embedded, indexed, and returned from the semantic index | Canonical contract, direct semantic RPC, record/source revision/generation/configuration/model/vector identity assertions. Historical baseline qualified. | Fresh v0.21.4 aggregate execution. |
+| 1 | Committed content is projected, embedded, indexed, and returned from the semantic index | Canonical contract, direct semantic RPC, record/source revision/generation/configuration/model/vector identity assertions. Historical baseline qualified. | Clean 6615c17 contract passed on v0.21.4, but its aggregate failed later; the changed harness still requires fresh full qualification. |
 | 2 | Positive assertions cannot pass through lexical/hybrid/scan fallback | Direct semantic search only; strict IDs/provenance, warnings rejected, negative queries. | Preserve these controls in fresh execution; plausible hydration is not proof. |
-| 3 | Backfill/create/update/delete/transactions/freshness/restart/persistence/rebuild | Contract and recovery baseline qualified on v0.21.3. Landed pending-work case checks identity/generations/revisions/attempts across two retained-data restarts. | Pending-work and current expanded v0.21.4 runtime acceptance have not run. |
+| 3 | Backfill/create/update/delete/transactions/freshness/restart/persistence/rebuild | Contract and recovery baseline qualified on v0.21.3. Landed pending-work case checks identity/generations/revisions/attempts across two retained-data restarts. | Clean 6615c17 recovery passed; pending capture failed before restart. The corrected pending/fault readers and remaining aggregate cases require fresh qualification. |
 | 4 | Older/out-of-order responses cannot overwrite newer graph state | New `semantic-ordering-assert`: hold an older pinned backfill at the provider; commit, maintain, and search a newer revision **before release**; require explicit superseded skip and unchanged newer record after release. Real HTTP barrier and negative oracle tests. | Actual daemon execution of the new case. This is not inferred from concurrent rebuild or sleeps. |
 | 5 | Space/domain and authorization isolation | Historical contract has outsider-scope and unauthorized-principal controls. New `compose-semantic-domain-isolation` uses the same actor/principal/space/node UUID, different domains, independent indexes, broad positive/cross-query-negative searches without rule/binding selectors, and exact hydrated payload/provenance. Peer-only update and retained restart preserve the other domain's record. | New case has local regressions and planning evidence only; fresh v0.21.4 runtime qualification remains required. Different spaces alone are not domain-isolation proof. |
 | 6 | Dimension/model/projection changes fail closed or require migration/rebuild | Existing projection-change and malformed-vector tests remain separate. New `compose-semantic-model-migration` changes selected configured model, model dimensions, and vector-space identity independently. Each requires generation advancement, explicit rebuild-required state, pre-rebuild `FailedPrecondition`, and authorized rebuild. Post-rebuild search checks changed configuration/record identity, exact configured route/shape, unchanged acknowledged graph revision, and retained-restart preservation. | New case has local regressions and planning evidence only; actual v0.21.4 configuration invalidation, fencing, rebuild, and persistence must still be qualified. No daemon/API modification is inferred from harness tests. |
@@ -74,10 +83,10 @@ is held. No backfill, analysis, or repair follows release to hide a stale overwr
 
 ## Closeout decisions
 
-- Item #1 is landed in PR #92; exact v0.21.4 pending-restart runtime qualification
-  has not run. The previously frozen four-case plan does not cover this expanded batch.
-- Items #2/#3 from the working list now have executable scenario/oracle
-  implementations and local regressions; they are **not runtime-qualified**.
+- Item #1 is landed in PR #92; approved clean 6615c17 qualification failed during
+  pending capture before restart. The correction is harness code/tests, not a pass.
+- Items #2/#3 landed in PR #93 but were not reached by the stopped run. Their
+  executable scenarios/oracles and local regressions are **not runtime qualification**.
 - Item #4 has a wired, provider-neutral planning/validation contract and explicit
   unsupported-runtime rejection. Native enrichment execution is not implemented
   or claimed; supporting it requires a real daemon/API/public-adapter prerequisite.

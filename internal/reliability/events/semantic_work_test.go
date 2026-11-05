@@ -23,6 +23,7 @@ type semanticWorkProbe struct {
 	reliability             *adminv1.GetSemanticReliabilityStatusResponse
 	analyzeCalls, listCalls int
 	analyzeError            error
+	reliabilityError        error
 	list                    func(context.Context, *adminv1.ListSemanticMaintenanceWorkRequest) (*adminv1.ListSemanticMaintenanceWorkResponse, error)
 }
 
@@ -44,13 +45,13 @@ func (p *semanticWorkProbe) GetSemanticMaintenanceStatus(context.Context, *admin
 	return p.maintenance, nil
 }
 func (p *semanticWorkProbe) GetSemanticReliabilityStatus(context.Context, *adminv1.GetSemanticReliabilityStatusRequest, ...grpc.CallOption) (*adminv1.GetSemanticReliabilityStatusResponse, error) {
-	return p.reliability, nil
+	return p.reliability, p.reliabilityError
 }
 
 func semanticWorkFixture() (*semanticWorkProbe, *provision.SemanticResources, map[string]any) {
 	resources := &provision.SemanticResources{SpaceID: "00000000-0000-4000-8000-000000000101", DomainID: "00000000-0000-4000-8000-000000000102", SemanticRuleID: "00000000-0000-4000-8000-000000000103", EmbeddingBindingKey: "search", MaintenanceTimeout: 100 * time.Millisecond, MaintenancePollInterval: time.Millisecond, MaintenanceAnalyzeLimit: 16, EvidenceValues: map[string]string{"committed": "2"}}
 	work := &adminv1.SemanticMaintenanceWorkItem{WorkItemId: "00000000-0000-4000-8000-000000000105", SpaceId: resources.SpaceID, DomainId: resources.DomainID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, TargetNodeId: "00000000-0000-4000-8000-000000000104", Action: "refresh", Status: "pending", FirstGraphRevision: 2, LastGraphRevision: 2, WorkGeneration: 3}
-	probe := &semanticWorkProbe{work: work, maintenance: &adminv1.GetSemanticMaintenanceStatusResponse{QueueDepthPending: 1}, reliability: &adminv1.GetSemanticReliabilityStatusResponse{SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, LatestObservedGraphRevision: 2, AnalyzedThroughGraphRevision: 2, FreshThroughGraphRevision: 1, UnresolvedGapCount: 1, OldestUnresolvedGraphRevision: 2, SemanticGeneration: 1, ConfiguredFrontierLimit: 1024, ConfiguredGapIntervalLimit: 1024, ConfiguredRevisionSpanLimit: 1024, ConfiguredSerializedByteLimit: 1048576, CapacityState: "ok"}}
+	probe := &semanticWorkProbe{work: work, maintenance: &adminv1.GetSemanticMaintenanceStatusResponse{QueueDepthPending: 1}, reliability: &adminv1.GetSemanticReliabilityStatusResponse{SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, LatestObservedGraphRevision: 2, AnalyzedThroughGraphRevision: 2, FreshThroughGraphRevision: 1, UnresolvedGapCount: 1, OldestUnresolvedGraphRevision: 2, RebuildRequired: true, Rebuild: &adminv1.SemanticRebuildStatus{State: "completed"}, SemanticGeneration: 1, ConfiguredFrontierLimit: 1024, ConfiguredGapIntervalLimit: 1024, ConfiguredRevisionSpanLimit: 1024, ConfiguredSerializedByteLimit: 1048576, CapacityState: "ok"}}
 	return probe, resources, map[string]any{"nodeId": work.TargetNodeId, "expectedStatus": "pending", "expectRevisionFrom": "committed", "expectBackgroundMaintenanceEnabled": false, "expectedAttemptCount": 0}
 }
 
@@ -58,6 +59,7 @@ func completeSemanticWork(p *semanticWorkProbe) {
 	p.work.Status, p.work.AttemptCount = "complete", 1
 	p.maintenance.QueueDepthPending = 0
 	p.reliability.FreshThroughGraphRevision, p.reliability.UnresolvedGapCount, p.reliability.OldestUnresolvedGraphRevision = 2, 0, 0
+	p.reliability.RebuildRequired = false
 }
 
 func TestSemanticWorkCheckpointSurvivesPendingAndCompletedRestart(t *testing.T) {
@@ -128,7 +130,10 @@ func TestSemanticWorkRejectsMissingContradictoryOrUnsupportedEvidence(t *testing
 		"missing capacity evidence":              func(p *semanticWorkProbe) { p.reliability.ConfiguredFrontierLimit = 0 },
 		"unknown capacity state":                 func(p *semanticWorkProbe) { p.reliability.CapacityState = "unknown" },
 		"degraded reliability":                   func(p *semanticWorkProbe) { p.reliability.Degraded = true },
-		"rebuild required":                       func(p *semanticWorkProbe) { p.reliability.RebuildRequired = true },
+		"rebuild required":                       func(p *semanticWorkProbe) { p.reliability.Rebuild.State = "required" },
+		"failed rebuild":                         func(p *semanticWorkProbe) { p.reliability.Rebuild.State = "failed" },
+		"missing rebuild status":                 func(p *semanticWorkProbe) { p.reliability.Rebuild = nil },
+		"gap falsely clears rebuild flag":        func(p *semanticWorkProbe) { p.reliability.RebuildRequired = false },
 		"pending falsely fresh":                  func(p *semanticWorkProbe) { p.reliability.FreshThroughGraphRevision = 2 },
 		"pending range falsely partly fresh":     func(p *semanticWorkProbe) { p.work.FirstGraphRevision = 1 },
 		"missing unresolved gap":                 func(p *semanticWorkProbe) { p.reliability.UnresolvedGapCount = 0 },

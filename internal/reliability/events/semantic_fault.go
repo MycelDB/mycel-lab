@@ -15,23 +15,28 @@ import (
 )
 
 type SemanticFaultEvidence struct {
-	SchemaVersion      int                      `json:"schemaVersion"`
-	Disposition        string                   `json:"disposition"`
-	ProcessCode        string                   `json:"processCode"`
-	Before             SemanticWorkCheckpointV1 `json:"before"`
-	Failed             SemanticWorkCheckpointV1 `json:"failed"`
-	Recovered          SemanticWorkCheckpointV1 `json:"recovered"`
-	FailedFreshThrough uint64                   `json:"failedFreshThrough"`
-	FailedGapCount     uint64                   `json:"failedGapCount"`
-	FailureCategory    string                   `json:"failureCategory,omitempty"`
-	BackoffHonored     bool                     `json:"backoffHonored"`
-	OperatorRetry      bool                     `json:"operatorRetry"`
+	SchemaVersion        int                                `json:"schemaVersion"`
+	Disposition          string                             `json:"disposition"`
+	ProcessCode          string                             `json:"processCode"`
+	Before               SemanticWorkCheckpointV1           `json:"before"`
+	Failed               SemanticWorkCheckpointV1           `json:"failed"`
+	Recovered            SemanticWorkCheckpointV1           `json:"recovered"`
+	Discovery            *SemanticWorkEvidenceV1            `json:"discovery,omitempty"`
+	BeforeReliability    *SemanticWorkReliabilityEvidenceV1 `json:"beforeReliability,omitempty"`
+	FailedReliability    *SemanticWorkReliabilityEvidenceV1 `json:"failedReliability,omitempty"`
+	RecoveredReliability *SemanticWorkReliabilityEvidenceV1 `json:"recoveredReliability,omitempty"`
+	FailedFreshThrough   uint64                             `json:"failedFreshThrough"`
+	FailedGapCount       uint64                             `json:"failedGapCount"`
+	FailureCategory      string                             `json:"failureCategory,omitempty"`
+	BackoffHonored       bool                               `json:"backoffHonored"`
+	OperatorRetry        bool                               `json:"operatorRetry"`
 }
 
 type publicWorkSnapshot struct {
 	work        SemanticWorkCheckpointV1
 	raw         *adminv1.SemanticMaintenanceWorkItem
 	reliability *adminv1.GetSemanticReliabilityStatusResponse
+	evidence    *SemanticWorkReliabilityEvidenceV1
 }
 
 func readPublicWork(ctx context.Context, client adminv1.AdminSemanticMaintenanceServiceClient, resources *provision.SemanticResources, node string, revision uint64) (publicWorkSnapshot, error) {
@@ -56,14 +61,19 @@ func readPublicWork(ctx context.Context, client adminv1.AdminSemanticMaintenance
 		return result, errSemanticWorkNotReady
 	}
 	r, err := client.GetSemanticReliabilityStatus(ctx, &adminv1.GetSemanticReliabilityStatusRequest{SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey})
-	if err != nil || r == nil || r.GetSpaceId() != resources.SpaceID || r.GetSemanticRuleId() != resources.SemanticRuleID || r.GetEmbeddingBindingKey() != resources.EmbeddingBindingKey || r.GetSemanticGeneration() == 0 || r.GetConfiguredFrontierLimit() == 0 || r.GetConfiguredGapIntervalLimit() == 0 || r.GetConfiguredRevisionSpanLimit() == 0 || r.GetConfiguredSerializedByteLimit() == 0 || r.GetCapacityState() != "ok" || r.GetRebuildRequired() || r.GetAnalyzedThroughGraphRevision() > r.GetLatestObservedGraphRevision() || r.GetFreshThroughGraphRevision() > r.GetAnalyzedThroughGraphRevision() {
-		return result, errors.New("fault reliability evidence is unsupported or contradictory")
+	if err != nil {
+		result.evidence = &SemanticWorkReliabilityEvidenceV1{SchemaVersion: 1, RPCCode: status.Code(err).String(), RejectionReason: "rpc-failure"}
+		return result, errors.New("fault reliability RPC rejected: " + status.Code(err).String())
+	}
+	result.reliability = r
+	result.evidence = captureSemanticWorkReliability(r, resources)
+	// Expected provider failures may degrade the rule, but never authorize an
+	// actual rebuild, unsafe capacity, false freshness, or inconsistent gap flag.
+	if err := validateSemanticWorkReliability(result.evidence, true); err != nil {
+		return result, err
 	}
 	if r.GetLatestObservedGraphRevision() < revision || r.GetAnalyzedThroughGraphRevision() < revision {
 		return result, errSemanticWorkNotReady
-	}
-	if state := r.GetRebuild().GetState(); state != "" && state != "completed" {
-		return result, errors.New("fault fixture has an unsafe rebuild state")
 	}
 	item := result.raw
 	result.work = SemanticWorkCheckpointV1{SchemaVersion: 1, WorkItemID: item.GetWorkItemId(), SpaceID: item.GetSpaceId(), DomainID: item.GetDomainId(), SemanticRuleID: item.GetSemanticRuleId(), EmbeddingBindingKey: item.GetEmbeddingBindingKey(), TargetNodeID: item.GetTargetNodeId(), Action: item.GetAction(), Status: item.GetStatus(), AttemptCount: item.GetAttemptCount(), FirstGraphRevision: item.GetFirstGraphRevision(), LastGraphRevision: item.GetLastGraphRevision(), WorkGeneration: item.GetWorkGeneration(), SemanticGeneration: r.GetSemanticGeneration()}
@@ -76,18 +86,19 @@ func readPublicWork(ctx context.Context, client adminv1.AdminSemanticMaintenance
 	if result.work.LastGraphRevision != revision {
 		return result, errors.New("fault work does not bind the acknowledged commit")
 	}
-	result.reliability = r
 	return result, nil
 }
 
 // Replicated public diagnostics may lag a successful RPC. Only explicitly
 // incomplete read snapshots are polled; capability/auth/assertion errors fail.
 func awaitFaultSnapshot(ctx context.Context, poll time.Duration, read func() (publicWorkSnapshot, error), ready func(publicWorkSnapshot) bool) (publicWorkSnapshot, error) {
+	var last publicWorkSnapshot
 	for n := 0; n < maxSemanticMaintenanceObservations; n++ {
 		if err := ctx.Err(); err != nil {
-			return publicWorkSnapshot{}, err
+			return last, err
 		}
 		snapshot, err := read()
+		last = snapshot
 		if err == nil && ready(snapshot) {
 			return snapshot, nil
 		}
@@ -102,7 +113,7 @@ func awaitFaultSnapshot(ctx context.Context, poll time.Duration, read func() (pu
 		case <-timer.C:
 		}
 	}
-	return publicWorkSnapshot{}, errors.New("fault snapshot observation limit exceeded")
+	return last, errors.New("fault snapshot observation limit exceeded")
 }
 
 func sameFaultIdentity(before, after SemanticWorkCheckpointV1) bool {
@@ -231,16 +242,17 @@ func executeSemanticFault(ctx context.Context, driver env.EnvironmentDriver, env
 	client := admin.SemanticMaintenance
 	// Initial discovery may wait for durable graph notification delivery; it
 	// never processes work. Failed analysis mutations are not resubmitted.
-	_, err = awaitSemanticWork(authenticated, client, semantic, map[string]any{"nodeId": targetString(target, "nodeId"), "expectRevisionFrom": targetString(target, "expectRevisionFrom"), "expectedStatus": "pending", "expectedAttemptCount": 0, "expectBackgroundMaintenanceEnabled": false, "analyze": true, "timeout": timeout.String(), "pollInterval": poll.String()})
+	discovery, err := awaitSemanticWork(authenticated, client, semantic, map[string]any{"nodeId": targetString(target, "nodeId"), "expectRevisionFrom": targetString(target, "expectRevisionFrom"), "expectedStatus": "pending", "expectedAttemptCount": 0, "expectBackgroundMaintenanceEnabled": false, "analyze": true, "timeout": timeout.String(), "pollInterval": poll.String()})
+	result.Discovery = &discovery
 	if err != nil {
 		return result, err
 	}
 	before, err := readPublicWork(authenticated, client, semantic, targetString(target, "nodeId"), revision)
+	result.Before, result.BeforeReliability = before.work, before.evidence
 	if err != nil {
 		return result, err
 	}
-	result.Before = before.work
-	if before.work.Status != "pending" || before.work.AttemptCount != 0 || before.reliability.GetFreshThroughGraphRevision() >= before.work.FirstGraphRevision {
+	if before.work.Status != "pending" || before.work.AttemptCount != 0 || before.reliability.GetDegraded() || before.reliability.GetUnresolvedGapCount() == 0 || before.reliability.GetFreshThroughGraphRevision() >= before.work.FirstGraphRevision {
 		return result, errors.New("fault input is not a durable unprocessed pending boundary")
 	}
 	process := func(callCtx context.Context) (*adminv1.ProcessSemanticDirtyWorkResponse, error) {
@@ -279,10 +291,11 @@ func executeSemanticFault(ctx context.Context, driver env.EnvironmentDriver, env
 		}
 		return true
 	})
+	result.Failed, result.FailedReliability = failed.work, failed.evidence
+	result.FailedFreshThrough, result.FailedGapCount = failed.reliability.GetFreshThroughGraphRevision(), failed.reliability.GetUnresolvedGapCount()
 	if err != nil {
 		return result, err
 	}
-	result.Failed, result.FailedFreshThrough, result.FailedGapCount = failed.work, failed.reliability.GetFreshThroughGraphRevision(), failed.reliability.GetUnresolvedGapCount()
 	if err := validateFaultBoundary(before, failed, result.Disposition, processed, code); err != nil {
 		return result, err
 	}
@@ -325,10 +338,10 @@ func executeSemanticFault(ctx context.Context, driver env.EnvironmentDriver, env
 		return result, errors.New("fault recovery did not converge through normal maintenance")
 	}
 	recovered, err := awaitFaultSnapshot(ctx, poll, readSnapshot, func(s publicWorkSnapshot) bool { return s.work.AttemptCount >= 2 })
+	result.Recovered, result.RecoveredReliability = recovered.work, recovered.evidence
 	if err != nil {
 		return result, err
 	}
-	result.Recovered = recovered.work
 	if !sameFaultIdentity(before.work, recovered.work) || recovered.work.Status != "complete" || recovered.work.AttemptCount != 2 || recovered.reliability.GetFreshThroughGraphRevision() < revision || recovered.reliability.GetUnresolvedGapCount() != 0 || recovered.reliability.GetDegraded() {
 		return result, errors.New("fault recovery changed identity/generation or replayed work")
 	}

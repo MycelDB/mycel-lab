@@ -41,13 +41,61 @@ pre-deployment capability rejection for unsupported native composition. See the
 [acceptance audit](semantic-graph-index-issue46-acceptance-audit.md) for precise
 coverage, evidence levels, and remaining gaps.
 
-No v0.21.4 environment-backed qualification has run. The previously prepared clean
-`3b1c222` four-case bundle was not executed and cannot qualify this expanded source
-or scope. Unit/fake-RPC and planning checks validate the harness only. Native
-semantic enrichment remains API/adapter-blocked; no hosted-provider run is part
-of this batch. Landing/CI status is recorded separately from these runtime claims.
+One explicitly approved v0.21.4 environment-backed aggregate ran against clean
+Lab `6615c17` after PR #93. It **failed and stopped**, not qualifying the aggregate.
+The previously prepared `3b1c222` four-case bundle remains unexecuted and does not
+transfer evidence or approval. Unit/fake-RPC and planning checks validate the
+harness only. Native semantic enrichment remains API/adapter-blocked; no hosted
+provider run is part of this batch.
 
-### Current batch: local harness validation only
+### Approved clean 6615c17 execution: failed, no rerun
+
+Retained evidence:
+`artifacts/destructive/semantic-graph-index-v0214-clean-6615c17-20261105T025625Z/`.
+
+The one approved invocation passed the contract (11 phases) and recovery (five
+phases). Pending-restart passed its baseline but failed pending-work capture
+before either restart. Three later phases were aborted; thirteen scenarios were
+not run. Totals: **17 phases passed, one failed, 47 not executed**. The aggregate
+is not accepted. All attempted final/cluster oracles, cleanup/absence checks,
+nine native clean-daemon provenance observations, and artifact safety (three
+runs / 112 files) passed; none overrides the failed semantic event.
+
+Exact-source inspection and an isolated synthetic diagnostic identified a Lab
+contract mismatch: v0.21.4 sets `rebuild_required` for nonzero unresolved gaps,
+including ordinary pending work with idle/completed rebuild state. The old work
+and fault readers rejected that boolean while also requiring positive gaps.
+The old rejection event copied reliability fields only after the guard, so its
+zeros were unpopulated fields, not evidence of missing daemon capabilities. No
+new daemon defect was established; the full rejected response was not retained.
+
+### Pending-state contract correction: harness evidence only
+
+The correction shares a strict status validator across work/fault readers. With
+an explicit idle/completed rebuild status and capacity `ok`, the public boolean
+must equal `(unresolvedGapCount > 0)`. Required/running/failed/unknown rebuilds,
+missing evidence, capacity exhaustion, inconsistent flags/frontiers/gap ranges,
+false freshness, scope drift, generation/revision changes, and replay still fail.
+Completion still requires zero gaps, false flag, and the expected fresh frontier.
+Expected provider failures may be degraded, but initial pending capture and final
+completion may not. No repair/rebuild is introduced.
+
+Safe version-1 reliability evidence is captured before rejection, including
+observed/absent distinction, RPC category, scope-match boolean, generation,
+frontiers, gap/flag/rebuild/capacity states and limits, and fixed rejection reason.
+Unknown state strings are replaced with a marker; provider/error bodies and
+foreign IDs are excluded. Fault discovery, rejection and timeout evidence is
+retained. Canonical work checkpoint identity and schema remain unchanged.
+
+Regressions cover the released pending combination through completion, both
+readers' unsafe-state negatives, false flags/freshness, bounded private-state
+redaction, authenticated fake-RPC failure/retry recovery of the same work, and
+rejection diagnostics. These tests are **not a runtime rerun or qualification**.
+A changed clean candidate must be reviewed/landed, frozen anew, and explicitly
+approved before another destructive execution. The one-run 6615c17 approval is
+consumed; its source, manifest and failed evidence remain unchanged.
+
+### Completion batch: earlier local harness validation only
 
 The uncommitted `issue/46-completion-protocol-composition` implementation passed
 all of the following with `GOWORK=off` and read-only module resolution:
@@ -70,7 +118,7 @@ with the expected missing-adapter error **before creating any run artifacts**.
 Catalog tests additionally prove this rejection precedes live credential lookup,
 and provisioning rejects a forged resolved plan that bypasses catalog checks.
 
-Latest planning-only evidence:
+Earlier dirty-development planning-only evidence:
 `artifacts/dry-runs/issue46-domain-model-final-20261105T015350Z`.
 The credential-free aggregate resolves 16 scenarios / 65 phases; manual-live
 planning resolves one / four. All 17 terminal results declare `dryRun: true`,
