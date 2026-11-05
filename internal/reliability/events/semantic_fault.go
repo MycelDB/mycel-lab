@@ -1,0 +1,336 @@
+package events
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
+	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	mycel "github.com/myceldb/mycel-go-sdk"
+	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+type SemanticFaultEvidence struct {
+	SchemaVersion      int                      `json:"schemaVersion"`
+	Disposition        string                   `json:"disposition"`
+	ProcessCode        string                   `json:"processCode"`
+	Before             SemanticWorkCheckpointV1 `json:"before"`
+	Failed             SemanticWorkCheckpointV1 `json:"failed"`
+	Recovered          SemanticWorkCheckpointV1 `json:"recovered"`
+	FailedFreshThrough uint64                   `json:"failedFreshThrough"`
+	FailedGapCount     uint64                   `json:"failedGapCount"`
+	FailureCategory    string                   `json:"failureCategory,omitempty"`
+	BackoffHonored     bool                     `json:"backoffHonored"`
+	OperatorRetry      bool                     `json:"operatorRetry"`
+}
+
+type publicWorkSnapshot struct {
+	work        SemanticWorkCheckpointV1
+	raw         *adminv1.SemanticMaintenanceWorkItem
+	reliability *adminv1.GetSemanticReliabilityStatusResponse
+}
+
+func readPublicWork(ctx context.Context, client adminv1.AdminSemanticMaintenanceServiceClient, resources *provision.SemanticResources, node string, revision uint64) (publicWorkSnapshot, error) {
+	result := publicWorkSnapshot{}
+	listing, err := client.ListSemanticMaintenanceWork(ctx, &adminv1.ListSemanticMaintenanceWorkRequest{SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, Limit: maxSemanticWorkItems + 1})
+	if err != nil || listing == nil || len(listing.GetItems()) > maxSemanticWorkItems {
+		return result, errors.New("fault work listing is unavailable or incomplete")
+	}
+	for _, item := range listing.GetItems() {
+		if item == nil || item.GetSpaceId() != resources.SpaceID || item.GetDomainId() != resources.DomainID || item.GetSemanticRuleId() != resources.SemanticRuleID || item.GetEmbeddingBindingKey() != resources.EmbeddingBindingKey {
+			return result, errors.New("fault work listing is out of scope")
+		}
+		if item.GetTargetNodeId() != node {
+			continue
+		}
+		if result.raw != nil {
+			return result, errors.New("fault work identity is ambiguous")
+		}
+		result.raw = item
+	}
+	if result.raw == nil {
+		return result, errSemanticWorkNotReady
+	}
+	r, err := client.GetSemanticReliabilityStatus(ctx, &adminv1.GetSemanticReliabilityStatusRequest{SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey})
+	if err != nil || r == nil || r.GetSpaceId() != resources.SpaceID || r.GetSemanticRuleId() != resources.SemanticRuleID || r.GetEmbeddingBindingKey() != resources.EmbeddingBindingKey || r.GetSemanticGeneration() == 0 || r.GetConfiguredFrontierLimit() == 0 || r.GetConfiguredGapIntervalLimit() == 0 || r.GetConfiguredRevisionSpanLimit() == 0 || r.GetConfiguredSerializedByteLimit() == 0 || r.GetCapacityState() != "ok" || r.GetRebuildRequired() || r.GetAnalyzedThroughGraphRevision() > r.GetLatestObservedGraphRevision() || r.GetFreshThroughGraphRevision() > r.GetAnalyzedThroughGraphRevision() {
+		return result, errors.New("fault reliability evidence is unsupported or contradictory")
+	}
+	if r.GetLatestObservedGraphRevision() < revision || r.GetAnalyzedThroughGraphRevision() < revision {
+		return result, errSemanticWorkNotReady
+	}
+	if state := r.GetRebuild().GetState(); state != "" && state != "completed" {
+		return result, errors.New("fault fixture has an unsafe rebuild state")
+	}
+	item := result.raw
+	result.work = SemanticWorkCheckpointV1{SchemaVersion: 1, WorkItemID: item.GetWorkItemId(), SpaceID: item.GetSpaceId(), DomainID: item.GetDomainId(), SemanticRuleID: item.GetSemanticRuleId(), EmbeddingBindingKey: item.GetEmbeddingBindingKey(), TargetNodeID: item.GetTargetNodeId(), Action: item.GetAction(), Status: item.GetStatus(), AttemptCount: item.GetAttemptCount(), FirstGraphRevision: item.GetFirstGraphRevision(), LastGraphRevision: item.GetLastGraphRevision(), WorkGeneration: item.GetWorkGeneration(), SemanticGeneration: r.GetSemanticGeneration()}
+	if err := validateSemanticWorkCheckpoint(result.work); err != nil {
+		return result, err
+	}
+	if result.work.LastGraphRevision < revision {
+		return result, errSemanticWorkNotReady
+	}
+	if result.work.LastGraphRevision != revision {
+		return result, errors.New("fault work does not bind the acknowledged commit")
+	}
+	result.reliability = r
+	return result, nil
+}
+
+// Replicated public diagnostics may lag a successful RPC. Only explicitly
+// incomplete read snapshots are polled; capability/auth/assertion errors fail.
+func awaitFaultSnapshot(ctx context.Context, poll time.Duration, read func() (publicWorkSnapshot, error), ready func(publicWorkSnapshot) bool) (publicWorkSnapshot, error) {
+	for n := 0; n < maxSemanticMaintenanceObservations; n++ {
+		if err := ctx.Err(); err != nil {
+			return publicWorkSnapshot{}, err
+		}
+		snapshot, err := read()
+		if err == nil && ready(snapshot) {
+			return snapshot, nil
+		}
+		if err != nil && !errors.Is(err, errSemanticWorkNotReady) {
+			return snapshot, err
+		}
+		timer := time.NewTimer(poll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return snapshot, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return publicWorkSnapshot{}, errors.New("fault snapshot observation limit exceeded")
+}
+
+func sameFaultIdentity(before, after SemanticWorkCheckpointV1) bool {
+	before.Status, after.Status = "pending", "pending"
+	before.AttemptCount, after.AttemptCount = 0, 0
+	return before == after
+}
+
+func validateFaultBoundary(before, failed publicWorkSnapshot, disposition string, process *adminv1.ProcessSemanticDirtyWorkResponse, code codes.Code) error {
+	if before.raw == nil || failed.raw == nil || failed.reliability == nil {
+		return errors.New("fault evidence is incomplete")
+	}
+	if !sameFaultIdentity(before.work, failed.work) || before.work.Status != "pending" || before.work.AttemptCount != 0 || failed.work.AttemptCount != 1 {
+		return errors.New("fault changed work identity/generation/revisions or processing attempts")
+	}
+	r := failed.reliability
+	if r.GetFreshThroughGraphRevision() >= failed.work.FirstGraphRevision || r.GetUnresolvedGapCount() == 0 || r.GetOldestUnresolvedGraphRevision() == 0 || r.GetOldestUnresolvedGraphRevision() > failed.work.LastGraphRevision || r.GetOldestUnresolvedGraphRevision() <= r.GetFreshThroughGraphRevision() {
+		return errors.New("failed work falsely advanced freshness or lost its gap")
+	}
+	switch disposition {
+	case "retryable":
+		if code != codes.OK || process == nil || process.GetProcessedItems() != 1 || process.GetCompletedItems() != 0 || process.GetFailedItems() != 1 || failed.work.Status != "pending" || failed.raw.GetLastErrorCategory() == "" || failed.raw.GetNotBefore() == "" {
+			return errors.New("retryable provider failure did not retain bounded retry state")
+		}
+	case "permanent":
+		if code != codes.OK || process == nil || process.GetProcessedItems() != 1 || process.GetCompletedItems() != 0 || process.GetFailedItems() != 1 || failed.work.Status != "failed" || failed.raw.GetLastErrorCategory() == "" {
+			return errors.New("permanent provider failure did not retain terminal work")
+		}
+	case "deadline":
+		if code != codes.DeadlineExceeded || failed.work.Status != "running" && failed.work.Status != "pending" && failed.work.Status != "failed" {
+			return errors.New("deadline interruption did not preserve unresolved work")
+		}
+	case "cancel":
+		if code != codes.Canceled || failed.work.Status != "running" && failed.work.Status != "pending" && failed.work.Status != "failed" {
+			return errors.New("cancellation did not preserve unresolved work")
+		}
+	default:
+		return errors.New("unknown fault disposition")
+	}
+	return nil
+}
+
+func cancelProcessAtGate(ctx context.Context, poll time.Duration, gate orderingGate, process func(context.Context) (*adminv1.ProcessSemanticDirtyWorkResponse, error)) (*adminv1.ProcessSemanticDirtyWorkResponse, error) {
+	child, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type reply struct {
+		response *adminv1.ProcessSemanticDirtyWorkResponse
+		err      error
+	}
+	done := make(chan reply, 1)
+	go func() { r, e := process(child); done <- reply{r, e} }()
+	joined := false
+	defer func() {
+		cancel()
+		if !joined {
+			timer := time.NewTimer(time.Second)
+			defer timer.Stop()
+			select {
+			case <-done:
+			case <-timer.C:
+			}
+		}
+	}()
+	for n := 0; n < maxSemanticMaintenanceObservations; n++ {
+		select {
+		case <-done:
+			joined = true
+			return nil, errors.New("process ended before cancellation witness")
+		default:
+		}
+		state, err := gate(ctx, "get")
+		if err != nil {
+			return nil, err
+		}
+		if state.State == "waiting" && state.Sequence > 0 {
+			cancel()
+			select {
+			case r := <-done:
+				joined = true
+				return r.response, r.err
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		if state.State != "idle" {
+			return nil, errors.New("invalid cancellation gate")
+		}
+		timer := time.NewTimer(poll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, errors.New("cancellation observation bound exceeded")
+}
+
+func executeSemanticFault(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, target map[string]any) (SemanticFaultEvidence, error) {
+	result := SemanticFaultEvidence{SchemaVersion: 1, Disposition: targetString(target, "disposition")}
+	if err := spec.ValidateSemanticEventTarget("semantic-fault-assert", target); err != nil {
+		return result, err
+	}
+	if resources == nil || resources.Semantic == nil || resources.Semantic.LiveProvider || environment.Metadata["providerEmulator"] != "true" {
+		return result, errors.New("fault injection requires a credential-free emulator")
+	}
+	semantic := resources.Semantic
+	timeout := durationTarget(target, "timeout", semantic.MaintenanceTimeout)
+	poll := durationTarget(target, "pollInterval", semantic.MaintenancePollInterval)
+	if timeout <= 0 || poll <= 0 || poll > timeout {
+		return result, errors.New("fault wait must be bounded")
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	revision, err := capturedSemanticWorkRevision(semantic, targetString(target, "expectRevisionFrom"))
+	if err != nil {
+		return result, err
+	}
+	admin, err := mycel.DialAdmin(ctx, mycel.Config{Addr: resources.AdminAddr, Username: firstNonEmpty(resources.AdminUsername, provision.DefaultAdminUsername), Password: firstNonEmpty(resources.AdminPassword, provision.DefaultAdminPassword), ClientName: "mycel-lab-fault"})
+	if err != nil {
+		return result, errors.New("fault admin authentication failed")
+	}
+	defer admin.Close()
+	authenticated, stop := admin.AuthCallContext(ctx)
+	defer stop()
+	client := admin.SemanticMaintenance
+	// Initial discovery may wait for durable graph notification delivery; it
+	// never processes work. Failed analysis mutations are not resubmitted.
+	_, err = awaitSemanticWork(authenticated, client, semantic, map[string]any{"nodeId": targetString(target, "nodeId"), "expectRevisionFrom": targetString(target, "expectRevisionFrom"), "expectedStatus": "pending", "expectedAttemptCount": 0, "expectBackgroundMaintenanceEnabled": false, "analyze": true, "timeout": timeout.String(), "pollInterval": poll.String()})
+	if err != nil {
+		return result, err
+	}
+	before, err := readPublicWork(authenticated, client, semantic, targetString(target, "nodeId"), revision)
+	if err != nil {
+		return result, err
+	}
+	result.Before = before.work
+	if before.work.Status != "pending" || before.work.AttemptCount != 0 || before.reliability.GetFreshThroughGraphRevision() >= before.work.FirstGraphRevision {
+		return result, errors.New("fault input is not a durable unprocessed pending boundary")
+	}
+	process := func(callCtx context.Context) (*adminv1.ProcessSemanticDirtyWorkResponse, error) {
+		return client.ProcessSemanticDirtyWork(callCtx, &adminv1.ProcessSemanticDirtyWorkRequest{SpaceId: semantic.SpaceID, Limit: 1})
+	}
+	var processed *adminv1.ProcessSemanticDirtyWorkResponse
+	var processErr error
+	if result.Disposition == "cancel" {
+		controller, ok := driver.(env.ProviderEmulatorController)
+		if !ok {
+			return result, errors.New("driver lacks cancellation control")
+		}
+		processed, processErr = cancelProcessAtGate(authenticated, poll, controlledProviderGate(controller, environment, targetString(target, "gate")), process)
+	} else if result.Disposition == "deadline" {
+		processTimeout := durationTarget(target, "processTimeout", 0)
+		if processTimeout <= 0 || processTimeout >= timeout {
+			return result, errors.New("process deadline must be shorter than operation timeout")
+		}
+		child, stop := context.WithTimeout(authenticated, processTimeout)
+		processed, processErr = process(child)
+		stop()
+	} else {
+		processed, processErr = process(authenticated)
+	}
+	code := status.Code(processErr)
+	result.ProcessCode = code.String()
+	readSnapshot := func() (publicWorkSnapshot, error) {
+		return readPublicWork(authenticated, client, semantic, targetString(target, "nodeId"), revision)
+	}
+	failed, err := awaitFaultSnapshot(ctx, poll, readSnapshot, func(s publicWorkSnapshot) bool {
+		if s.work.AttemptCount < 1 {
+			return false
+		}
+		if result.Disposition == "retryable" || result.Disposition == "permanent" {
+			return s.work.Status != "running" && !(s.work.Status == "pending" && s.raw.GetLastErrorCategory() == "")
+		}
+		return true
+	})
+	if err != nil {
+		return result, err
+	}
+	result.Failed, result.FailedFreshThrough, result.FailedGapCount = failed.work, failed.reliability.GetFreshThroughGraphRevision(), failed.reliability.GetUnresolvedGapCount()
+	if err := validateFaultBoundary(before, failed, result.Disposition, processed, code); err != nil {
+		return result, err
+	}
+	category := failed.raw.GetLastErrorCategory()
+	switch category {
+	case "", "rate_limited", "provider_error", "provider_rejected", "authorization_error", "configuration_error", "vector_store_error", "internal_error":
+		result.FailureCategory = category
+	default:
+		return result, errors.New("fault category is unsupported")
+	}
+	if result.Disposition == "retryable" {
+		notBefore, err := time.Parse(time.RFC3339Nano, failed.raw.GetNotBefore())
+		if err != nil {
+			return result, errors.New("retry deadline is malformed")
+		}
+		updated, err := time.Parse(time.RFC3339Nano, failed.raw.GetUpdatedAt())
+		if err != nil {
+			return result, errors.New("retry update time is malformed")
+		}
+		minimum := durationTarget(target, "minimumBackoff", 0)
+		maximum := durationTarget(target, "maximumBackoff", timeout)
+		if minimum > maximum || !notBefore.After(updated) || notBefore.Sub(updated) < minimum || notBefore.Sub(updated) > maximum {
+			return result, errors.New("provider retry delay is missing or below the declared minimum")
+		}
+		// A read-only observation is not a retry. An immediate normal processing
+		// pass must respect not-before and make no provider request/work attempt.
+		check, err := process(authenticated)
+		if err != nil || check == nil || check.GetProcessedItems() != 0 || check.GetCompletedItems() != 0 || check.GetFailedItems() != 0 {
+			return result, errors.New("normal processing ignored provider backoff")
+		}
+		result.BackoffHonored = true
+	} else {
+		retried, err := client.RetrySemanticMaintenanceWork(authenticated, &adminv1.RetrySemanticMaintenanceWorkRequest{SpaceId: semantic.SpaceID, WorkItemId: failed.work.WorkItemID})
+		if err != nil || retried.GetItem() == nil || retried.GetItem().GetWorkItemId() != failed.work.WorkItemID {
+			return result, errors.New("explicit work retry failed; mutation not resubmitted")
+		}
+		result.OperatorRetry = true
+	}
+	if _, err := awaitSemanticMaintenance(ctx, admin, semantic, map[string]any{"timeout": timeout.String(), "pollInterval": poll.String()}); err != nil {
+		return result, errors.New("fault recovery did not converge through normal maintenance")
+	}
+	recovered, err := awaitFaultSnapshot(ctx, poll, readSnapshot, func(s publicWorkSnapshot) bool { return s.work.AttemptCount >= 2 })
+	if err != nil {
+		return result, err
+	}
+	result.Recovered = recovered.work
+	if !sameFaultIdentity(before.work, recovered.work) || recovered.work.Status != "complete" || recovered.work.AttemptCount != 2 || recovered.reliability.GetFreshThroughGraphRevision() < revision || recovered.reliability.GetUnresolvedGapCount() != 0 || recovered.reliability.GetDegraded() {
+		return result, errors.New("fault recovery changed identity/generation or replayed work")
+	}
+	return result, nil
+}

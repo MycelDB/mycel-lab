@@ -124,7 +124,7 @@ func validateObservation(observation Observation, index, previousAttempt int) er
 		return fmt.Errorf("provider emulator observation %d has invalid attempt sequence", observation.Sequence)
 	}
 	switch observation.Outcome {
-	case "success", "http-error", "refusal", "malformed-json", "truncated-json", "wrong-dimensions", "canceled":
+	case "success", "http-error", "refusal", "malformed-json", "truncated-json", "wrong-dimensions", "canceled", "connection-drop", "gate-timeout":
 	default:
 		return fmt.Errorf("provider emulator observation %d has unsupported outcome", observation.Sequence)
 	}

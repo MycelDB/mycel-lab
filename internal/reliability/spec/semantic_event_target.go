@@ -5,6 +5,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/MycelDB/mycel-lab/internal/reliability/provider"
 )
 
 type semanticTargetValidator func(any) error
@@ -21,6 +23,10 @@ func ValidateSemanticEventTarget(eventType string, target map[string]any) error 
 	fields, err := semanticTargetFields(eventType)
 	if err != nil {
 		return err
+	}
+	switch eventType {
+	case "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-reliability-assert", "semantic-rebuild", "semantic-work-assert", "semantic-route-create", "semantic-route-bind", "semantic-model-config-update":
+		fields["scope"] = semanticTargetField{validate: semanticCaptureName}
 	}
 	for key := range target {
 		if _, ok := fields[key]; !ok {
@@ -39,12 +45,38 @@ func ValidateSemanticEventTarget(eventType string, target map[string]any) error 
 			return fmt.Errorf("%s target.%s: %w", eventType, key, err)
 		}
 	}
+	if eventType == "semantic-model-config-update" {
+		_, dimension := target["dimensions"]
+		_, space := target["vectorSpaceKey"]
+		if dimension == space {
+			return fmt.Errorf("model update must independently change dimension or vector space")
+		}
+	}
+	if eventType == "semantic-search-assert" {
+		if _, configured := target["configuredRoute"]; configured && target["requireConfiguredRoute"] != true {
+			return fmt.Errorf("configuredRoute requires requireConfiguredRoute")
+		}
+	}
 	if eventType == "semantic-work-assert" && target["analyze"] == true {
 		if _, preserving := target["expectWorkFrom"]; preserving {
 			return fmt.Errorf("semantic-work-assert preservation checks must not analyze or reconstruct work")
 		}
 		if target["expectedStatus"] != "pending" {
 			return fmt.Errorf("semantic-work-assert analysis is allowed only when capturing pending work")
+		}
+	}
+	if eventType == "semantic-fault-assert" {
+		mode := target["disposition"]
+		_, hasGate := target["gate"]
+		_, hasDeadline := target["processTimeout"]
+		if (mode == "cancel") != hasGate || (mode == "deadline") != hasDeadline {
+			return fmt.Errorf("fault cancellation requires only a gate; deadline requires only processTimeout")
+		}
+		if _, maximum := target["maximumBackoff"]; maximum && mode != "retryable" {
+			return fmt.Errorf("maximumBackoff requires retryable disposition")
+		}
+		if _, minimum := target["minimumBackoff"]; minimum && mode != "retryable" {
+			return fmt.Errorf("minimumBackoff requires retryable disposition")
 		}
 	}
 	if eventType == "semantic-rebuild" {
@@ -93,6 +125,19 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 	}
 
 	switch eventType {
+	case "semantic-domain-peer-create":
+		return map[string]semanticTargetField{"name": required(semanticGate)}, nil
+	case "semantic-route-create":
+		return map[string]semanticTargetField{"name": required(semanticGate), "dimensions": required(semanticInteger(1, 65536)), "vectorSpaceKey": required(nonEmptySemanticString)}, nil
+	case "semantic-route-bind":
+		return map[string]semanticTargetField{"route": required(semanticGate)}, nil
+	case "semantic-model-config-update":
+		return map[string]semanticTargetField{"route": required(semanticGate), "dimensions": optional(semanticInteger(1, 65536)), "vectorSpaceKey": optional(nonEmptySemanticString)}, nil
+	case "semantic-domain-isolation-assert":
+		return captureFields(map[string]semanticTargetField{
+			"peer": required(semanticGate), "nodeId": required(canonicalSemanticUUID), "primaryQuery": required(nonEmptySemanticString), "peerQuery": required(nonEmptySemanticString),
+			"expectPrimaryRevisionFrom": required(semanticCaptureName), "expectPeerRevisionFrom": required(semanticCaptureName), "timeout": optional(positiveSemanticDuration),
+		}, "capturePrimaryRecordAs", "capturePeerRecordAs", "expectPrimaryRecordFrom", "expectPeerRecordFrom"), nil
 	case "semantic-rule-create":
 		return map[string]semanticTargetField{"semantic": required(nonEmptySemanticString)}, nil
 	case "semantic-node-create":
@@ -127,6 +172,18 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 			"expectedAttemptCount": optional(semanticInteger(0, 4096)),
 			"timeout":              optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
 		}, nil
+	case "semantic-ordering-assert":
+		return map[string]semanticTargetField{
+			"nodeId": required(canonicalSemanticUUID), "gate": required(semanticGate), "text": required(nonEmptySemanticString),
+			"expectRevisionFrom": required(semanticCaptureName), "captureRevisionAs": required(semanticCaptureName), "captureRecordAs": required(semanticCaptureName),
+			"timeout": optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
+		}, nil
+	case "semantic-fault-assert":
+		return map[string]semanticTargetField{
+			"nodeId": required(canonicalSemanticUUID), "expectRevisionFrom": required(semanticCaptureName), "disposition": required(semanticFaultDisposition),
+			"gate": optional(semanticGate), "processTimeout": optional(positiveSemanticDuration), "minimumBackoff": optional(positiveSemanticDuration), "maximumBackoff": optional(positiveSemanticDuration),
+			"timeout": optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
+		}, nil
 	case "semantic-maintenance-await":
 		return map[string]semanticTargetField{
 			"timeout": optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
@@ -139,6 +196,8 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 			"expectFailureCode": stringField, "allPages": boolField, "allowWarnings": boolField,
 			"timeout": optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
 			"expectedResultCount": nonNegativeInt, "requireProvenance": boolField, "requireActualRoute": boolField,
+			"broad": boolField, "requireConfiguredRoute": boolField, "configuredRoute": optional(semanticGate),
+			"expectedDimensions": optional(semanticInteger(1, 65536)), "expectedVectorSpaceKey": stringField, "expectedPayloadText": stringField,
 			"expectedNodeIds": optional(semanticStringList), "forbiddenNodeIds": optional(semanticStringList),
 			"expectedScores": optional(semanticNumberList), "scoreTolerance": optional(nonNegativeSemanticNumber),
 		}
@@ -162,7 +221,7 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 		}
 		return captureFields(fields,
 			"expectFreshRevisionFrom", "expectDeltaCatchupRevisionFrom", "captureGenerationAs", "captureRebuildEpochAs",
-			"captureFreshRevisionAs", "capturePinnedRevisionAs", "captureDeltaCatchupRevisionAs",
+			"captureFreshRevisionAs", "capturePinnedRevisionAs", "captureDeltaCatchupRevisionAs", "requireGenerationAfter", "expectGenerationFrom",
 		), nil
 	case "semantic-provider-budget-reconcile":
 		return map[string]semanticTargetField{
@@ -189,6 +248,22 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 	default:
 		return nil, fmt.Errorf("unsupported semantic event type %q", eventType)
 	}
+}
+
+func semanticGate(value any) error {
+	name, ok := value.(string)
+	if !ok || !provider.ValidEmulatorGate(name) {
+		return fmt.Errorf("must be a bounded synthetic gate name")
+	}
+	return nil
+}
+
+func semanticFaultDisposition(value any) error {
+	switch value {
+	case "retryable", "permanent", "deadline", "cancel":
+		return nil
+	}
+	return fmt.Errorf("must be retryable, permanent, deadline, or cancel")
 }
 
 func canonicalSemanticUUID(value any) error {

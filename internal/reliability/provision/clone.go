@@ -11,15 +11,7 @@ func CloneScenarioResources(source ScenarioResources) ScenarioResources {
 	clone.Assignments = append([]ActorAssignment(nil), source.Assignments...)
 	clone.Cleanup.Errors = append([]string(nil), source.Cleanup.Errors...)
 	clone.Cleanup.ErrorCategories = append([]string(nil), source.Cleanup.ErrorCategories...)
-	if source.Semantic != nil {
-		semantic := *source.Semantic
-		semantic.Operations = cloneSemanticOperations(source.Semantic.Operations)
-		semantic.Cleanup = cloneSemanticOperations(source.Semantic.Cleanup)
-		semantic.EvidenceValues = cloneStringMap(source.Semantic.EvidenceValues)
-		semantic.ProviderBudgetCapabilities = append([]string(nil), source.Semantic.ProviderBudgetCapabilities...)
-		semantic.cleanupProof = cloneCleanupProof(source.Semantic.cleanupProof)
-		clone.Semantic = &semantic
-	}
+	clone.Semantic = cloneSemanticResourceGraph(source.Semantic, map[*SemanticResources]*SemanticResources{})
 	if source.ProcedureInference != nil {
 		procedure := *source.ProcedureInference
 		procedure.TargetLabels = append([]string(nil), source.ProcedureInference.TargetLabels...)
@@ -29,6 +21,35 @@ func CloneScenarioResources(source ScenarioResources) ScenarioResources {
 		clone.ProcedureInference = &procedure
 	}
 	return clone
+}
+
+func cloneSemanticResourceGraph(source *SemanticResources, seen map[*SemanticResources]*SemanticResources) *SemanticResources {
+	if source == nil {
+		return nil
+	}
+	if existing := seen[source]; existing != nil {
+		return existing
+	}
+	copy := *source
+	seen[source] = &copy
+	copy.Operations = cloneSemanticOperations(source.Operations)
+	copy.Cleanup = cloneSemanticOperations(source.Cleanup)
+	copy.EvidenceValues = cloneStringMap(source.EvidenceValues)
+	copy.ProviderBudgetCapabilities = append([]string(nil), source.ProviderBudgetCapabilities...)
+	copy.cleanupProof = cloneCleanupProof(source.cleanupProof)
+	if source.DomainPeers != nil {
+		copy.DomainPeers = map[string]*SemanticResources{}
+		for key, peer := range source.DomainPeers {
+			copy.DomainPeers[key] = cloneSemanticResourceGraph(peer, seen)
+		}
+	}
+	if source.Routes != nil {
+		copy.Routes = map[string]*SemanticResources{}
+		for key, route := range source.Routes {
+			copy.Routes[key] = cloneSemanticResourceGraph(route, seen)
+		}
+	}
+	return &copy
 }
 
 func cloneSemanticOperations(source []SemanticOperation) []SemanticOperation {

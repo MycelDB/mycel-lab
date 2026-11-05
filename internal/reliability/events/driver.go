@@ -221,6 +221,12 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "procedure-inference-emulator-assert":
 		result, err := executeSemanticProviderEmulatorAssert(ctx, r.Driver, r.Environment, event.Target)
 		return map[string]any{"procedureInferenceEmulator": result}, err
+	case "semantic-ordering-assert":
+		result, err := executeSemanticOrdering(ctx, r.Driver, r.Environment, r.Resources, event.Target)
+		return map[string]any{"semanticOrdering": result}, err
+	case "semantic-fault-assert":
+		result, err := executeSemanticFault(ctx, r.Driver, r.Environment, r.Resources, event.Target)
+		return map[string]any{"semanticFault": result}, err
 	case "semantic-provider-emulator-assert":
 		result, err := executeSemanticProviderEmulatorAssert(ctx, r.Driver, r.Environment, event.Target)
 		return map[string]any{"semanticProviderEmulator": result}, err
@@ -230,7 +236,7 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "commonfolio-automation-await-terminal":
 		result, err := executeCommonFolioAwaitTerminalEvent(ctx, r.Driver, r.Environment, r.Resources, event.Target)
 		return map[string]any{"commonfolioTerminalFixture": result}, err
-	case "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-work-assert", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
+	case "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-work-assert", "semantic-domain-peer-create", "semantic-domain-isolation-assert", "semantic-route-create", "semantic-route-bind", "semantic-model-config-update", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
 		result, err := executeSemanticEvent(ctx, r.Resources, event.Type, event.Target)
 		if r.liveSemanticProvider() {
 			result = sanitizeLiveSemanticResult(event.Type, result)

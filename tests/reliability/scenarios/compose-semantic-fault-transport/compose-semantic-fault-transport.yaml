@@ -1,0 +1,135 @@
+apiVersion: "myceldb.io/reliability/v1"
+kind: "Scenario"
+metadata:
+  name: "compose-semantic-fault-transport"
+  description: "Generated controlled semantic provider correctness case; requires fresh runtime qualification."
+seed: 4642
+providerProfileRef: "semantic-fault-transport"
+environment:
+  driver: "compose"
+  namespace: "mycel-lab"
+  options:
+    composeFiles:
+      - "../mycel/tests/compose/cluster/compose.yml"
+      - "tests/compose/ports.yml"
+      - "tests/compose/semantic-pending-restart.yml"
+    projectNamePrefix: "mycel-lab-semantic-fault-transport"
+    imageOverride: "docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7"
+    providerEmulatorImage: "local/mycel-provider-emulator:dev"
+    serviceNames:
+      - "myceld-a"
+      - "myceld-b"
+      - "myceld-c"
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - "per-node-endpoints"
+      - "node-exec"
+      - "rolling-restart"
+      - "logs"
+clusterRef: "raft-3-node"
+clusterOverrides:
+  image: "docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7"
+actorGroups:
+  -
+    name: "semantic-controller"
+    profileRef: "semantic-controller"
+    count: 3
+    rate:
+      mode: "per-actor"
+      commitsPerSecond: 1
+semantic:
+  targetActorGroup: "semantic-controller"
+  rule:
+    deferProvisioning: true
+    key: "compose-semantic-fault-transport"
+    targetLabels:
+      - "Document"
+    bindingKey: "search"
+    sourceMode: "self"
+    includeProperties:
+      - "text"
+    minimumTextLength: 1
+    physicalIndex: "exact"
+    dirtyCooldown: "1ms"
+    maxBatchSize: 16
+    workerConcurrency: 1
+  maintenance:
+    timeout: "30s"
+    pollInterval: "100ms"
+    analyzeLimit: 64
+    processLimit: 64
+phases:
+  -
+    name: "commit-isolated-corpus"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-node-create"
+        target:
+          nodeId: "00000000-0000-4000-8000-000000004642"
+          labels:
+            - "Document"
+          text: "axis-0"
+          captureRevisionAs: "fault-commit"
+      -
+        type: "semantic-rule-create"
+        target:
+          semantic: "deferred"
+  -
+    name: "prove-failure-before-bounded-recovery"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-fault-assert"
+        target:
+          nodeId: "00000000-0000-4000-8000-000000004642"
+          expectRevisionFrom: "fault-commit"
+          disposition: "retryable"
+          timeout: "30s"
+          pollInterval: "100ms"
+  -
+    name: "prove-direct-index-and-protocol-accounting"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-search-assert"
+        target:
+          query: "axis-0"
+          minimumScore: 0.99
+          expectedResultCount: 1
+          expectedNodeIds:
+            - "00000000-0000-4000-8000-000000004642"
+          requireProvenance: true
+          expectSourceRevisionFrom: "fault-commit"
+          timeout: "30s"
+          pollInterval: "100ms"
+      -
+        type: "semantic-provider-emulator-assert"
+        target:
+          minimumRequests: 3
+          maximumRequests: 3
+          maximumAttemptsPerInput: 2
+          requireSingleItem: true
+          authorization: "absent"
+          expectedModels:
+            - "embedding-v1"
+          expectedOutcomes:
+            connection-drop: 1
+            success: 2
+          expectedStatuses:
+            "503": 1
+            "200": 2
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: "60s"
+    healthConvergenceInterval: "2s"
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

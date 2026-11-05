@@ -132,7 +132,21 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 	if resources == nil || resources.Semantic == nil {
 		return nil, errors.New("semantic resources are not provisioned")
 	}
+	var scopeErr error
+	resources, scopeErr = provision.SemanticScopeView(resources, targetString(target, "scope"))
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
 	semanticResources := resources.Semantic
+	switch eventType {
+	case "semantic-domain-peer-create", "semantic-domain-isolation-assert", "semantic-route-create", "semantic-route-bind", "semantic-model-config-update":
+		if semanticResources.MaintenanceTimeout <= 0 {
+			return nil, errors.New("semantic fixture operation requires a bounded timeout")
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, semanticResources.MaintenanceTimeout)
+		defer cancel()
+	}
 	if semanticResources.SpaceID == "" || semanticResources.DomainID == "" || semanticResources.EmbeddingBindingKey == "" {
 		return nil, errors.New("semantic resources are incomplete")
 	}
@@ -164,6 +178,16 @@ func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioReso
 		return map[string]any{"semanticRuleId": resources.Semantic.SemanticRuleID, "key": resources.Semantic.SemanticRuleKey, "semanticRuleReadinessAttempts": attempts}, nil
 	}
 	switch eventType {
+	case "semantic-domain-peer-create":
+		return executeSemanticDomainPeerCreate(ctx, admin, resources, target)
+	case "semantic-domain-isolation-assert":
+		return executeSemanticDomainIsolation(ctx, resources, target)
+	case "semantic-route-create":
+		return executeSemanticRouteCreate(ctx, admin, resources, target)
+	case "semantic-route-bind":
+		return executeSemanticRouteBind(ctx, admin, semanticResources, target)
+	case "semantic-model-config-update":
+		return executeSemanticModelConfigUpdate(ctx, admin, semanticResources, target)
 	case "semantic-node-create", "semantic-node-update", "semantic-node-delete":
 		return executeSemanticGraphMutation(ctx, resources, eventType, target)
 	case "semantic-transaction-negative":
@@ -717,6 +741,18 @@ func assertSemanticReliability(ctx context.Context, admin *mycel.AdminClient, re
 	if evidence.ConfiguredFrontierLimit == 0 || evidence.ConfiguredGapIntervalLimit == 0 || evidence.ConfiguredRevisionSpanLimit == 0 || evidence.ConfiguredSerializedByteLimit == 0 || evidence.CapacityState == "" {
 		return evidence, errors.New("semantic reliability status is missing bounded capacity evidence")
 	}
+	if evidence.SemanticGeneration == 0 {
+		return evidence, errors.New("semantic reliability generation capability is missing")
+	}
+	if err := requireSemanticGenerationAfter(resources, targetString(target, "requireGenerationAfter"), evidence.SemanticGeneration); err != nil {
+		return evidence, err
+	}
+	if err := requireCapturedRevision(resources, target, "expectGenerationFrom", evidence.SemanticGeneration); err != nil {
+		return evidence, err
+	}
+	if minimum := intTarget(target, "minimumSemanticGeneration", 0); evidence.SemanticGeneration < uint64(minimum) {
+		return evidence, fmt.Errorf("semantic generation %d is below %d", evidence.SemanticGeneration, minimum)
+	}
 	expectRebuild := boolTarget(target, "expectRebuildRequired", false)
 	if expectRebuild {
 		if !evidence.RebuildRequired || evidence.RebuildState != "required" {
@@ -735,9 +771,6 @@ func assertSemanticReliability(ctx context.Context, admin *mycel.AdminClient, re
 	}
 	if evidence.FreshThroughGraphRevision > evidence.LatestObservedGraphRevision || evidence.AnalyzedThroughGraphRevision > evidence.LatestObservedGraphRevision {
 		return evidence, errors.New("semantic reliability frontier exceeds the latest observed graph revision")
-	}
-	if minimum := intTarget(target, "minimumSemanticGeneration", 0); evidence.SemanticGeneration < uint64(minimum) {
-		return evidence, fmt.Errorf("semantic generation %d is below %d", evidence.SemanticGeneration, minimum)
 	}
 	if err := requireCapturedRevision(resources, target, "expectFreshRevisionFrom", evidence.FreshThroughGraphRevision); err != nil {
 		return evidence, err
@@ -1207,6 +1240,9 @@ func executeSemanticSearchAssertion(ctx context.Context, resources *provision.Sc
 		SpaceId: assignment.SpaceID, DomainId: assignment.DomainID, Query: query,
 		SemanticRuleId: proto.String(resources.Semantic.SemanticRuleID), EmbeddingBindingKey: proto.String(resources.Semantic.EmbeddingBindingKey), Limit: int32(limit),
 	}
+	if boolTarget(target, "broad", false) {
+		request.SemanticRuleId, request.EmbeddingBindingKey = nil, nil
+	}
 	if minimum, ok := floatTarget(target, "minimumScore"); ok {
 		request.MinScore = proto.Float64(minimum)
 	}
@@ -1351,6 +1387,14 @@ retrySearch:
 		if key := targetString(target, "rejectConfigurationHashFrom"); key != "" {
 			if rejected := resources.Semantic.EvidenceValues[key]; rejected != "" && mapped.SemanticConfigurationHash == rejected {
 				return evidence, fmt.Errorf("semantic result retained stale configuration hash capture %q", key)
+			}
+		}
+		if err := validateSemanticSearchShape(mapped, resources.Semantic, target); err != nil {
+			return evidence, err
+		}
+		if expected := targetString(target, "expectedPayloadText"); expected != "" {
+			if item.GetNode() == nil || item.GetNode().GetPayload().GetFields()["text"].GetStringValue() != expected {
+				return evidence, errors.New("semantic hydration crossed the expected domain payload boundary")
 			}
 		}
 		evidence.Results = append(evidence.Results, mapped)
@@ -1502,6 +1546,8 @@ func awaitSemanticMaintenance(ctx context.Context, admin *mycel.AdminClient, res
 	if timeout <= 0 || pollInterval <= 0 || pollInterval > timeout {
 		return SemanticMaintenanceResult{}, errors.New("semantic maintenance timeout and poll interval are invalid")
 	}
+	ctx, cancelOperation := context.WithTimeout(ctx, timeout)
+	defer cancelOperation()
 	deadline := time.Now().Add(timeout)
 	result := SemanticMaintenanceResult{}
 	for sequence := 1; ; sequence++ {
@@ -1513,27 +1559,30 @@ func awaitSemanticMaintenance(ctx context.Context, admin *mycel.AdminClient, res
 			SpaceId: resources.SpaceID, SemanticRuleId: resources.SemanticRuleID, EmbeddingBindingKey: resources.EmbeddingBindingKey, Limit: int32(resources.MaintenanceAnalyzeLimit),
 		})
 		cancel()
-		if analyzeErr != nil {
-			return result, fmt.Errorf("analyze semantic maintenance: %w", analyzeErr)
+		if analyzeErr != nil || analyzed == nil {
+			return result, fmt.Errorf("analyze semantic maintenance RPC rejected: %s", status.Code(analyzeErr))
 		}
 		callCtx, cancel = admin.AuthCallContext(ctx)
 		processed, processErr := admin.SemanticMaintenance.ProcessSemanticDirtyWork(callCtx, &adminv1.ProcessSemanticDirtyWorkRequest{SpaceId: resources.SpaceID, Limit: int32(resources.MaintenanceProcessLimit)})
 		cancel()
-		if processErr != nil {
-			return result, fmt.Errorf("process semantic maintenance: %w", processErr)
+		if processErr != nil || processed == nil {
+			return result, fmt.Errorf("process semantic maintenance RPC rejected: %s", status.Code(processErr))
 		}
 		callCtx, cancel = admin.AuthCallContext(ctx)
 		statusResponse, statusErr := admin.SemanticMaintenance.GetSemanticMaintenanceStatus(callCtx, &adminv1.GetSemanticMaintenanceStatusRequest{SpaceId: resources.SpaceID})
 		cancel()
-		if statusErr != nil {
-			return result, fmt.Errorf("get semantic maintenance status: %w", statusErr)
+		if statusErr != nil || statusResponse == nil {
+			return result, fmt.Errorf("get semantic maintenance status RPC rejected: %s", status.Code(statusErr))
 		}
 		observation := SemanticMaintenanceObservation{
 			Sequence: sequence, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), ProcessedEvents: analyzed.GetProcessedEvents(), EnqueuedItems: analyzed.GetEnqueuedItems(),
 			ProcessedItems: processed.GetProcessedItems(), CompletedItems: processed.GetCompletedItems(), FailedItems: processed.GetFailedItems(),
 			QueueDepthPending: statusResponse.GetQueueDepthPending(), QueueDepthRunning: statusResponse.GetQueueDepthRunning(),
 			QueueDepthRetryable: statusResponse.GetQueueDepthFailedRetryable(), QueueDepthPermanent: statusResponse.GetQueueDepthFailedPermanent(),
-			Degraded: statusResponse.GetDegraded(), DegradedReason: statusResponse.GetDegradedReason(),
+			Degraded: statusResponse.GetDegraded(),
+		}
+		if observation.Degraded {
+			observation.DegradedReason = "maintenance-degraded"
 		}
 		result.Observations = append(result.Observations, observation)
 		if observation.Degraded || observation.QueueDepthPermanent > 0 {

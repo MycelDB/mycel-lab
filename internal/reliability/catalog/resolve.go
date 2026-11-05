@@ -95,10 +95,38 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 		selection = "cli-override"
 	}
 	var resolvedProvider *provider.ResolvedProfile
+	var composition *provider.CompositionPlan
 	if selectedProviderRef != "" {
 		profile, source, err := resolveProviderProfile(selectedProviderRef, scenarioDir, opts.ProfileDirs)
 		if err != nil {
 			return spec.ResolvedScenario{}, fmt.Errorf("provider profile: %w", err)
+		}
+		if scenario.Semantic != nil && len(scenario.Semantic.ProviderStages) > 0 {
+			stages := scenario.Semantic.ProviderStages
+			if selectedProviderRef != stages[len(stages)-1].ProfileRef {
+				return spec.ResolvedScenario{}, fmt.Errorf("provider override cannot silently change a composed stage")
+			}
+			sources := map[string][]byte{selectedProviderRef: source}
+			for _, stage := range stages {
+				if _, exists := sources[stage.ProfileRef]; exists {
+					continue
+				}
+				_, raw, err := resolveProviderProfile(stage.ProfileRef, scenarioDir, opts.ProfileDirs)
+				if err != nil {
+					return spec.ResolvedScenario{}, fmt.Errorf("composition profile: %w", err)
+				}
+				sources[stage.ProfileRef] = raw
+			}
+			plan, err := provider.PlanComposition(stages, sources, provider.SemanticStageAdapters())
+			if err != nil {
+				return spec.ResolvedScenario{}, err
+			}
+			// This check precedes provider.Resolve and any live secret lookup.
+			// Dry-run is not permission to report an unsupported pipeline passed.
+			if err := plan.RequireExecutable(); err != nil {
+				return spec.ResolvedScenario{}, err
+			}
+			composition = &plan
 		}
 		requiredCapabilities := []string{"embedding"}
 		if scenario.ProcedureInference != nil {
@@ -132,20 +160,21 @@ func ResolveScenario(scenario spec.Scenario, scenarioDir string, opts ResolveOpt
 	}
 
 	return spec.ResolvedScenario{
-		TypeMeta:           spec.TypeMeta{APIVersion: spec.APIVersion, Kind: "ResolvedScenario"},
-		Metadata:           scenario.Metadata,
-		Seed:               scenario.Seed,
-		Environment:        scenario.Environment,
-		ClusterRef:         scenario.ClusterRef,
-		Cluster:            cluster,
-		ProviderProfileRef: selectedProviderRef,
-		ProviderProfile:    resolvedProvider,
-		Semantic:           scenario.Semantic,
-		ProcedureInference: scenario.ProcedureInference,
-		ActorGroups:        groups,
-		Phases:             scenario.Phases,
-		Assertions:         scenario.Assertions,
-		Artifacts:          scenario.Artifacts,
+		TypeMeta:            spec.TypeMeta{APIVersion: spec.APIVersion, Kind: "ResolvedScenario"},
+		Metadata:            scenario.Metadata,
+		Seed:                scenario.Seed,
+		Environment:         scenario.Environment,
+		ClusterRef:          scenario.ClusterRef,
+		Cluster:             cluster,
+		ProviderProfileRef:  selectedProviderRef,
+		ProviderProfile:     resolvedProvider,
+		ProviderComposition: composition,
+		Semantic:            scenario.Semantic,
+		ProcedureInference:  scenario.ProcedureInference,
+		ActorGroups:         groups,
+		Phases:              scenario.Phases,
+		Assertions:          scenario.Assertions,
+		Artifacts:           scenario.Artifacts,
 	}, nil
 }
 

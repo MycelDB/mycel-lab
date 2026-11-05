@@ -110,7 +110,7 @@ families:
 
 | Suite | Purpose | Default gate |
 | --- | --- | --- |
-| `semantic-graph-index-contract` | Minimum deterministic proof: projection, create, update, delete, transaction visibility, backfill, direct semantic search, source diagnostics. | Manual destructive Compose first; candidate for required CI once stable. |
+| `semantic-graph-index-contract` | Deterministic lifecycle/source proof, same-space domain isolation, and independent configured model/dimension/vector-space migration. | Manual destructive Compose first; candidate for required CI once stable. |
 | `semantic-graph-index-recovery` | Restart, pending work, persisted index, rebuild from graph truth, stale async completion, replay/restore readiness. | Manual destructive Compose first; later release gate. |
 | `semantic-provider-protocol-openai-compatible` | Local HTTP emulator for OpenAI/OpenRouter-style embedding/generation protocols. | Non-gating until stable. |
 | `semantic-provider-protocol-anthropic` | Local HTTP emulator for Anthropic-style generation/enrichment protocol behavior. | Non-gating until connector support exists. |
@@ -236,7 +236,16 @@ Each assertion emits structured events and a final verdict section.
 - metadata/filter interaction;
 - deterministic ranking and tie-breaking where supported;
 - direct semantic search source proof;
+- independent same-space domains with the same principal/node UUID, broad searches
+  without rule/binding selectors, exact hydration, peer-only updates, and retained restart;
+- separate selected-model, dimension, and vector-space changes requiring generation
+  advancement and rejected search before explicit authorized rebuild, followed by exact
+  configured identity/shape/provenance and retained-record checks;
 - artifact redaction.
+
+The current contract definition contains three cases; the full credential-free
+aggregate defines 16 cases / 65 phases. Definitions and local harness tests are not
+runtime acceptance: fresh exact-source v0.21.4 qualification remains required.
 
 ### Tranche B: recovery suite
 

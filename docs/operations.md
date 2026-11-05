@@ -300,16 +300,24 @@ mycel-lab run suite raft-reliability-baseline --dry-run
 
 Suites execute scenarios sequentially and honor `stopOnFailure`. The canonical semantic graph-index suites for #46 are:
 
-- `semantic-graph-index-contract` — Tranche A contract/lifecycle convergence.
+- `semantic-graph-index-contract` — contract/lifecycle convergence, same-space
+  domain isolation, and configured model/dimension/vector-space migration (three scenarios).
 - `semantic-graph-index-recovery` — Tranche B restart persistence, rebuild,
-  delta catch-up, and controlled retained pending-work resumption.
+  delta catch-up, controlled retained pending-work resumption, and true controlled
+  out-of-order publication (three scenarios).
 - `semantic-graph-index-protocol` — Tranche C OpenAI-compatible provider
-  protocol-emulator coverage with sanitized observation evidence.
+  protocol success plus nine finite failure cases with sanitized evidence
+  (ten scenarios).
 - `semantic-graph-index-live` — Tranche D manually gated live-provider
   coverage with bounded budgets and invariant-based ranking.
 - `semantic-graph-index-release-gate` — Tranche E credential-free aggregate of
-  contract, recovery, pending-work restart, and protocol-emulator definitions for
-  release qualification (four scenarios / 25 phases; fresh acceptance required).
+  contract, recovery, pending-work restart, controlled out-of-order completion,
+  domain isolation, configured migration, and protocol success/failure definitions
+  (16 scenarios / 65 phases; fresh
+  environment-backed acceptance required).
+- `semantic-provider-failure-matrix` — nine cases: 429/Retry-After, 503, real
+  connection drop, malformed/truncated JSON, incorrect dimensions, refusal,
+  deadline, and controlled cancellation.
 
 Canonical semantic scenarios now default to the immutable **v0.21.4** index
 `docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7`.
@@ -323,7 +331,31 @@ or reconstruct a missing queue; normal public maintenance resumes only after the
 preserved work ID, generation, revision range, and attempts are verified. This is
 not automatic/in-flight provider recovery or out-of-order completion proof.
 
-They currently run Compose-backed deterministic, emulator, or manually gated live-provider scenarios:
+The new ordering/failure cases use finite request sequences and local emulator
+controls; build a clean emulator from the same exact Lab source and supply its
+immutable image ID with `--environment-option providerEmulatorImage=<image-id>`.
+A forced older backfill is held before a newer record is published and searched;
+release must report superseded skip with unchanged newer record identity. Fault
+cases require failure/gap/freshness evidence before normal or explicitly authorized
+public retry; no rebuild/reset hides a failure. No arbitrary sleep proves ordering.
+
+The deterministic [domain-isolation case](../tests/reliability/scenarios/compose-semantic-domain-isolation/compose-semantic-domain-isolation.md)
+uses the same actor, principal, space, endpoint credentials, and node UUID in two domains.
+Broad searches omit rule/binding selectors and verify both semantic isolation and hydrated
+content, including after a peer-only update and retained-data restart.
+The [configured-migration case](../tests/reliability/scenarios/compose-semantic-model-migration/compose-semantic-model-migration.md)
+changes selected model identity, dimensions, and vector-space identity separately. Each
+must prove a new generation, rebuild-required state, and `FailedPrecondition` search
+**before** an explicit authorized rebuild. This is not a malformed-vector test or repair
+used to conceal a failed assertion. Extra inference resources remain tracked for cleanup;
+the owning rule is removed before the selected alternate route.
+
+[Provider-stage compositions](design/semantic-provider-composition.md) are planned
+and capability-checked before deployment or secret lookup. The pinned v0.21.4 API
+does not support native semantic enrichment; a compound request fails rather than
+silently becoming embedding-only. See the [acceptance audit](implementation/semantic-graph-index-issue46-acceptance-audit.md).
+
+They run Compose-backed deterministic, emulator, or manually gated live-provider scenarios:
 
 ```sh
 mycel-lab run suite semantic-graph-index-contract --dry-run

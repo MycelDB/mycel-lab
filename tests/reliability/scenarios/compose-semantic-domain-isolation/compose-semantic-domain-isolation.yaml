@@ -1,0 +1,213 @@
+apiVersion: "myceldb.io/reliability/v1"
+kind: "Scenario"
+metadata:
+  name: "compose-semantic-domain-isolation"
+  description: "Generated controlled semantic provider correctness case; requires fresh runtime qualification."
+seed: 4670
+providerProfileRef: "deterministic-token-basis-v1"
+environment:
+  driver: "compose"
+  namespace: "mycel-lab"
+  options:
+    composeFiles:
+      - "../mycel/tests/compose/cluster/compose.yml"
+      - "tests/compose/ports.yml"
+      - "tests/compose/semantic-pending-restart.yml"
+    projectNamePrefix: "mycel-lab-semantic-domain-isolation"
+    imageOverride: "docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7"
+    serviceNames:
+      - "myceld-a"
+      - "myceld-b"
+      - "myceld-c"
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - "per-node-endpoints"
+      - "node-exec"
+      - "rolling-restart"
+      - "logs"
+clusterRef: "raft-3-node"
+clusterOverrides:
+  image: "docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7"
+actorGroups:
+  -
+    name: "semantic-controller"
+    profileRef: "semantic-controller"
+    count: 3
+    rate:
+      mode: "per-actor"
+      commitsPerSecond: 1
+semantic:
+  targetActorGroup: "semantic-controller"
+  rule:
+    deferProvisioning: true
+    key: "compose-semantic-domain-isolation"
+    targetLabels:
+      - "Document"
+    bindingKey: "search"
+    sourceMode: "self"
+    includeProperties:
+      - "text"
+    minimumTextLength: 1
+    physicalIndex: "exact"
+    dirtyCooldown: "1ms"
+    maxBatchSize: 16
+    workerConcurrency: 1
+  maintenance:
+    timeout: "30s"
+    pollInterval: "100ms"
+    analyzeLimit: 64
+    processLimit: 64
+phases:
+  -
+    name: "index-primary-domain"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-node-create"
+        target:
+          nodeId: "00000000-0000-4000-8000-000000004670"
+          labels:
+            - "Document"
+          text: "axis-0"
+          captureRevisionAs: "primary-commit"
+      -
+        type: "semantic-rule-create"
+        target:
+          semantic: "deferred"
+      -
+        type: "semantic-backfill"
+        target:
+          force: true
+          limit: 1
+          expectedSelected: 1
+          minimumGenerated: 1
+      -
+        type: "semantic-maintenance-await"
+        target:
+          timeout: "30s"
+          pollInterval: "100ms"
+  -
+    name: "index-distinct-domain-with-same-principal-space-and-node-id"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-domain-peer-create"
+        target:
+          name: "secondary"
+      -
+        type: "semantic-node-create"
+        target:
+          scope: "secondary"
+          nodeId: "00000000-0000-4000-8000-000000004670"
+          labels:
+            - "Document"
+          text: "axis-2"
+          captureRevisionAs: "peer-commit"
+      -
+        type: "semantic-rule-create"
+        target:
+          scope: "secondary"
+          semantic: "deferred"
+      -
+        type: "semantic-backfill"
+        target:
+          scope: "secondary"
+          force: true
+          limit: 1
+          expectedSelected: 1
+          minimumGenerated: 1
+      -
+        type: "semantic-maintenance-await"
+        target:
+          scope: "secondary"
+          timeout: "30s"
+          pollInterval: "100ms"
+  -
+    name: "prove-broad-search-and-hydration-boundaries"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-domain-isolation-assert"
+        target:
+          peer: "secondary"
+          nodeId: "00000000-0000-4000-8000-000000004670"
+          primaryQuery: "axis-0"
+          peerQuery: "axis-2"
+          expectPrimaryRevisionFrom: "primary-commit"
+          expectPeerRevisionFrom: "peer-commit"
+          timeout: "30s"
+          capturePrimaryRecordAs: "primary-record"
+          capturePeerRecordAs: "peer-record"
+  -
+    name: "peer-update-does-not-replace-primary-record"
+    duration: "1ms"
+    events:
+      -
+        type: "semantic-node-update"
+        target:
+          scope: "secondary"
+          nodeId: "00000000-0000-4000-8000-000000004670"
+          text: "axis-3"
+          captureRevisionAs: "peer-update"
+      -
+        type: "semantic-maintenance-await"
+        target:
+          scope: "secondary"
+          timeout: "30s"
+          pollInterval: "100ms"
+      -
+        type: "semantic-domain-isolation-assert"
+        target:
+          peer: "secondary"
+          nodeId: "00000000-0000-4000-8000-000000004670"
+          primaryQuery: "axis-0"
+          peerQuery: "axis-3"
+          expectPrimaryRevisionFrom: "primary-commit"
+          expectPeerRevisionFrom: "peer-update"
+          timeout: "30s"
+          expectPrimaryRecordFrom: "primary-record"
+          capturePeerRecordAs: "updated-peer-record"
+  -
+    name: "retained-restart-preserves-independent-domain-records"
+    duration: "1ms"
+    events:
+      -
+        type: "rolling-restart"
+        target:
+          scope: "cluster"
+      -
+        type: "cluster-recovery-wait"
+        target:
+          timeout: "60s"
+          interval: "200ms"
+          commandTimeout: "3s"
+          minimumStablePolls: 3
+          reuseEndpointSessions: true
+      -
+        type: "semantic-domain-isolation-assert"
+        target:
+          peer: "secondary"
+          nodeId: "00000000-0000-4000-8000-000000004670"
+          primaryQuery: "axis-0"
+          peerQuery: "axis-3"
+          expectPrimaryRevisionFrom: "primary-commit"
+          expectPeerRevisionFrom: "peer-update"
+          timeout: "30s"
+          expectPrimaryRecordFrom: "primary-record"
+          expectPeerRecordFrom: "updated-peer-record"
+    outcome:
+      availability: "expected-degradation"
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: "60s"
+    healthConvergenceInterval: "2s"
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
