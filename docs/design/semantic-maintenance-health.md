@@ -26,7 +26,7 @@ health. The original exception was not retained and cannot be reconstructed.
 | `GetSemanticReliabilityStatus` | Requested space/rule/binding's current public reliability state | Exact scope match, positive stable generation, complete healthy capacity limits, explicit idle/completed rebuild, consistent gap/flag/frontiers; current degradation is rejected |
 
 The maintenance waiter now reads the scoped certificate on every status
-observation. Completion additionally requires zero gaps, false rebuild flag and
+observation. Default `indexed` completion requires zero gaps, false rebuild flag and
 freshness through the latest observed revision. A generation change or frontier
 regression during the wait fails. Queue zeros, healthy cluster polls, timestamps
 and successful manual calls are never substitutes for this certificate. Direct
@@ -61,6 +61,43 @@ reconstruct the work. Disabled-background fixtures and work identity, attempts,
 generation, graph revision, false-freshness and no-replay fences remain strict.
 No backfill, rebuild, cursor reset or repair is added.
 
+## Explicit disabled-rule quiescence
+
+The failed clean `cbc4274` run exposed an overly broad Lab predicate: after the
+rule was deliberately disabled and revision 8 committed, its healthy, gap-free
+analyzed/fresh frontiers remained at 7. Demanding full indexing there timed out.
+The failure stays failed; this correction does not weaken default indexing.
+
+Only the intentional disabled negative-control wait selects
+`completion: disabled-quiescent`. It requires three positive captures:
+`expectGenerationFrom`, `expectFreshRevisionFrom` from the previously fresh
+reliability assertion, and `expectRevisionFrom` from the new acknowledged commit.
+The new commit must be greater than the captured fresh frontier.
+
+This mode is read-only throughout. Authenticated `GetSemanticRule` reads bracket
+each candidate status certificate, requiring the exact space/domain/rule and one
+matching enabled binding, with the rule itself disabled both times. The current
+generation must equal the capture; final latest revision must equal the acknowledged
+commit; analyzed and fresh must both equal the old fresh capture. A read which has
+not yet observed that commit may wait read-only, never pass. Any indexed frontier
+movement, generation/configuration invalidation, gap, unsafe capacity/rebuild,
+permanent work, scope drift or unexpected enablement fails. Empty queues and
+clear background health are still required within the original finite bounds.
+
+Evidence labels `completion: disabled-quiescent`, `freshnessProved: false` and
+retains safe observed rule-state booleans/categories before rejection. It never
+pretends that revision 8 was indexed. Default/explicit `indexed` mode remains
+strict and reports `freshnessProved: true` only on successful full convergence.
+Unknown modes, missing captures and generic freshness overrides are rejected.
+
+The following disabled direct-search `FailedPrecondition` assertion is unchanged.
+Re-enable uses ordinary indexed maintenance, direct provenance search and full
+freshness assertions. No background enablement, Analyze/Process, backfill, rebuild,
+repair or cursor reset is added to the disabled wait. The existing explicit
+re-enable backfill is unchanged. Local authenticated regressions reproduce the
+8/7/7 boundary and reject the same lag under default indexing; they are harness
+validation, not runtime acceptance.
+
 ## Safe diagnostics and validation
 
 Version-1 evidence separates node-background health from the scoped reliability
@@ -80,4 +117,4 @@ checkpoint capture. They are **harness evidence only**, not daemon qualification
 
 Fresh runtime acceptance still requires the complete 16-scenario / 65-phase
 aggregate on a newly frozen exact identity, with fresh explicit destructive
-approval. Neither consumed approval transfers and no run is started by this fix.
+approval. None of the three consumed approvals transfers; this fix starts no run.

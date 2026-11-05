@@ -45,6 +45,15 @@ func ValidateSemanticEventTarget(eventType string, target map[string]any) error 
 			return fmt.Errorf("%s target.%s: %w", eventType, key, err)
 		}
 	}
+	if eventType == "semantic-maintenance-await" {
+		disabled := target["completion"] == "disabled-quiescent"
+		for _, name := range []string{"expectGenerationFrom", "expectFreshRevisionFrom", "expectRevisionFrom"} {
+			_, present := target[name]
+			if present != disabled {
+				return fmt.Errorf("semantic-maintenance-await %s is required only for disabled-quiescent completion", name)
+			}
+		}
+	}
 	if eventType == "semantic-model-config-update" {
 		_, dimension := target["dimensions"]
 		_, space := target["vectorSpaceKey"]
@@ -187,6 +196,8 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 	case "semantic-maintenance-await":
 		return map[string]semanticTargetField{
 			"timeout": optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
+			"completion":           optional(semanticMaintenanceCompletion),
+			"expectGenerationFrom": optional(semanticCaptureName), "expectFreshRevisionFrom": optional(semanticCaptureName), "expectRevisionFrom": optional(semanticCaptureName),
 		}, nil
 	case "semantic-search-assert":
 		fields := map[string]semanticTargetField{
@@ -254,6 +265,13 @@ func semanticGate(value any) error {
 	name, ok := value.(string)
 	if !ok || !provider.ValidEmulatorGate(name) {
 		return fmt.Errorf("must be a bounded synthetic gate name")
+	}
+	return nil
+}
+
+func semanticMaintenanceCompletion(value any) error {
+	if value != "indexed" && value != "disabled-quiescent" {
+		return fmt.Errorf("must be indexed or disabled-quiescent")
 	}
 	return nil
 }

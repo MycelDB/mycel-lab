@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
+	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	mycel "github.com/myceldb/mycel-go-sdk"
 	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
 	clientv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/client/v1"
@@ -48,11 +49,15 @@ type SemanticMaintenanceObservation struct {
 	ReadOnly            bool                               `json:"readOnly"`
 	NodeHealth          *SemanticMaintenanceHealthV1       `json:"nodeHealth,omitempty"`
 	Reliability         *SemanticWorkReliabilityEvidenceV1 `json:"reliability,omitempty"`
+	DisabledRuleBefore  *SemanticDisabledRuleEvidenceV1    `json:"disabledRuleBefore,omitempty"`
+	DisabledRuleAfter   *SemanticDisabledRuleEvidenceV1    `json:"disabledRuleAfter,omitempty"`
 }
 
 type SemanticMaintenanceResult struct {
-	Converged    bool                             `json:"converged"`
-	Observations []SemanticMaintenanceObservation `json:"observations"`
+	Completion      string                           `json:"completion"`
+	FreshnessProved bool                             `json:"freshnessProved"`
+	Converged       bool                             `json:"converged"`
+	Observations    []SemanticMaintenanceObservation `json:"observations"`
 }
 
 type SemanticTransactionNegativeResult struct {
@@ -1538,6 +1543,16 @@ func floatTarget(target map[string]any, key string) (float64, bool) {
 }
 
 func awaitSemanticMaintenance(ctx context.Context, admin *mycel.AdminClient, resources *provision.SemanticResources, target map[string]any) (SemanticMaintenanceResult, error) {
+	if resources == nil || admin == nil {
+		return SemanticMaintenanceResult{}, errors.New("semantic maintenance requires resources and an admin client")
+	}
+	if err := spec.ValidateSemanticEventTarget("semantic-maintenance-await", target); err != nil {
+		return SemanticMaintenanceResult{}, err
+	}
+	disabled, err := loadDisabledSemanticQuiescence(resources, target)
+	if err != nil {
+		return SemanticMaintenanceResult{}, err
+	}
 	timeout := resources.MaintenanceTimeout
 	if value := durationTarget(target, "timeout", 0); value > 0 {
 		timeout = value
@@ -1551,5 +1566,5 @@ func awaitSemanticMaintenance(ctx context.Context, admin *mycel.AdminClient, res
 	}
 	ctx, cancelOperation := context.WithTimeout(ctx, timeout)
 	defer cancelOperation()
-	return awaitScopedSemanticMaintenance(ctx, admin, resources, pollInterval)
+	return awaitScopedSemanticMaintenance(ctx, admin, resources, pollInterval, disabled)
 }

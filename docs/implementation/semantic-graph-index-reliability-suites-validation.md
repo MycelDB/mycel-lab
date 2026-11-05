@@ -41,8 +41,8 @@ pre-deployment capability rejection for unsupported native composition. See the
 [acceptance audit](semantic-graph-index-issue46-acceptance-audit.md) for precise
 coverage, evidence levels, and remaining gaps.
 
-Two separately approved v0.21.4 environment-backed aggregates ran against clean
-Lab `6615c17` and `574e690`. Both **failed and stopped**, not qualifying the aggregate.
+Three separately approved v0.21.4 environment-backed aggregates ran against clean
+Lab `6615c17`, `574e690` and `cbc4274`. All **failed and stopped**, not qualifying the aggregate.
 The previously prepared `3b1c222` four-case bundle remains unexecuted and does not
 transfer evidence or approval. Unit/fake-RPC and planning checks validate the
 harness only. Native semantic enrichment remains API/adapter-blocked; no hosted
@@ -150,6 +150,44 @@ when expiry occurred inside an RPC; the corrected path preserves parent/operatio
 context errors. That original failed test log is retained separately from later
 changed-source validation. Both runtime approvals are consumed. No new destructive
 execution or release publication is performed by this correction.
+
+### Approved clean cbc4274 execution: failed, no rerun
+
+Retained evidence:
+`artifacts/destructive/semantic-graph-index-v0214-clean-cbc4274-20261105T141941Z/`.
+
+The approved one-shot invocation on 2026-11-05 failed the contract case at
+`semantic-maintenance-await` in `disabled-rule-negative-control` after nine passed
+phases. Totals: **zero scenarios passed, one failed, fifteen not run; nine phases
+passed, one failed, 55 unexecuted** (one aborted phase plus 54 unstarted scenario
+phases). The 30-second deadline retained 160 healthy, empty-queue observations:
+latest revision 8, analyzed/fresh 7/7, generation 1, no gaps, completed rebuild.
+The rule was explicitly disabled before revision 8 committed. The Lab completion
+predicate incorrectly demanded latest freshness while indexing was disabled.
+
+All 166 maintenance observations in the attempted run were nondegraded: the prior
+restart/transient-health path was not exercised. Disabled search rejection,
+re-enable catch-up and all later scenarios were not reached. Final/cluster
+oracles, cleanup/absence, three native daemon observations and artifact safety
+(one run / 40 files) passed, not aggregate acceptance. Failed evidence is unchanged.
+
+### Disabled-quiescence correction: harness evidence only
+
+An authenticated fake-RPC regression reproduced the retained 8/7/7 timeout locally
+before the fix. The intentional negative-control wait now explicitly selects
+`disabled-quiescent` completion, preserving captured pre-disable generation/fresh
+frontiers and the exact later acknowledged commit. It is read-only and requires
+public disabled-rule reads before/after the scoped status. Healthy capacity,
+rebuild state, zero gaps, empty queues and clear background health remain required;
+unknown state, drift, re-enable and permission/RPC failures fail closed. Evidence
+states `freshnessProved: false`, never false freshness at revision 8.
+
+Default indexing still rejects the 8/7/7 lag. Disabled direct-search rejection and
+normal re-enable freshness/provenance assertions remain unchanged. Regressions
+cover these boundaries, strict targets, safe rejections and deadlines. These are
+local harness tests, not a runtime pass. No daemon/API/SDK change, implicit repair
+or new destructive execution is part of this correction. All three approvals are
+consumed; #46 remains open and any future run needs a new exact bundle/approval.
 
 ### Completion batch: earlier local harness validation only
 
