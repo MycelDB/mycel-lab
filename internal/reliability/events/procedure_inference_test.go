@@ -360,7 +360,9 @@ func TestProcedureInferenceAwaitInvalidAttemptStillReportsFullStateAggregates(t 
 		},
 		Assignments: []provision.ActorAssignment{{ActorID: "auditor-1", Username: "auditor", Password: "password"}},
 	}
-	result, err := awaitProcedureInference(context.Background(), driver, env.Environment{}, resources, map[string]procedureInferenceCheckpoint{}, map[string]any{"timeout": "5ms", "interval": "1ms", "maximumAttempts": 5})
+	// Allow the first fake-RPC observation even on a busy CI worker; the
+	// invalid attempts must still remain invalid until the finite timeout.
+	result, err := awaitProcedureInference(context.Background(), driver, env.Environment{}, resources, map[string]procedureInferenceCheckpoint{}, map[string]any{"timeout": "250ms", "interval": "1ms", "maximumAttempts": 5})
 	if err == nil || !strings.Contains(err.Error(), "did not converge") {
 		t.Fatalf("error=%v, want bounded convergence timeout", err)
 	}
