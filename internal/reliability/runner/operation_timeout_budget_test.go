@@ -63,6 +63,94 @@ func TestOperationTimeoutBudgetRejectsClippedWaitWithoutWeakeningIt(t *testing.T
 	}
 }
 
+func TestCanonicalReusableRecoveryWaitsKeepSingleLoginAndStablePollBudgets(t *testing.T) {
+	count := 0
+	for _, name := range []string{"compose-semantic-pending-restart", "compose-semantic-domain-isolation", "compose-semantic-model-migration", "compose-procedure-inference-control-emulator"} {
+		scenario := canonicalComposeScenario(t, name)
+		for _, phase := range scenario.Phases {
+			for _, event := range phase.Events {
+				if event.Type != "cluster-recovery-wait" || event.Target["reuseEndpointSessions"] != true {
+					continue
+				}
+				count++
+				if event.Target["timeout"] != "60s" || event.Target["commandTimeout"] != "3s" || event.Target["sessionInitTimeout"] != "10s" || event.Target["minimumStablePolls"] != 3 {
+					t.Fatalf("%s %s changed recovery/session assertions: %v", name, phase.Name, event.Target)
+				}
+			}
+		}
+		if err := validateOperationTimeoutBudget(scenario); err != nil {
+			t.Fatalf("%s session policy exceeded operation budget: %v", name, err)
+		}
+	}
+	if count != 5 {
+		t.Fatalf("covered %d reusable recovery waits, want five across four scenarios", count)
+	}
+}
+
+func TestRecoverySessionInitializationBudgetRejectsImpossibleAndUnauthenticatedPlans(t *testing.T) {
+	scenario := canonicalComposeScenario(t, "compose-semantic-pending-restart")
+	for phase := range scenario.Phases {
+		for event := range scenario.Phases[phase].Events {
+			probe := &scenario.Phases[phase].Events[event]
+			if probe.Type != "cluster-recovery-wait" {
+				continue
+			}
+			original := probe.Target["sessionInitTimeout"]
+			probe.Target["sessionInitTimeout"] = "20s"
+			if err := validateOperationTimeoutBudget(scenario); err == nil || !strings.Contains(err.Error(), "leave time for every node login") {
+				t.Fatalf("three 20s logins accepted under a 60s recovery budget: %v", err)
+			}
+			probe.Target["sessionInitTimeout"] = "nonsense"
+			if err := validateOperationTimeoutBudget(scenario); err == nil || !strings.Contains(err.Error(), "sessionInitTimeout") {
+				t.Fatalf("invalid session initialization limit accepted: %v", err)
+			}
+			probe.Target["sessionInitTimeout"] = original
+			probe.Target["reuseEndpointSessions"] = false
+			if err := validateOperationTimeoutBudget(scenario); err == nil || !strings.Contains(err.Error(), "requires reusable endpoint sessions") {
+				t.Fatalf("session creation budget without reusable sessions accepted: %v", err)
+			}
+			probe.Target["reuseEndpointSessions"] = true
+		}
+	}
+	if err := validateOperationTimeoutBudget(scenario); err != nil {
+		t.Fatalf("restored 10s-per-session and 60s recovery budget rejected: %v", err)
+	}
+}
+
+func TestSuiteRejectsLaterImpossibleSessionInitializationBeforeProvisioning(t *testing.T) {
+	original := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-semantic-pending-restart", "compose-semantic-pending-restart.yaml")
+	raw, err := os.ReadFile(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := strings.Replace(string(raw), "sessionInitTimeout: 10s", "sessionInitTimeout: 30s", 1)
+	if modified == string(raw) {
+		t.Fatal("pending restart lost its explicit session initialization budget")
+	}
+	second := filepath.Join(t.TempDir(), "later.yaml")
+	if err := os.WriteFile(second, []byte(modified), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := filepath.Abs(filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-semantic-graph-recovery", "compose-semantic-graph-recovery.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite := filepath.Join(t.TempDir(), "budget-suite.yaml")
+	body := fmt.Sprintf("apiVersion: myceldb.io/reliability/v1\nkind: Suite\nmetadata:\n  name: session-budget-preflight\nscenarios:\n  - path: %q\n  - path: %q\nexecution:\n  mode: sequential\n  stopOnFailure: true\n", first, second)
+	if err := os.WriteFile(suite, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := t.TempDir()
+	result, err := RunSuiteFile(context.Background(), suite, Options{DryRun: true, ArtifactRoot: artifacts, ProfileDirs: []string{filepath.Join("..", "..", "..", "tests", "reliability")}})
+	if err == nil || !strings.Contains(err.Error(), "leave time for every node login") || len(result.Results) != 0 {
+		t.Fatalf("later impossible session plan must stop before provisioning: results=%+v error=%v", result, err)
+	}
+	entries, err := os.ReadDir(artifacts)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("preflight wrote artifacts before rejection: entries=%v error=%v", entries, err)
+	}
+}
+
 func TestSuiteRejectsLaterClippedWaitBeforeFirstScenario(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-semantic-pending-restart", "compose-semantic-pending-restart.yaml")
 	raw, err := os.ReadFile(path)

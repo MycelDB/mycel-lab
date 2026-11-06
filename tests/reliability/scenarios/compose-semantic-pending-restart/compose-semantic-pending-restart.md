@@ -89,7 +89,11 @@ scenarios and must not be inferred from this pass.
 
 The scenario pins the v0.21.4 image in both manifest and Compose selection.
 Maintenance defaults are 30 seconds / 100 ms polling, with analyze/process limits
-of 64. Recovery requires three stable health polls within 60 seconds. The
+of 64. Recovery requires three stable health polls within 60 seconds. Before
+creating a reusable session, it waits for read-only TCP transport readiness and
+allows a single bounded 10-second login per node, leaving room in that same
+60-second wait for the three stable polls. Poll RPCs remain bounded to 3 seconds.
+A timed-out login may have created a session, so it is **never retried**. The
 pending-work assertions require the disabled background-scheduler configuration;
 do not remove that requirement or substitute a timed sleep. An explicit image
 or fixture override requires its own reviewed identity and execution evidence.
@@ -103,7 +107,7 @@ mycel-lab run scenario compose-semantic-pending-restart --dry-run
 ```
 
 The scenario is also included in `semantic-graph-index-recovery` and
-`semantic-graph-index-release-gate`. The latter now contains four scenarios;
+`semantic-graph-index-release-gate`. The latter now contains 16 scenarios;
 previous three-scenario v0.21.3 qualification does not qualify this aggregate.
 
 After reviewing the exact clean harness and obtaining fresh destructive-run

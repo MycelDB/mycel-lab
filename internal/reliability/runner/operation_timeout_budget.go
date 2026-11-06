@@ -37,6 +37,18 @@ func validateOperationTimeoutBudget(scenario spec.ResolvedScenario) error {
 			if maxWait >= limit {
 				return fmt.Errorf("scenario %s phase %s event %s: timeout %s must be below the provider operation requestTimeout %s (all runtime events reserve an operation)", scenario.Metadata.Name, phase.Name, event.Type, maxWait, limit)
 			}
+			if event.Type == "cluster-recovery-wait" {
+				if rawInit, configured := event.Target["sessionInitTimeout"]; configured {
+					if event.Target["reuseEndpointSessions"] != true {
+						return fmt.Errorf("scenario %s phase %s: sessionInitTimeout requires reusable endpoint sessions", scenario.Metadata.Name, phase.Name)
+					}
+					text, ok := rawInit.(string)
+					initTimeout, err := time.ParseDuration(text)
+					if !ok || err != nil || initTimeout <= 0 || scenario.Cluster.Nodes <= 0 || initTimeout >= maxWait/time.Duration(scenario.Cluster.Nodes) {
+						return fmt.Errorf("scenario %s phase %s: sessionInitTimeout must leave time for every node login and recovery polling within %s", scenario.Metadata.Name, phase.Name, maxWait)
+					}
+				}
+			}
 		}
 	}
 	return nil

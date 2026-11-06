@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -51,10 +52,10 @@ func (i *recordingClusterRecoveryInspector) Close() error {
 func TestClusterRecoveryReusesOneEndpointSessionInspectorAcrossPolls(t *testing.T) {
 	inspector := &recordingClusterRecoveryInspector{calls: map[int]int{}}
 	factoryCalls := 0
-	factory := func(_ context.Context, _ env.EnvironmentDriver, _ env.Environment, ordinals []int, commandTimeout time.Duration, target map[string]any) (clusterRecoveryNodeInspector, error) {
+	factory := func(_ context.Context, _ env.EnvironmentDriver, _ env.Environment, ordinals []int, initTimeout, commandTimeout, interval time.Duration, target map[string]any) (clusterRecoveryNodeInspector, error) {
 		factoryCalls++
-		if !reflect.DeepEqual(ordinals, []int{0, 1, 2}) || commandTimeout != 10*time.Millisecond || !boolTarget(target, "reuseEndpointSessions", false) {
-			t.Fatalf("factory ordinals=%v commandTimeout=%s target=%v", ordinals, commandTimeout, target)
+		if !reflect.DeepEqual(ordinals, []int{0, 1, 2}) || initTimeout != 20*time.Millisecond || commandTimeout != 10*time.Millisecond || interval != time.Millisecond || !boolTarget(target, "reuseEndpointSessions", false) {
+			t.Fatalf("factory ordinals=%v initTimeout=%s commandTimeout=%s interval=%s target=%v", ordinals, initTimeout, commandTimeout, interval, target)
 		}
 		return inspector, nil
 	}
@@ -64,6 +65,7 @@ func TestClusterRecoveryReusesOneEndpointSessionInspectorAcrossPolls(t *testing.
 		"timeout":                   "100ms",
 		"interval":                  "1ms",
 		"commandTimeout":            "10ms",
+		"sessionInitTimeout":        "20ms",
 		"minimumStablePolls":        3,
 		"requireZeroApplyLag":       true,
 		"requireConsistentProgress": true,
@@ -72,7 +74,7 @@ func TestClusterRecoveryReusesOneEndpointSessionInspectorAcrossPolls(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Ready || result.Attempts != 3 || result.StablePolls != 3 || result.InspectionMode != "reusable-endpoint-session" || result.ReusableEndpointSessions != 3 || factoryCalls != 1 {
+	if !result.Ready || result.Attempts != 3 || result.StablePolls != 3 || result.InspectionMode != "reusable-endpoint-session" || result.ReusableEndpointSessions != 3 || result.SessionInitTimeout != "20ms" || factoryCalls != 1 {
 		t.Fatalf("result=%+v factoryCalls=%d, want three reused sessions and three stable polls", result, factoryCalls)
 	}
 	inspector.mu.Lock()
@@ -84,7 +86,7 @@ func TestClusterRecoveryReusesOneEndpointSessionInspectorAcrossPolls(t *testing.
 
 func TestClusterRecoveryReusableSessionInitializationFailsClosed(t *testing.T) {
 	factoryErr := errors.New("session initialization failed")
-	factory := func(context.Context, env.EnvironmentDriver, env.Environment, []int, time.Duration, map[string]any) (clusterRecoveryNodeInspector, error) {
+	factory := func(context.Context, env.EnvironmentDriver, env.Environment, []int, time.Duration, time.Duration, time.Duration, map[string]any) (clusterRecoveryNodeInspector, error) {
 		return nil, factoryErr
 	}
 	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
@@ -113,6 +115,7 @@ type clusterRecoveryGRPCServer struct {
 	commonv1.UnimplementedAuthServiceServer
 	adminv1.UnimplementedAdminClusterServiceServer
 	loginCalls     atomic.Int64
+	loginDelay     time.Duration
 	statusCalls    atomic.Int64
 	raftGroupCalls atomic.Int64
 	committedIndex atomic.Uint64
@@ -120,6 +123,11 @@ type clusterRecoveryGRPCServer struct {
 
 func (s *clusterRecoveryGRPCServer) Login(context.Context, *commonv1.LoginRequest) (*commonv1.LoginResponse, error) {
 	s.loginCalls.Add(1)
+	if s.loginDelay > 0 {
+		// Model an ambiguous timeout: the session might already have been
+		// created even though the caller never sees its delayed response.
+		time.Sleep(s.loginDelay)
+	}
 	return &commonv1.LoginResponse{AccessToken: "test-access-token", AccessTokenExpireTime: timestamppb.New(time.Now().Add(time.Hour))}, nil
 }
 
@@ -181,6 +189,7 @@ func TestReusableClusterRecoverySessionsAuthenticateOncePerEndpoint(t *testing.T
 		"timeout":                   "2s",
 		"interval":                  "1ms",
 		"commandTimeout":            "500ms",
+		"sessionInitTimeout":        "600ms",
 		"minimumStablePolls":        3,
 		"requireZeroApplyLag":       true,
 		"requireConsistentProgress": true,
@@ -189,7 +198,7 @@ func TestReusableClusterRecoverySessionsAuthenticateOncePerEndpoint(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Ready || result.Attempts != 3 || result.StablePolls != 3 || result.InspectionMode != "reusable-endpoint-session" || result.ReusableEndpointSessions != 3 {
+	if !result.Ready || result.Attempts != 3 || result.StablePolls != 3 || result.InspectionMode != "reusable-endpoint-session" || result.ReusableEndpointSessions != 3 || result.SessionInitTimeout != "600ms" {
 		t.Fatalf("result=%+v, want three stable direct inspections across three reused sessions", result)
 	}
 	if got := server.loginCalls.Load(); got != 3 {
@@ -203,5 +212,58 @@ func TestReusableClusterRecoverySessionsAuthenticateOncePerEndpoint(t *testing.T
 	}
 	if len(baseDriver.execCommands) != 0 {
 		t.Fatalf("exec commands=%v, want reusable direct SDK inspection", baseDriver.execCommands)
+	}
+}
+
+func TestClusterRecoveryTransportWaitIsReadOnlyAndBounded(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	err = awaitClusterRecoveryTransport(ctx, address, 5*time.Millisecond, time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "read-only probes") {
+		t.Fatalf("transport wait must end without an auth attempt at its parent deadline: %v", err)
+	}
+	if err := awaitClusterRecoveryTransport(ctx, "malformed-address", 5*time.Millisecond, time.Millisecond); err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("malformed endpoint was silently retried: %v", err)
+	}
+}
+
+func TestClusterRecoveryNeverRetriesAmbiguousSessionCreatingLogin(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &clusterRecoveryGRPCServer{loginDelay: 80 * time.Millisecond}
+	grpcServer := grpc.NewServer()
+	commonv1.RegisterAuthServiceServer(grpcServer, server)
+	adminv1.RegisterAdminClusterServiceServer(grpcServer, server)
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+		<-serveDone
+	})
+	driver := &clusterRecoveryEndpointDriver{recordingDriver: &recordingDriver{}, endpoints: []env.Endpoint{{NodeName: "myceld-0", DaemonAddr: listener.Addr().String()}}}
+	scenario := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1, Raft: spec.RaftSpec{PartitionCount: 0}}}
+	result, err := executeClusterRecoveryWaitEvent(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, scenario, map[string]any{
+		"timeout": "200ms", "interval": "1ms", "commandTimeout": "10ms", "sessionInitTimeout": "30ms", "minimumStablePolls": 1, "reuseEndpointSessions": true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "authenticate daemon endpoint for ordinal 0") || !strings.Contains(err.Error(), "DeadlineExceeded") || result.Attempts != 0 || result.SessionInitTimeout != "30ms" {
+		t.Fatalf("ambiguous login must fail before polling, with no resubmission: result=%+v error=%v", result, err)
+	}
+	time.Sleep(90 * time.Millisecond) // server might finish creating the timed-out session
+	if server.loginCalls.Load() != 1 || server.statusCalls.Load() != 0 || server.raftGroupCalls.Load() != 0 {
+		t.Fatalf("ambiguous session creation replayed: login=%d status=%d raft=%d", server.loginCalls.Load(), server.statusCalls.Load(), server.raftGroupCalls.Load())
 	}
 }

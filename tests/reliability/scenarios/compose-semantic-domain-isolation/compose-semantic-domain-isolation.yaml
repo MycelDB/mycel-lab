@@ -187,6 +187,7 @@ phases:
           timeout: "60s"
           interval: "200ms"
           commandTimeout: "3s"
+          sessionInitTimeout: "10s"
           minimumStablePolls: 3
           reuseEndpointSessions: true
       -
