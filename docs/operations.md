@@ -401,6 +401,28 @@ helper references. Inspect the fresh resource/port baseline first; the ordinary
 Compose cases publish host gRPC 19091–19093 on all interfaces and the protocol
 case uses 19791–19793. No destructive run, hosted-provider access or approval
 is implied by building, validating or dry-running a bundle.
+
+Compose scenarios explicitly declare the 16 partitions started by the three-node
+Compose fixture (17 Raft groups including system); the reusable cluster profile
+still defaults to 64 for other deployment shapes. Before a suite runs **any**
+scenario, and before standalone scenario provisioning, the harness checks the
+resolved node count, partition count, and replica factor against each named
+Compose daemon's base/overlay environment. It reads the bound runtime files for
+release bundles, evaluates supported local variable defaults, and fails closed
+on missing, malformed, per-node divergent, or .env-supplied Raft settings.
+Dry-run/CI exercise this pre-provisioning guard but are not runtime acceptance;
+a new suite/fixture/bundle requires fresh review and destructive approval.
+
+Every provider-backed runtime event also reserves a harness operation, even
+when the event makes no provider call. The suite-wide preflight therefore
+rejects an event's declared `target.timeout` if it reaches or exceeds the
+selected profile's `requestTimeout`. The credential-free deterministic profile
+allows the existing 60-second recovery oracle under a finite 75-second
+operation bound; local emulator profiles preserve their finite request scripts,
+retry/cancel witnesses, event waits, and total budgets while leaving room for
+their already-declared 30- or 45-second waits. These source-only bounds do not
+qualify pending-work retention or provider failure behavior at runtime.
+
 A forced older backfill is held before a newer record is published and searched;
 release must report superseded skip with unchanged newer record identity. Fault
 cases require failure/gap/freshness evidence before normal or explicitly authorized

@@ -210,7 +210,7 @@ budgets:
   maxRequests: 500
   maxConcurrentRequests: 4
   maxRetriesPerRequest: 2
-  requestTimeout: 45s
+  requestTimeout: 75s
   totalTimeout: 3m
 artifacts:
   captureBodies: false

@@ -29,6 +29,9 @@ environment:
       - logs
       - object-store-fixture
 clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
 actorGroups:
   - name: noop-users
     profileRef: noop

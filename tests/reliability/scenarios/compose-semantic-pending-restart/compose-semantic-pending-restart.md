@@ -22,8 +22,10 @@ contradictory evidence fails the run rather than downgrading the proof.
 ## Topology
 
 Three Compose-backed Raft daemons retain their existing data volumes through two
-rolling restarts. The fixture uses the normal three-node cluster profile and
-ports 19091–19093; run it sequentially with other scenarios using those ports.
+rolling restarts. The scenario explicitly declares 16 Raft partitions to match
+the three-node Compose fixture; the generic cluster profile otherwise defaults
+to 64. The suite preflight rejects a mismatch before provisioning any scenario.
+It uses ports 19091–19093; run it sequentially with other scenarios using those ports.
 The initial corpus has one eligible synthetic Document in the controller scope.
 
 ```mermaid

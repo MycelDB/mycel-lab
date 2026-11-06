@@ -49,7 +49,7 @@ def profile(name, outcomes):
                 'batching': {'mode': 'single', 'maxItems': 1}}},
             'budgets': {'enforcement': 'advisory', 'maxOperations': 4096, 'maxRequests': len(outcomes),
                         'maxConcurrentOperations': 16, 'maxConcurrentRequests': 2,
-                        'requestTimeout': '5s', 'totalTimeout': '10m'},
+                        'requestTimeout': '40s', 'totalTimeout': '10m'},
             'artifacts': {'captureBodies': False, 'captureHeaders': False}}
 
 
@@ -66,7 +66,7 @@ def base(name, provider, seed):
                 'projectNamePrefix': 'mycel-lab-' + name.removeprefix('compose-'), 'imageOverride': IMAGE,
                 'providerEmulatorImage': 'local/mycel-provider-emulator:dev', 'serviceNames': ['myceld-a', 'myceld-b', 'myceld-c'], 'grpcPorts': [19091, 19092, 19093]},
                 'capabilities': {'required': ['per-node-endpoints', 'node-exec', 'rolling-restart', 'logs']}},
-            'clusterRef': 'raft-3-node', 'clusterOverrides': {'image': IMAGE},
+            'clusterRef': 'raft-3-node', 'clusterOverrides': {'image': IMAGE, 'raft': {'partitionCount': 16}},
             'actorGroups': [{'name': 'semantic-controller', 'profileRef': 'semantic-controller', 'count': 3,
                              'rate': {'mode': 'per-actor', 'commitsPerSecond': 1}}],
             'semantic': {'targetActorGroup': 'semantic-controller', 'rule': {

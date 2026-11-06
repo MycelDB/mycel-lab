@@ -26,6 +26,9 @@ environment:
       - node-exec
       - logs
 clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
 actorGroups:
   - name: graph-writers
     profileRef: graph-committer

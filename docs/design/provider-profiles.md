@@ -25,7 +25,7 @@ budgets:
   enforcement: required # required | advisory
   maxOperations: 4096
   maxConcurrentOperations: 16
-  requestTimeout: 45s
+  requestTimeout: 75s
   totalTimeout: 10m
 artifacts:
   captureBodies: false
