@@ -4,7 +4,7 @@ Issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
 Completion batch: PR #93, clean merge `6615c17`. Follow-up corrections: PR #94
 (pending reliability), PR #95 (transport evidence), PR #96 (maintenance health),
-and disabled-rule quiescence. This audit separates implementation, all three
+and disabled-rule quiescence. This audit separates implementation, all five
 failed approved executions and new harness-only evidence; it is not issue closure.
 
 ## Evidence levels
@@ -43,6 +43,27 @@ failed approved executions and new harness-only evidence; it is not issue closur
   Cleanup and artifact safety passed, not acceptance. The narrow local correction
   explicitly proves disabled quiescence, not indexing; default enabled freshness,
   disabled-search rejection and re-enable catch-up remain strict. No rerun is implied.
+- **Fourth approved v0.21.4 run (failed):** clean `81289a7` passed contract
+  and recovery; pending-work restart completed but its recovery wait was capped
+  by a smaller operation budget and expected 64 partitions against a 16-partition
+  fixture. The post-restart work check was not reached. The configuration drift
+  was corrected and preflighted separately; this is not a Raft protocol finding.
+- **Fifth approved v0.21.4 run (failed):** clean `8b13721` passed contract,
+  recovery, pending-work restart, and the OpenAI emulator. The out-of-order case
+  proved held-older/newer ordering, explicit supersession, unchanged newer record,
+  negative stale search and fresh zero-gap reliability; its final provider
+  assertion then failed (`maximum attempts 4 exceeds 2`). Four scenarios passed,
+  one failed, eleven unrun; 27 phases passed, one failed, 37 unrun. Five reached
+  final/cluster oracles, cleanup and artifact safety passed, not aggregate
+  acceptance. The approval is consumed and no retry was made.
+- **Per-input accounting correction (source only):** the local emulator counts
+  every request for the same input, including normal repeated work/search calls;
+  its counter is not a work-retry counter. Corrected the out-of-order and nine
+  unexecuted fault cases to require exact total requests AND their exact safe
+  per-input distribution, with the per-input cap matching the largest group.
+  Public work-attempt identity and ordering checks are unchanged. Reject
+  contradictory accounting contracts before provisioning. No corrected case
+  has new runtime qualification or transferred approval.
 - **Unsupported:** pinned v0.21.4 semantic rule APIs have no native generation /
   enrichment projection stage. Unsupported compositions fail resolution with a
   typed capability error, including during dry-run. They never become a passed
@@ -54,8 +75,8 @@ failed approved executions and new harness-only evidence; it is not issue closur
 | --- | --- | --- | --- |
 | 1 | Committed content is projected, embedded, indexed, and returned from the semantic index | Canonical contract, direct semantic RPC, record/source revision/generation/configuration/model/vector identity assertions. Historical baseline qualified. | Clean 6615c17 contract passed on v0.21.4, but its aggregate failed later; the changed harness still requires fresh full qualification. |
 | 2 | Positive assertions cannot pass through lexical/hybrid/scan fallback | Direct semantic search only; strict IDs/provenance, warnings rejected, negative queries. | Preserve these controls in fresh execution; plausible hydration is not proof. |
-| 3 | Backfill/create/update/delete/transactions/freshness/restart/persistence/rebuild | Contract and recovery baseline qualified on v0.21.3. Landed pending-work case checks identity/generations/revisions/attempts across two retained-data restarts. | Clean 6615c17 recovery passed; pending capture failed before restart. The corrected pending/fault readers and remaining aggregate cases require fresh qualification. |
-| 4 | Older/out-of-order responses cannot overwrite newer graph state | New `semantic-ordering-assert`: hold an older pinned backfill at the provider; commit, maintain, and search a newer revision **before release**; require explicit superseded skip and unchanged newer record after release. Real HTTP barrier and negative oracle tests. | Actual daemon execution of the new case. This is not inferred from concurrent rebuild or sleeps. |
+| 3 | Backfill/create/update/delete/transactions/freshness/restart/persistence/rebuild | Contract and recovery baseline qualified on v0.21.3. The `8b13721` pending-work case passed both retained-data restarts, preservation and resumed-work assertions on v0.21.4. | This partial success does not override the later failed out-of-order case or qualify the aggregate; remaining cases require fresh qualification. |
+| 4 | Older/out-of-order responses cannot overwrite newer graph state | `8b13721` observed the controlled held-older/newer publication, explicit superseded skip, unchanged newer record, stale-search rejection, and fresh zero-gap frontier. | Its final emulator assertion failed; the complete case/aggregate remains unqualified. Source-only accounting correction and new runtime evidence are still needed. |
 | 5 | Space/domain and authorization isolation | Historical contract has outsider-scope and unauthorized-principal controls. New `compose-semantic-domain-isolation` uses the same actor/principal/space/node UUID, different domains, independent indexes, broad positive/cross-query-negative searches without rule/binding selectors, and exact hydrated payload/provenance. Peer-only update and retained restart preserve the other domain's record. | New case has local regressions and planning evidence only; fresh v0.21.4 runtime qualification remains required. Different spaces alone are not domain-isolation proof. |
 | 6 | Dimension/model/projection changes fail closed or require migration/rebuild | Existing projection-change and malformed-vector tests remain separate. New `compose-semantic-model-migration` changes selected configured model, model dimensions, and vector-space identity independently. Each requires generation advancement, explicit rebuild-required state, pre-rebuild `FailedPrecondition`, and authorized rebuild. Post-rebuild search checks changed configuration/record identity, exact configured route/shape, unchanged acknowledged graph revision, and retained-restart preservation. | New case has local regressions and planning evidence only; actual v0.21.4 configuration invalidation, fencing, rebuild, and persistence must still be qualified. No daemon/API modification is inferred from harness tests. |
 | 7 | Capability-driven profiles; no assumption every provider embeds | Independent generation/embedding/enrichment/structured-output/routing declarations; ordered `providerStages`, exact per-stage profile source/model/endpoint provenance, typed dataflow, finite combined wall-clock ceiling. Tests include generation-only provider plus distinct embeddings. | Native composed execution remains API/adapter-blocked on v0.21.4. Initial forward-compatible contract is implemented; do not invent native execution or require new vendor connectors as an unstated non-goal reversal. |
@@ -92,7 +113,11 @@ public retry RPC; retryable cases must honor automatic not-before. Recovery must
 complete the same work and generation with exactly two attempts. No graph repair,
 rebuild, forced backfill, cursor reset, dropped assertion, or silent fallback is
 used to obtain a pass. Final direct search and exact finite protocol accounting
-remain required.
+remain required. Three requests for the same single-document/query input
+(one failed work attempt, one recovered work attempt, one direct search) must
+produce exactly one per-input group of three; the public durable work count
+remains **two**, not three. A single input-digest counter cannot replace this
+public same-work retry proof.
 
 The ordering case deliberately launches a competing **older pinned backfill**,
 not two ordinary maintenance workers holding the same rule fence. The newer
@@ -103,8 +128,10 @@ is held. No backfill, analysis, or repair follows release to hide a stale overwr
 
 - Item #1 is landed in PR #92; approved clean 6615c17 qualification failed during
   pending capture before restart. The correction is harness code/tests, not a pass.
-- Items #2/#3 landed in PR #93 but were not reached by the stopped run. Their
-  executable scenarios/oracles and local regressions are **not runtime qualification**.
+- Items #2/#3 landed in PR #93. `8b13721` reached and passed the ordering
+  event, but the complete scenario failed at provider accounting; the nine
+  fault cases were not reached. New source regressions are **not runtime
+  qualification**.
 - Item #4 has a wired, provider-neutral planning/validation contract and explicit
   unsupported-runtime rejection. Native enrichment execution is not implemented
   or claimed; supporting it requires a real daemon/API/public-adapter prerequisite.
@@ -112,10 +139,11 @@ is held. No backfill, analysis, or repair follows release to hide a stale overwr
   criterion passed**. The two identified coverage gaps now have independent Lab
   scenarios, strict public-API assertions, local regressions, and planning evidence.
   Their runtime acceptance remains open rather than hidden behind a checklist tick.
-- None of the three approved aggregates completed. The `574e690` recovery failure
-  and `cbc4274` disabled-rule failure are not overridden by older partial passes;
-  pending/ordering/fault/domain/migration acceptance remains unexecuted or
-  unqualified. All three approvals are consumed.
+- None of the five approved aggregates completed. The `574e690` recovery,
+  `cbc4274` disabled-rule, `81289a7` topology/budget, and `8b13721`
+  per-input-emulator failures are not overridden by partial scenario passes.
+  Pending-work restart passed on `8b13721`, but the eleven unrun cases and the
+  aggregate remain unqualified. All five approvals are consumed.
 - #46 stays open. Final checklist closure requires fresh exact-source runtime
   evidence and reconciliation against each criterion; native composed execution
   remains explicitly capability-blocked rather than silently substituted.

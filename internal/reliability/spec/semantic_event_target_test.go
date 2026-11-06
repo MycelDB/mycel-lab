@@ -34,6 +34,13 @@ func TestValidateSemanticEventTargetAcceptsTypedContracts(t *testing.T) {
 			},
 		},
 		{
+			eventType: "semantic-provider-emulator-assert",
+			target: map[string]any{
+				"minimumRequests": 7, "maximumRequests": 7,
+				"maximumAttemptsPerInput": 4, "expectedRequestsPerInput": []any{float64(3), float64(4)},
+			},
+		},
+		{
 			eventType: "semantic-rebuild",
 			target: map[string]any{
 				"backfillLimit": 2, "maintenanceBatchLimit": 64, "maxCatchupIterations": 64,
@@ -77,6 +84,12 @@ func TestValidateSemanticEventTargetRejectsUntypedOrUnknownAssertions(t *testing
 		{name: "emulator negative count", eventType: "semantic-provider-emulator-assert", target: map[string]any{"minimumResponseModels": map[string]any{"embedding-v1": -1}}, contains: "between 0"},
 		{name: "emulator excessive count", eventType: "semantic-provider-emulator-assert", target: map[string]any{"expectedOutcomes": map[string]any{"success": int64(math.MaxInt32) + 1}}, contains: "between 0"},
 		{name: "emulator assertion typo", eventType: "semantic-provider-emulator-assert", target: map[string]any{"minimimRequests": 3}, contains: "not supported"},
+		{name: "emulator empty distribution", eventType: "semantic-provider-emulator-assert", target: map[string]any{"expectedRequestsPerInput": []any{}}, contains: "nonempty integer list"},
+		{name: "emulator fractional distribution", eventType: "semantic-provider-emulator-assert", target: map[string]any{"expectedRequestsPerInput": []any{1.5}}, contains: "positive integers"},
+		{name: "emulator negative distribution", eventType: "semantic-provider-emulator-assert", target: map[string]any{"expectedRequestsPerInput": []any{-1}}, contains: "positive integers"},
+		{name: "emulator false per-input cap", eventType: "semantic-provider-emulator-assert", target: map[string]any{"minimumRequests": 7, "maximumRequests": 7, "maximumAttemptsPerInput": 2, "expectedRequestsPerInput": []any{3, 4}}, contains: "largest count"},
+		{name: "emulator loosely raised per-input cap", eventType: "semantic-provider-emulator-assert", target: map[string]any{"minimumRequests": 3, "maximumRequests": 3, "maximumAttemptsPerInput": 4, "expectedRequestsPerInput": []any{3}}, contains: "largest count"},
+		{name: "emulator missing exact request bounds", eventType: "semantic-provider-emulator-assert", target: map[string]any{"minimumRequests": 3, "maximumRequests": 4, "maximumAttemptsPerInput": 3, "expectedRequestsPerInput": []any{3}}, contains: "exact request bounds"},
 		{name: "string boolean", eventType: "semantic-rule-enable", target: map[string]any{"enabled": "true"}, contains: "boolean"},
 		{name: "unknown nested field", eventType: "semantic-rebuild", target: map[string]any{"concurrentMutation": map[string]any{"nodeId": "node-1", "txet": "axis-1"}}, contains: "not supported"},
 		{name: "wrong nested event type", eventType: "semantic-rebuild", target: map[string]any{"concurrentMutation": map[string]any{"eventType": true, "nodeId": "node-1"}}, contains: "nonempty string"},

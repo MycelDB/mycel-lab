@@ -145,7 +145,11 @@ evidence; do not weaken assertions to obtain a pass.
 Retain acknowledged graph revisions, work IDs/generations/revision ranges/attempts,
 frontiers and gaps, controlled completion order or failure disposition, direct
 semantic record provenance, finite sanitized provider observations, final oracle,
-cleanup/absence, and redaction verdicts. Connection-drop status 503 is a synthetic
+cleanup/absence, and redaction verdicts. The emulator's per-input attempt counter
+counts all requests with the same input (including direct search), not just work
+retries. Assert the exact request distribution by safe input digest. Fault cases
+separately prove the public same-work attempt count; the ordering case proves
+supersession and retained newer record identity. Connection-drop status 503 is a synthetic
 observation marker: the emulator closes the connection without an HTTP response.
 
 ## Common failure modes
@@ -199,7 +203,8 @@ def generated_files():
             {'name': 'prove-direct-index-and-protocol-accounting', 'duration': '1ms', 'events': [
                 search(node, 'axis-0', 'fault-commit'),
                 event('semantic-provider-emulator-assert', minimumRequests=3, maximumRequests=3,
-                      maximumAttemptsPerInput=2, requireSingleItem=True, authorization='absent',
+                      maximumAttemptsPerInput=3, expectedRequestsPerInput=[3],
+                      requireSingleItem=True, authorization='absent',
                       expectedModels=['embedding-v1'], expectedOutcomes={outcome: 1, 'success': 2}, expectedStatuses=statuses)]},
         ]
         directory = f'tests/reliability/scenarios/{name}'
@@ -232,8 +237,9 @@ def generated_files():
         {'name': 'reject-stale-vector-and-reconcile-real-completions', 'duration': '1ms', 'events': [
             event('semantic-search-assert', query='axis-0', minimumScore=0.99, expectedResultCount=0, forbiddenNodeIds=[node]),
             event('semantic-reliability-assert', requireFreshAtLatest=True, maximumUnresolvedGapCount=0, expectFreshRevisionFrom='newer-commit'),
-            event('semantic-provider-emulator-assert', minimumRequests=7, maximumRequests=7, maximumAttemptsPerInput=2,
-                  requireSingleItem=True, authorization='absent', expectedModels=['embedding-v1'], expectedOutcomes={'success': 7}, expectedStatuses={'200': 7})]},
+            event('semantic-provider-emulator-assert', minimumRequests=7, maximumRequests=7, maximumAttemptsPerInput=4,
+                  expectedRequestsPerInput=[3, 4], requireSingleItem=True, authorization='absent',
+                  expectedModels=['embedding-v1'], expectedOutcomes={'success': 7}, expectedStatuses={'200': 7})]},
     ]
     directory = f'tests/reliability/scenarios/{name}'
     files[f'{directory}/{name}.yaml'] = definition(scenario)

@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +36,26 @@ func TestSemanticFaultMatrixDefinitionsResolveWithoutCredentials(t *testing.T) {
 			}
 			if len(resolved.Phases) != 3 || resolved.ProviderProfile.Profile.Mode != provider.ModeEmulator {
 				t.Fatal("matrix is not credential-free bounded emulator coverage")
+			}
+			expectedCounts, expectedMaximum, expectedRequests := "[3]", "3", "3"
+			if name == "out-of-order" {
+				expectedCounts, expectedMaximum, expectedRequests = "[3 4]", "4", "7"
+				if resolved.Phases[1].Events[0].Type != "semantic-ordering-assert" {
+					t.Fatal("ordering witness missing before provider observations")
+				}
+			} else if resolved.Phases[1].Events[0].Type != "semantic-fault-assert" {
+				t.Fatal("public work retry and failure witness missing")
+			}
+			events := resolved.Phases[2].Events
+			if len(events) == 0 || events[len(events)-1].Type != "semantic-provider-emulator-assert" {
+				t.Fatal("final bounded provider observation missing")
+			}
+			target := events[len(events)-1].Target
+			if fmt.Sprint(target["expectedRequestsPerInput"]) != expectedCounts ||
+				fmt.Sprint(target["maximumAttemptsPerInput"]) != expectedMaximum ||
+				fmt.Sprint(target["minimumRequests"]) != expectedRequests ||
+				fmt.Sprint(target["maximumRequests"]) != expectedRequests {
+				t.Fatalf("per-input distribution or exact request budget drifted: %v", target)
 			}
 		})
 	}
