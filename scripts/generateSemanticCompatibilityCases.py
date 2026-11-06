@@ -20,7 +20,7 @@ def phase(name, *events):
 def restart():
     return [event('rolling-restart', scope='cluster'),
             event('cluster-recovery-wait', timeout='60s', interval='200ms', commandTimeout='3s',
-                  minimumStablePolls=3, reuseEndpointSessions=True)]
+                  sessionInitTimeout='10s', minimumStablePolls=3, reuseEndpointSessions=True)]
 
 
 def document(name, proof):

@@ -4,7 +4,7 @@ Issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
 Completion batch: PR #93, clean merge `6615c17`. Follow-up corrections: PR #94
 (pending reliability), PR #95 (transport evidence), PR #96 (maintenance health),
-and disabled-rule quiescence. This audit separates implementation, all five
+and disabled-rule quiescence. This audit separates implementation, all six
 failed approved executions and new harness-only evidence; it is not issue closure.
 
 ## Evidence levels
@@ -64,6 +64,23 @@ failed approved executions and new harness-only evidence; it is not issue closur
   Public work-attempt identity and ordering checks are unchanged. Reject
   contradictory accounting contracts before provisioning. No corrected case
   has new runtime qualification or transferred approval.
+- **Sixth approved v0.21.4 run (failed):** clean `dc97cd4` passed contract
+  and recovery. Pending capture, first restart/work preservation and same-work
+  completion/search passed; its second rolling restart completed but reusable
+  endpoint authentication on ordinal 0 hit its 3s limit **before any recovery
+  poll** in the 60s wait. Post-second-restart no-replay assertions were never
+  reached. Two scenarios passed, one failed, thirteen unrun; 20 phases passed,
+  one failed, 44 unrun. Three reached final/cluster oracles, cleanup and artifact
+  safety passed, not acceptance. No Raft protocol defect is proved. The approval
+  was consumed exactly once without retry.
+- **Recovery session initialization correction (source only):** the shared
+  recovery waiter now checks transport without authentication within the
+  declared 60s wait. All four affected Compose fixtures declare a separate
+  10s-per-node single-login bound and retain 3s read-only RPC bounds, exact
+  Raft identity/groups/progress and stable health polls. Login creates a
+  session: an ambiguous timeout is **never resubmitted**. Invalid budgets fail
+  before provisioning. This code and planning cannot substitute for runtime
+  evidence of post-second-restart work or the other thirteen unrun cases.
 - **Unsupported:** pinned v0.21.4 semantic rule APIs have no native generation /
   enrichment projection stage. Unsupported compositions fail resolution with a
   typed capability error, including during dry-run. They never become a passed
@@ -75,7 +92,7 @@ failed approved executions and new harness-only evidence; it is not issue closur
 | --- | --- | --- | --- |
 | 1 | Committed content is projected, embedded, indexed, and returned from the semantic index | Canonical contract, direct semantic RPC, record/source revision/generation/configuration/model/vector identity assertions. Historical baseline qualified. | Clean 6615c17 contract passed on v0.21.4, but its aggregate failed later; the changed harness still requires fresh full qualification. |
 | 2 | Positive assertions cannot pass through lexical/hybrid/scan fallback | Direct semantic search only; strict IDs/provenance, warnings rejected, negative queries. | Preserve these controls in fresh execution; plausible hydration is not proof. |
-| 3 | Backfill/create/update/delete/transactions/freshness/restart/persistence/rebuild | Contract and recovery baseline qualified on v0.21.3. The `8b13721` pending-work case passed both retained-data restarts, preservation and resumed-work assertions on v0.21.4. | This partial success does not override the later failed out-of-order case or qualify the aggregate; remaining cases require fresh qualification. |
+| 3 | Backfill/create/update/delete/transactions/freshness/restart/persistence/rebuild | Contract and recovery baseline qualified on v0.21.3. The `8b13721` pending-work case passed both retained-data restarts; `dc97cd4` independently passed its first restart and same-work resumption. | `dc97cd4` stopped before its post-second-restart no-replay assertion. Neither partial result overrides a failed aggregate or qualifies the new source. |
 | 4 | Older/out-of-order responses cannot overwrite newer graph state | `8b13721` observed the controlled held-older/newer publication, explicit superseded skip, unchanged newer record, stale-search rejection, and fresh zero-gap frontier. | Its final emulator assertion failed; the complete case/aggregate remains unqualified. Source-only accounting correction and new runtime evidence are still needed. |
 | 5 | Space/domain and authorization isolation | Historical contract has outsider-scope and unauthorized-principal controls. New `compose-semantic-domain-isolation` uses the same actor/principal/space/node UUID, different domains, independent indexes, broad positive/cross-query-negative searches without rule/binding selectors, and exact hydrated payload/provenance. Peer-only update and retained restart preserve the other domain's record. | New case has local regressions and planning evidence only; fresh v0.21.4 runtime qualification remains required. Different spaces alone are not domain-isolation proof. |
 | 6 | Dimension/model/projection changes fail closed or require migration/rebuild | Existing projection-change and malformed-vector tests remain separate. New `compose-semantic-model-migration` changes selected configured model, model dimensions, and vector-space identity independently. Each requires generation advancement, explicit rebuild-required state, pre-rebuild `FailedPrecondition`, and authorized rebuild. Post-rebuild search checks changed configuration/record identity, exact configured route/shape, unchanged acknowledged graph revision, and retained-restart preservation. | New case has local regressions and planning evidence only; actual v0.21.4 configuration invalidation, fencing, rebuild, and persistence must still be qualified. No daemon/API modification is inferred from harness tests. |
@@ -139,11 +156,12 @@ is held. No backfill, analysis, or repair follows release to hide a stale overwr
   criterion passed**. The two identified coverage gaps now have independent Lab
   scenarios, strict public-API assertions, local regressions, and planning evidence.
   Their runtime acceptance remains open rather than hidden behind a checklist tick.
-- None of the five approved aggregates completed. The `574e690` recovery,
-  `cbc4274` disabled-rule, `81289a7` topology/budget, and `8b13721`
-  per-input-emulator failures are not overridden by partial scenario passes.
-  Pending-work restart passed on `8b13721`, but the eleven unrun cases and the
-  aggregate remain unqualified. All five approvals are consumed.
+- None of the six approved aggregates completed. The `574e690` recovery,
+  `cbc4274` disabled-rule, `81289a7` topology/budget, `8b13721`
+  per-input-emulator and `dc97cd4` reusable-session failures are not overridden
+  by other partial scenario passes. The latest run stopped with thirteen
+  unstarted cases; the aggregate remains unqualified. All six approvals are
+  consumed.
 - #46 stays open. Final checklist closure requires fresh exact-source runtime
   evidence and reconciliation against each criterion; native composed execution
   remains explicitly capability-blocked rather than silently substituted.

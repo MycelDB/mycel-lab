@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ type ClusterRecoveryWaitResult struct {
 	Interval                  string                         `json:"interval"`
 	ExpectedGroups            int                            `json:"expectedGroups"`
 	CommandTimeout            string                         `json:"commandTimeout"`
+	SessionInitTimeout        string                         `json:"sessionInitTimeout,omitempty"`
 	MinimumStablePolls        int                            `json:"minimumStablePolls"`
 	StablePolls               int                            `json:"stablePolls"`
 	RequireZeroApplyLag       bool                           `json:"requireZeroApplyLag"`
@@ -140,7 +142,7 @@ func executeClusterRecoveryWaitEvent(ctx context.Context, driver env.Environment
 	return executeClusterRecoveryWaitEventWithSessionFactory(ctx, driver, environment, scenario, target, newReusableClusterRecoveryNodeInspector)
 }
 
-type clusterRecoverySessionFactory func(context.Context, env.EnvironmentDriver, env.Environment, []int, time.Duration, map[string]any) (clusterRecoveryNodeInspector, error)
+type clusterRecoverySessionFactory func(context.Context, env.EnvironmentDriver, env.Environment, []int, time.Duration, time.Duration, time.Duration, map[string]any) (clusterRecoveryNodeInspector, error)
 
 func executeClusterRecoveryWaitEventWithSessionFactory(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, target map[string]any, sessionFactory clusterRecoverySessionFactory) (ClusterRecoveryWaitResult, error) {
 	timeout, err := targetDuration(target, "timeout")
@@ -184,6 +186,16 @@ func executeClusterRecoveryWaitEventWithSessionFactory(ctx context.Context, driv
 	if configured := intTarget(target, "expectedGroups", expectedGroups); configured != expectedGroups {
 		return ClusterRecoveryWaitResult{}, fmt.Errorf("cluster-recovery-wait expectedGroups=%d does not match system plus %d configured partitions (%d groups)", configured, scenario.Cluster.Raft.PartitionCount, expectedGroups)
 	}
+	sessionInitTimeout := commandTimeout
+	if _, configured := target["sessionInitTimeout"]; configured {
+		if !boolTarget(target, "reuseEndpointSessions", false) {
+			return ClusterRecoveryWaitResult{}, errors.New("cluster-recovery-wait sessionInitTimeout requires reusable endpoint sessions")
+		}
+		sessionInitTimeout, err = targetDuration(target, "sessionInitTimeout")
+		if err != nil || sessionInitTimeout <= 0 || len(ordinals) == 0 || sessionInitTimeout >= timeout/time.Duration(len(ordinals)) {
+			return ClusterRecoveryWaitResult{}, errors.New("cluster-recovery-wait sessionInitTimeout must leave time for all endpoint logins and recovery polling")
+		}
+	}
 	result := ClusterRecoveryWaitResult{Timeout: timeout.String(), Interval: interval.String(), ExpectedGroups: expectedGroups, CommandTimeout: commandTimeout.String(), MinimumStablePolls: minimumStablePolls, RequireZeroApplyLag: requireZeroApplyLag, RequireConsistentProgress: requireConsistentProgress, InspectionMode: "node-cli"}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -192,7 +204,8 @@ func executeClusterRecoveryWaitEventWithSessionFactory(ctx context.Context, driv
 		if sessionFactory == nil {
 			return result, errors.New("cluster-recovery-wait reusable endpoint session factory is unavailable")
 		}
-		inspector, err = sessionFactory(waitCtx, driver, environment, ordinals, commandTimeout, target)
+		result.SessionInitTimeout = sessionInitTimeout.String()
+		inspector, err = sessionFactory(waitCtx, driver, environment, ordinals, sessionInitTimeout, commandTimeout, interval, target)
 		if err != nil {
 			return result, fmt.Errorf("initialize cluster-recovery-wait reusable endpoint sessions: %w", err)
 		}
@@ -267,7 +280,7 @@ func requiredRaftGroupIDs(partitionCount int) []string {
 	return ids
 }
 
-func newReusableClusterRecoveryNodeInspector(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, ordinals []int, commandTimeout time.Duration, target map[string]any) (clusterRecoveryNodeInspector, error) {
+func newReusableClusterRecoveryNodeInspector(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, ordinals []int, sessionInitTimeout, commandTimeout, interval time.Duration, target map[string]any) (clusterRecoveryNodeInspector, error) {
 	endpoints, err := driver.Endpoints(ctx, environment)
 	if err != nil {
 		return nil, fmt.Errorf("resolve daemon endpoints: %w", err)
@@ -279,7 +292,13 @@ func newReusableClusterRecoveryNodeInspector(ctx context.Context, driver env.Env
 			_ = inspector.Close()
 			return nil, fmt.Errorf("daemon endpoint for ordinal %d is unavailable", ordinal)
 		}
-		dialCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+		if err := awaitClusterRecoveryTransport(ctx, endpoint.DaemonAddr, commandTimeout, interval); err != nil {
+			_ = inspector.Close()
+			return nil, fmt.Errorf("daemon endpoint transport for ordinal %d: %w", ordinal, err)
+		}
+		// DialAdmin performs a session-creating Login. Attempt it exactly once:
+		// a timed-out response is ambiguous, so never resubmit that mutation.
+		dialCtx, cancel := context.WithTimeout(ctx, sessionInitTimeout)
 		admin, dialErr := mycel.DialAdmin(dialCtx, mycel.Config{
 			Addr:       endpoint.DaemonAddr,
 			Username:   firstNonEmpty(stringTarget(target, "username"), provision.DefaultAdminUsername),
@@ -294,6 +313,32 @@ func newReusableClusterRecoveryNodeInspector(ctx context.Context, driver env.Env
 		inspector.sessions[ordinal] = reusableClusterRecoverySession{admin: admin, cluster: adminv1.NewAdminClusterServiceClient(admin.Conn)}
 	}
 	return inspector, nil
+}
+
+// A TCP connection proves only transport reachability, not authentication or
+// Raft health. It is safe to repeat before the one session-creating Login.
+func awaitClusterRecoveryTransport(ctx context.Context, address string, commandTimeout, interval time.Duration) error {
+	if _, _, err := net.SplitHostPort(address); err != nil {
+		return errors.New("daemon endpoint address is invalid")
+	}
+	probeTimeout := min(commandTimeout, time.Second)
+	attempts := 0
+	for {
+		attempts++
+		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", address)
+		cancel()
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("unavailable after %d read-only probes: %w", attempts, ctx.Err())
+		}
+		if err := sleepContext(ctx, interval); err != nil {
+			return fmt.Errorf("unavailable after %d read-only probes: %w", attempts, err)
+		}
+	}
 }
 
 func clusterRecoveryEndpointForOrdinal(endpoints []env.Endpoint, ordinal int) (env.Endpoint, bool) {
