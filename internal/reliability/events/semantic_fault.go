@@ -15,21 +15,22 @@ import (
 )
 
 type SemanticFaultEvidence struct {
-	SchemaVersion        int                                `json:"schemaVersion"`
-	Disposition          string                             `json:"disposition"`
-	ProcessCode          string                             `json:"processCode"`
-	Before               SemanticWorkCheckpointV1           `json:"before"`
-	Failed               SemanticWorkCheckpointV1           `json:"failed"`
-	Recovered            SemanticWorkCheckpointV1           `json:"recovered"`
-	Discovery            *SemanticWorkEvidenceV1            `json:"discovery,omitempty"`
-	BeforeReliability    *SemanticWorkReliabilityEvidenceV1 `json:"beforeReliability,omitempty"`
-	FailedReliability    *SemanticWorkReliabilityEvidenceV1 `json:"failedReliability,omitempty"`
-	RecoveredReliability *SemanticWorkReliabilityEvidenceV1 `json:"recoveredReliability,omitempty"`
-	FailedFreshThrough   uint64                             `json:"failedFreshThrough"`
-	FailedGapCount       uint64                             `json:"failedGapCount"`
-	FailureCategory      string                             `json:"failureCategory,omitempty"`
-	BackoffHonored       bool                               `json:"backoffHonored"`
-	OperatorRetry        bool                               `json:"operatorRetry"`
+	SchemaVersion           int                                `json:"schemaVersion"`
+	Disposition             string                             `json:"disposition"`
+	ProcessCode             string                             `json:"processCode"`
+	Before                  SemanticWorkCheckpointV1           `json:"before"`
+	Failed                  SemanticWorkCheckpointV1           `json:"failed"`
+	Recovered               SemanticWorkCheckpointV1           `json:"recovered"`
+	Discovery               *SemanticWorkEvidenceV1            `json:"discovery,omitempty"`
+	BeforeReliability       *SemanticWorkReliabilityEvidenceV1 `json:"beforeReliability,omitempty"`
+	FailedReliability       *SemanticWorkReliabilityEvidenceV1 `json:"failedReliability,omitempty"`
+	RecoveredReliability    *SemanticWorkReliabilityEvidenceV1 `json:"recoveredReliability,omitempty"`
+	FailedFreshThrough      uint64                             `json:"failedFreshThrough"`
+	FailedGapCount          uint64                             `json:"failedGapCount"`
+	FailureCategory         string                             `json:"failureCategory,omitempty"`
+	BackoffHonored          bool                               `json:"backoffHonored"`
+	OperatorRetry           bool                               `json:"operatorRetry"`
+	OperatorRetryGeneration uint64                             `json:"operatorRetryGeneration,omitempty"`
 }
 
 type publicWorkSnapshot struct {
@@ -76,7 +77,7 @@ func readPublicWork(ctx context.Context, client adminv1.AdminSemanticMaintenance
 		return result, errSemanticWorkNotReady
 	}
 	item := result.raw
-	result.work = SemanticWorkCheckpointV1{SchemaVersion: 1, WorkItemID: item.GetWorkItemId(), SpaceID: item.GetSpaceId(), DomainID: item.GetDomainId(), SemanticRuleID: item.GetSemanticRuleId(), EmbeddingBindingKey: item.GetEmbeddingBindingKey(), TargetNodeID: item.GetTargetNodeId(), Action: item.GetAction(), Status: item.GetStatus(), AttemptCount: item.GetAttemptCount(), FirstGraphRevision: item.GetFirstGraphRevision(), LastGraphRevision: item.GetLastGraphRevision(), WorkGeneration: item.GetWorkGeneration(), SemanticGeneration: r.GetSemanticGeneration()}
+	result.work = faultWorkCheckpoint(item, r.GetSemanticGeneration())
 	if err := validateSemanticWorkCheckpoint(result.work); err != nil {
 		return result, err
 	}
@@ -116,10 +117,48 @@ func awaitFaultSnapshot(ctx context.Context, poll time.Duration, read func() (pu
 	return last, errors.New("fault snapshot observation limit exceeded")
 }
 
+func faultWorkCheckpoint(item *adminv1.SemanticMaintenanceWorkItem, semanticGeneration uint64) SemanticWorkCheckpointV1 {
+	return SemanticWorkCheckpointV1{SchemaVersion: 1, WorkItemID: item.GetWorkItemId(), SpaceID: item.GetSpaceId(), DomainID: item.GetDomainId(), SemanticRuleID: item.GetSemanticRuleId(), EmbeddingBindingKey: item.GetEmbeddingBindingKey(), TargetNodeID: item.GetTargetNodeId(), Action: item.GetAction(), Status: item.GetStatus(), AttemptCount: item.GetAttemptCount(), FirstGraphRevision: item.GetFirstGraphRevision(), LastGraphRevision: item.GetLastGraphRevision(), WorkGeneration: item.GetWorkGeneration(), SemanticGeneration: semanticGeneration}
+}
+
 func sameFaultIdentity(before, after SemanticWorkCheckpointV1) bool {
 	before.Status, after.Status = "pending", "pending"
 	before.AttemptCount, after.AttemptCount = 0, 0
 	return before == after
+}
+
+// A public operator retry requeues the same item through UpsertDirtyWorkItem,
+// which advances its fencing generation exactly once. Automatic retryable
+// provider backoff never calls this mutation and must keep its generation.
+func validateOperatorFaultRetry(failed SemanticWorkCheckpointV1, item *adminv1.SemanticMaintenanceWorkItem) (SemanticWorkCheckpointV1, error) {
+	if item == nil || failed.WorkGeneration == ^uint64(0) {
+		return SemanticWorkCheckpointV1{}, errors.New("explicit work retry has no bounded generation witness")
+	}
+	expected := failed
+	expected.WorkGeneration++
+	retried := faultWorkCheckpoint(item, failed.SemanticGeneration)
+	if err := validateSemanticWorkCheckpoint(retried); err != nil || !sameFaultIdentity(expected, retried) || retried.Status != "pending" || retried.AttemptCount != 1 || item.GetLastErrorCategory() != "" || item.GetLastErrorMessageSanitized() != "" || item.GetNotBefore() != "" || item.GetClaimedUntil() != "" {
+		return retried, errors.New("explicit work retry changed identity, revision, attempt, or expected generation")
+	}
+	return retried, nil
+}
+
+func validateFaultRecovery(before SemanticWorkCheckpointV1, recovered publicWorkSnapshot, disposition string, retryGeneration, revision uint64) error {
+	expected := before
+	if disposition == "retryable" {
+		if retryGeneration != 0 {
+			return errors.New("automatic fault recovery unexpectedly changed work generation")
+		}
+	} else {
+		if before.WorkGeneration == ^uint64(0) || retryGeneration != before.WorkGeneration+1 {
+			return errors.New("operator fault recovery lacks the exact retry generation")
+		}
+		expected.WorkGeneration = retryGeneration
+	}
+	if recovered.reliability == nil || !sameFaultIdentity(expected, recovered.work) || recovered.work.Status != "complete" || recovered.work.AttemptCount != 2 || recovered.reliability.GetFreshThroughGraphRevision() < revision || recovered.reliability.GetUnresolvedGapCount() != 0 || recovered.reliability.GetDegraded() {
+		return errors.New("fault recovery changed identity/generation or replayed work")
+	}
+	return nil
 }
 
 func validateFaultBoundary(before, failed publicWorkSnapshot, disposition string, process *adminv1.ProcessSemanticDirtyWorkResponse, code codes.Code) error {
@@ -329,10 +368,15 @@ func executeSemanticFault(ctx context.Context, driver env.EnvironmentDriver, env
 		result.BackoffHonored = true
 	} else {
 		retried, err := client.RetrySemanticMaintenanceWork(authenticated, &adminv1.RetrySemanticMaintenanceWorkRequest{SpaceId: semantic.SpaceID, WorkItemId: failed.work.WorkItemID})
-		if err != nil || retried.GetItem() == nil || retried.GetItem().GetWorkItemId() != failed.work.WorkItemID {
+		if err != nil || retried == nil {
 			return result, errors.New("explicit work retry failed; mutation not resubmitted")
 		}
+		checkpoint, err := validateOperatorFaultRetry(failed.work, retried.GetItem())
+		if err != nil {
+			return result, err // Never resubmit an ambiguous or invalid mutation.
+		}
 		result.OperatorRetry = true
+		result.OperatorRetryGeneration = checkpoint.WorkGeneration
 	}
 	if _, err := awaitSemanticMaintenance(ctx, admin, semantic, map[string]any{"timeout": timeout.String(), "pollInterval": poll.String()}); err != nil {
 		return result, errors.New("fault recovery did not converge through normal maintenance")
@@ -342,8 +386,8 @@ func executeSemanticFault(ctx context.Context, driver env.EnvironmentDriver, env
 	if err != nil {
 		return result, err
 	}
-	if !sameFaultIdentity(before.work, recovered.work) || recovered.work.Status != "complete" || recovered.work.AttemptCount != 2 || recovered.reliability.GetFreshThroughGraphRevision() < revision || recovered.reliability.GetUnresolvedGapCount() != 0 || recovered.reliability.GetDegraded() {
-		return result, errors.New("fault recovery changed identity/generation or replayed work")
+	if err := validateFaultRecovery(before.work, recovered, result.Disposition, result.OperatorRetryGeneration, revision); err != nil {
+		return result, err
 	}
 	return result, nil
 }
