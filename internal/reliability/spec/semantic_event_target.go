@@ -74,6 +74,28 @@ func ValidateSemanticEventTarget(eventType string, target map[string]any) error 
 			return fmt.Errorf("semantic-work-assert analysis is allowed only when capturing pending work")
 		}
 	}
+	if eventType == "semantic-provider-emulator-assert" {
+		if raw, ok := target["expectedRequestsPerInput"]; ok {
+			counts := raw.([]any)
+			// An exact per-input distribution prevents a shared input-digest
+			// counter from masquerading as a per-work retry limit. Reject an
+			// impossible cap before provisioning any resources.
+			total, largest := int64(0), int64(0)
+			for _, rawCount := range counts {
+				count, _ := semanticInt64(rawCount)
+				total += count
+				if count > largest {
+					largest = count
+				}
+			}
+			minimum, hasMinimum := semanticInt64(target["minimumRequests"])
+			maximum, hasMaximum := semanticInt64(target["maximumRequests"])
+			cap, hasCap := semanticInt64(target["maximumAttemptsPerInput"])
+			if !hasMinimum || !hasMaximum || minimum != total || maximum != total || !hasCap || cap != largest {
+				return fmt.Errorf("semantic-provider-emulator-assert expectedRequestsPerInput requires exact request bounds equal to its sum and maximumAttemptsPerInput equal to its largest count")
+			}
+		}
+	}
 	if eventType == "semantic-fault-assert" {
 		mode := target["disposition"]
 		_, hasGate := target["gate"]
@@ -242,7 +264,8 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 		return map[string]semanticTargetField{
 			"minimumRequests": optional(semanticInteger(0, 100000)), "maximumRequests": optional(semanticInteger(0, 100000)),
 			"maximumBatchItems": optional(semanticInteger(1, 1024)), "maximumAttemptsPerInput": optional(semanticInteger(1, 1024)),
-			"requireSingleItem": boolField, "authorization": optional(semanticProviderAuthorization), "requireCanceled": boolField,
+			"expectedRequestsPerInput": optional(semanticPositiveIntegerList),
+			"requireSingleItem":        boolField, "authorization": optional(semanticProviderAuthorization), "requireCanceled": boolField,
 			"expectedOutcomes": optional(semanticIntegerMap), "expectedStatuses": optional(semanticIntegerMap),
 			"minimumOutcomes": optional(semanticIntegerMap), "minimumStatuses": optional(semanticIntegerMap),
 			"minimumResponseModels": optional(semanticIntegerMap), "requiredProviderRequestIds": optional(semanticStringList),
@@ -446,6 +469,21 @@ func semanticIntegerMap(value any) error {
 		}
 		if err := semanticInteger(0, math.MaxInt32)(item); err != nil {
 			return fmt.Errorf("value for %q: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// semanticPositiveIntegerList represents an exact, nonempty multiset of bounded
+// per-input request counts. The individual input hashes never enter the spec.
+func semanticPositiveIntegerList(value any) error {
+	list, ok := value.([]any)
+	if !ok || len(list) == 0 || len(list) > 1024 {
+		return fmt.Errorf("must be a nonempty integer list with at most 1024 entries")
+	}
+	for _, item := range list {
+		if err := semanticInteger(1, 1024)(item); err != nil {
+			return fmt.Errorf("must contain only positive integers no greater than 1024: %w", err)
 		}
 	}
 	return nil

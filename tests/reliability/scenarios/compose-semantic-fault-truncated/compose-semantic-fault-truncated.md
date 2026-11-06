@@ -57,7 +57,11 @@ evidence; do not weaken assertions to obtain a pass.
 Retain acknowledged graph revisions, work IDs/generations/revision ranges/attempts,
 frontiers and gaps, controlled completion order or failure disposition, direct
 semantic record provenance, finite sanitized provider observations, final oracle,
-cleanup/absence, and redaction verdicts. Connection-drop status 503 is a synthetic
+cleanup/absence, and redaction verdicts. The emulator's per-input attempt counter
+counts all requests with the same input (including direct search), not just work
+retries. Assert the exact request distribution by safe input digest. Fault cases
+separately prove the public same-work attempt count; the ordering case proves
+supersession and retained newer record identity. Connection-drop status 503 is a synthetic
 observation marker: the emulator closes the connection without an HTTP response.
 
 ## Common failure modes

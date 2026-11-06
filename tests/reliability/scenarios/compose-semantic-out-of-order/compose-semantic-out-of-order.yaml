@@ -143,7 +143,10 @@ phases:
         target:
           minimumRequests: 7
           maximumRequests: 7
-          maximumAttemptsPerInput: 2
+          maximumAttemptsPerInput: 4
+          expectedRequestsPerInput:
+            - 3
+            - 4
           requireSingleItem: true
           authorization: "absent"
           expectedModels:
