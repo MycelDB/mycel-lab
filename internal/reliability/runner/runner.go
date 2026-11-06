@@ -401,6 +401,12 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if opts.EnvironmentOverride != nil {
 		scenario.Environment = mergeEnvironmentOverride(scenario.Environment, *opts.EnvironmentOverride)
 	}
+	if err := validateComposeRaftTopology(scenario, opts.ScenarioSourcePath); err != nil {
+		return finish(RunFailed, err)
+	}
+	if err := validateOperationTimeoutBudget(scenario); err != nil {
+		return finish(RunFailed, err)
+	}
 	imageOverride := strings.TrimSpace(opts.ImageOverride)
 	if imageOverride != "" {
 		scenario.Cluster.Image = imageOverride
@@ -1184,6 +1190,40 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 		}
 		if strings.Join(actualNames, "\x00") != strings.Join(expectedScenarioNames, "\x00") {
 			return out, fmt.Errorf("suite scenario order %v does not match release bundle %v", actualNames, expectedScenarioNames)
+		}
+	}
+	// Check every suite member before the first scenario can provision a
+	// cluster. For release bundles, inspect the verified bound runtime files,
+	// not mutable copies referenced by the scenario source.
+	for _, resolved := range resolvedScenarios {
+		candidate := resolved.scenario
+		if opts.ReleaseBundle != nil {
+			binding, ok := opts.ReleaseBundle.Binding(candidate.Metadata.Name)
+			if !ok {
+				return out, fmt.Errorf("suite scenario %q has no release binding", candidate.Metadata.Name)
+			}
+			candidate.Environment.Driver = binding.Environment.Driver
+			candidate.Environment.Options = cloneStringAnyMap(binding.Environment.Options)
+			for _, runtimeFile := range binding.Environment.RuntimeFiles {
+				path, err := opts.ReleaseBundle.RuntimeFilePath(runtimeFile)
+				if err != nil {
+					return out, err
+				}
+				if runtimeFile.Option == "composeFiles" {
+					files, _ := candidate.Environment.Options["composeFiles"].([]string)
+					candidate.Environment.Options["composeFiles"] = append(files, path)
+				} else {
+					candidate.Environment.Options[runtimeFile.Option] = path
+				}
+			}
+		} else if opts.EnvironmentOverride != nil {
+			candidate.Environment = mergeEnvironmentOverride(candidate.Environment, *opts.EnvironmentOverride)
+		}
+		if err := validateComposeRaftTopology(candidate, resolved.path); err != nil {
+			return out, err
+		}
+		if err := validateOperationTimeoutBudget(candidate); err != nil {
+			return out, err
 		}
 	}
 	for _, resolved := range resolvedScenarios {

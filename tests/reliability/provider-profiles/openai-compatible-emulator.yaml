@@ -30,7 +30,7 @@ budgets:
   maxRetriesPerRequest: 2
   maxInputTokens: 100000
   maxOutputTokens: 1
-  requestTimeout: 5s
+  requestTimeout: 55s
   totalTimeout: 10m
 artifacts:
   captureBodies: false

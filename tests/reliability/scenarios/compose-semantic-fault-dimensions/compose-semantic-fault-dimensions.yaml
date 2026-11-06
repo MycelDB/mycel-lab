@@ -33,6 +33,8 @@ environment:
 clusterRef: "raft-3-node"
 clusterOverrides:
   image: "docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7"
+  raft:
+    partitionCount: 16
 actorGroups:
   -
     name: "semantic-controller"

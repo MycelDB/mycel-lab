@@ -582,7 +582,11 @@ func (d *providerObservationInspector) ProviderEmulatorObservations(context.Cont
 func TestRunScenarioRoutesImageOverrideThroughComposeCreate(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	scenario.Environment.Driver = "compose"
-	scenario.Environment.Options = map[string]any{"composeFile": "compose.yml"}
+	fixture := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(fixture, []byte("services:\n  myceld-a:\n    environment:\n      MYCELD_CLUSTER_RAFT_NODE_COUNT: '3'\n      MYCELD_CLUSTER_RAFT_PARTITION_COUNT: '64'\n      MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: '3'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scenario.Environment.Options = map[string]any{"composeFile": fixture, "serviceNames": []string{"myceld-a"}}
 	scenario.ActorGroups = nil
 	scenario.Phases = nil
 	scenario.Assertions = nil
@@ -987,7 +991,7 @@ func TestPrimaryCaptureFailureIsNotRetriedOrOverwritten(t *testing.T) {
 
 func TestComposeWaitReadyFailureUsesRunnerCleanupBoundary(t *testing.T) {
 	composeFile := filepath.Join(t.TempDir(), "compose.yml")
-	if err := os.WriteFile(composeFile, []byte("services: {}\n"), 0o600); err != nil {
+	if err := os.WriteFile(composeFile, []byte("services:\n  myceld-a:\n    environment:\n      MYCELD_CLUSTER_RAFT_NODE_COUNT: '3'\n      MYCELD_CLUSTER_RAFT_PARTITION_COUNT: '64'\n      MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: '3'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	scenario := resolveFixtureScenario(t, "example.yaml")
