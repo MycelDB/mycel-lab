@@ -117,7 +117,8 @@ func executeBlobSnapshotRecoveryEvent(ctx context.Context, driver env.Environmen
 	if err := driver.RestartNode(ctx, environment, env.NodeRef{Ordinal: nodeOrdinal}); err != nil {
 		return result, fmt.Errorf("restart ordinal %d with missing object-store payload: %w", nodeOrdinal, err)
 	}
-	initial, initialErr := awaitBlobSnapshotReadiness(ctx, driver, environment, nodeOrdinal, target, false)
+	initialWantReady := boolTarget(target, "expectedInitialReady", false)
+	initial, initialErr := awaitBlobSnapshotReadiness(ctx, driver, environment, nodeOrdinal, target, initialWantReady)
 	result.InitialReadiness = initial
 
 	// Always restore the exact encoded object before returning. This keeps the

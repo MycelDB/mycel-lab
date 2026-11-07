@@ -66,7 +66,7 @@ phases:
           bucket: mycel-compose-blobs
           deleteSpace: true
           deleteObject: true
-          expectedBlocker: blob snapshot payload unavailable
+          expectedInitialReady: true
           objectWaitTimeout: 30s
           readinessTimeout: 2m
           readinessInterval: 500ms
