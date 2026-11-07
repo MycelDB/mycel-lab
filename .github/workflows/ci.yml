@@ -13,6 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  GOWORK: 'off'
   GOFLAGS: -mod=readonly
 
 jobs:
@@ -30,7 +31,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: MycelDB/mycel
-          ref: 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+          ref: 034ae41f78721b112a5b8284593b2652bab12c53
           path: mycel
           persist-credentials: false
       - name: Set up Go
@@ -40,7 +41,7 @@ jobs:
           cache-dependency-path: mycel-lab/go.sum
       - name: Verify pinned daemon identity
         working-directory: mycel
-        run: test "$(git rev-parse HEAD)" = 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+        run: test "$(git rev-parse HEAD)" = 034ae41f78721b112a5b8284593b2652bab12c53
       - name: Test
         working-directory: mycel-lab
         run: go test -count=1 ./...
@@ -76,7 +77,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: MycelDB/mycel
-          ref: 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+          ref: 034ae41f78721b112a5b8284593b2652bab12c53
           path: mycel
           persist-credentials: false
       - name: Set up Go
@@ -86,7 +87,7 @@ jobs:
           cache-dependency-path: mycel-lab/go.sum
       - name: Verify pinned daemon identity
         working-directory: mycel
-        run: test "$(git rev-parse HEAD)" = 750b1cf9b32da47f84607ffdc36186d3d9881f3d
+        run: test "$(git rev-parse HEAD)" = 034ae41f78721b112a5b8284593b2652bab12c53
       - name: Build exact harness
         working-directory: mycel-lab
         run: go build -trimpath -o ./bin/mycel-lab ./cmd/mycel-lab
@@ -96,15 +97,16 @@ jobs:
           ARTIFACT_ROOT: ${{ runner.temp }}/mycel-lab-sgt10-dry-runs
         run: |
           set -euo pipefail
-          ./bin/mycel-lab run suite compose-semantic-graph-contract \
+          ./bin/mycel-lab run suite semantic-graph-index-release-gate \
             --dry-run \
-            --image local/mycel:sgt10-ci-dry-run \
-            --artifact-root "$ARTIFACT_ROOT/semantic-contract"
+            --image docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7 \
+            --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
+            --artifact-root "$ARTIFACT_ROOT/semantic-release-gate"
           ./bin/mycel-lab run suite compose-procedure-inference-control-emulator \
             --dry-run \
             --image local/mycel:sgt10-ci-dry-run \
             --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
-            --artifact-root "$ARTIFACT_ROOT/protocol-emulator"
+            --artifact-root "$ARTIFACT_ROOT/procedure-protocol-emulator"
           ./bin/mycel-lab run suite k3d-graph-commit-restart-qualification \
             --dry-run \
             --image local/mycel:sgt10-ci-dry-run \
@@ -119,9 +121,9 @@ jobs:
             --image local/mycel:sgt10-ci-dry-run \
             --environment-option providerEmulatorImage=local/mycel-provider-emulator:sgt10-ci-dry-run \
             --artifact-root "$ARTIFACT_ROOT/backup-restore"
-          ./bin/mycel-lab run suite semantic-live-provider \
+          ./bin/mycel-lab run suite semantic-graph-index-live \
             --dry-run \
-            --image local/mycel:sgt10-ci-dry-run \
+            --image docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7 \
             --artifact-root "$ARTIFACT_ROOT/live-profile"
       - name: Verify artifacts are safe to upload
         working-directory: mycel-lab

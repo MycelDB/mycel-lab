@@ -10,6 +10,7 @@ import (
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/emulator"
 	"github.com/MycelDB/mycel-lab/internal/reliability/env"
+	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 )
 
 type SemanticProviderEmulatorResult struct {
@@ -21,6 +22,7 @@ type SemanticProviderEmulatorResult struct {
 	ProviderRequestIDCount int            `json:"providerRequestIdCount"`
 	MaximumBatchItems      int            `json:"maximumBatchItems"`
 	MaximumAttempts        int            `json:"maximumAttemptsPerInput"`
+	RequestsPerInput       []int          `json:"requestsPerInput,omitempty"`
 	AuthorizationPresent   int            `json:"authorizationPresent"`
 	AuthorizationAbsent    int            `json:"authorizationAbsent"`
 	Canceled               int            `json:"canceled"`
@@ -29,6 +31,14 @@ type SemanticProviderEmulatorResult struct {
 }
 
 func executeSemanticProviderEmulatorAssert(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, target map[string]any) (SemanticProviderEmulatorResult, error) {
+	// This observation reader also serves procedure inference. Validate the
+	// semantic-only distribution contract when used, without narrowing the
+	// separate procedure-inference target schema.
+	if _, present := target["expectedRequestsPerInput"]; present {
+		if err := spec.ValidateSemanticEventTarget("semantic-provider-emulator-assert", target); err != nil {
+			return SemanticProviderEmulatorResult{}, err
+		}
+	}
 	inspector, ok := driver.(env.ProviderEmulatorInspector)
 	if !ok {
 		return SemanticProviderEmulatorResult{}, fmt.Errorf("driver %q does not support provider emulator observations", driver.Name())
@@ -43,6 +53,7 @@ func executeSemanticProviderEmulatorAssert(ctx context.Context, driver env.Envir
 	}
 	result := SemanticProviderEmulatorResult{OutcomeCounts: map[string]int{}, StatusCounts: map[string]int{}, ResponseModelCounts: map[string]int{}}
 	models := map[string]struct{}{}
+	requestsByInput := map[string]int{}
 	providerRequestIDs := map[string]struct{}{}
 	for _, observation := range observations {
 		if observation.BatchItemCount > result.MaximumBatchItems {
@@ -51,6 +62,7 @@ func executeSemanticProviderEmulatorAssert(ctx context.Context, driver env.Envir
 		if observation.Attempt > result.MaximumAttempts {
 			result.MaximumAttempts = observation.Attempt
 		}
+		requestsByInput[observation.InputSHA256]++
 		result.OutcomeCounts[observation.Outcome]++
 		result.StatusCounts[strconv.Itoa(observation.Status)]++
 		if observation.Model != "" {
@@ -81,6 +93,10 @@ func executeSemanticProviderEmulatorAssert(ctx context.Context, driver env.Envir
 		result.Models = append(result.Models, model)
 	}
 	sort.Strings(result.Models)
+	for _, count := range requestsByInput {
+		result.RequestsPerInput = append(result.RequestsPerInput, count)
+	}
+	sort.Ints(result.RequestsPerInput)
 
 	minimum := intTarget(target, "minimumRequests", 1)
 	maximum := intTarget(target, "maximumRequests", 100000)
@@ -95,6 +111,18 @@ func executeSemanticProviderEmulatorAssert(ctx context.Context, driver env.Envir
 	}
 	if configured := intTarget(target, "maximumAttemptsPerInput", 1024); result.MaximumAttempts > configured {
 		return result, fmt.Errorf("provider emulator maximum attempts %d exceeds %d", result.MaximumAttempts, configured)
+	}
+	if _, present := target["expectedRequestsPerInput"]; present {
+		expected := intSliceTarget(target, "expectedRequestsPerInput")
+		sort.Ints(expected)
+		if len(expected) != len(result.RequestsPerInput) {
+			return result, fmt.Errorf("provider emulator requests per input %v, want %v", result.RequestsPerInput, expected)
+		}
+		for index, count := range expected {
+			if result.RequestsPerInput[index] != count {
+				return result, fmt.Errorf("provider emulator requests per input %v, want %v", result.RequestsPerInput, expected)
+			}
+		}
 	}
 	switch targetString(target, "authorization") {
 	case "present":

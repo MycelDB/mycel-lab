@@ -37,7 +37,7 @@ flowchart LR
 2. Create the deferred rule, force a pinned baseline backfill over any racing historical maintenance publication, and reach the Level 2/3 barrier.
 3. Prove ranking, pagination, provenance, and filtering. Initial backfill results must carry the exact pinned target revision captured from the final pre-rule graph mutation; later incremental results remain bound to their own acknowledged mutation revisions.
 4. Exercise post-rule create, excluded/projected update, transaction negatives, isolation, and deletion.
-5. Disable and re-enable the rule.
+5. Capture the healthy generation/fresh frontier, disable the rule, commit a new node, and explicitly prove read-only disabled quiescence: exact disabled rule before/after status, unchanged old analyzed/fresh frontiers, exact acknowledged latest revision, no gaps, empty queues and clear background health. This does not claim indexing while disabled. Preserve direct-search `FailedPrecondition`, then re-enable and require ordinary full-freshness indexing and provenance search.
 6. Rotate projection generation, prove old records stale, create an eligible `Document` while the rebuild is running, then prove pinned baseline provenance plus the delta record's exact later revision, generation, and rebuild epoch.
 
 ## Actors

@@ -11,7 +11,7 @@ sources:
 harness: {source: lab}
 files:
   - {source: lab, role: source, path: tests/reliability/release-bundles/semantic-live-provider.draft.yaml.tmpl}
-  - {source: lab, role: suite, path: tests/reliability/suites/semantic-live-provider.yaml}
+  - {source: lab, role: suite, path: tests/reliability/suites/semantic-graph-index-live.yaml}
   - {source: lab, role: scenario, path: tests/reliability/scenarios/compose-semantic-live-provider/compose-semantic-live-provider.yaml}
   - {source: lab, role: provider-profile, path: tests/reliability/provider-profiles/openai-compatible-live.yaml}
   - {source: lab, role: runtime-config, path: tests/compose/ports.yml}
@@ -48,7 +48,7 @@ scenarios:
   - name: compose-semantic-live-provider
     source: lab
     scenarioPath: tests/reliability/scenarios/compose-semantic-live-provider/compose-semantic-live-provider.yaml
-    suitePath: tests/reliability/suites/semantic-live-provider.yaml
+    suitePath: tests/reliability/suites/semantic-graph-index-live.yaml
     environment:
       driver: compose
       namespace: draft

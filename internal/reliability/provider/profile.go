@@ -149,10 +149,11 @@ type Capability struct {
 }
 
 type ProtocolEmulatorScript struct {
-	Version      string                        `yaml:"version" json:"version"`
-	RequireMatch bool                          `yaml:"requireMatch" json:"require_match"`
-	MaxRequests  int                           `yaml:"maxRequests" json:"max_requests"`
-	Entries      []ProtocolEmulatorScriptEntry `yaml:"entries" json:"entries"`
+	Version         string                        `yaml:"version" json:"version"`
+	RequireMatch    bool                          `yaml:"requireMatch" json:"require_match"`
+	MaxRequests     int                           `yaml:"maxRequests" json:"max_requests"`
+	Entries         []ProtocolEmulatorScriptEntry `yaml:"entries" json:"entries"`
+	RequestSequence []ProtocolEmulatorOutcome     `yaml:"requestSequence,omitempty" json:"request_sequence,omitempty"`
 }
 
 type ProtocolEmulatorScriptEntry struct {
@@ -161,13 +162,15 @@ type ProtocolEmulatorScriptEntry struct {
 }
 
 type ProtocolEmulatorOutcome struct {
-	Kind         string `yaml:"kind" json:"kind"`
-	Status       int    `yaml:"status,omitempty" json:"status,omitempty"`
-	DelayMS      int    `yaml:"delayMS,omitempty" json:"delay_ms,omitempty"`
-	RetryAfterMS int    `yaml:"retryAfterMS,omitempty" json:"retry_after_ms,omitempty"`
-	Dimensions   int    `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
-	Model        string `yaml:"model,omitempty" json:"model,omitempty"`
-	RequestID    string `yaml:"requestID,omitempty" json:"request_id,omitempty"`
+	Kind          string `yaml:"kind" json:"kind"`
+	Status        int    `yaml:"status,omitempty" json:"status,omitempty"`
+	DelayMS       int    `yaml:"delayMS,omitempty" json:"delay_ms,omitempty"`
+	RetryAfterMS  int    `yaml:"retryAfterMS,omitempty" json:"retry_after_ms,omitempty"`
+	Dimensions    int    `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
+	Model         string `yaml:"model,omitempty" json:"model,omitempty"`
+	RequestID     string `yaml:"requestID,omitempty" json:"request_id,omitempty"`
+	Gate          string `yaml:"gate,omitempty" json:"gate,omitempty"`
+	GateTimeoutMS int    `yaml:"gateTimeoutMS,omitempty" json:"gate_timeout_ms,omitempty"`
 }
 
 type SecretReference struct {
@@ -528,6 +531,16 @@ func ValidateProtocolEmulatorScript(script *ProtocolEmulatorScript) error {
 }
 
 func validateProtocolEmulatorScript(prefix string, script *ProtocolEmulatorScript) error {
+	if script.RequestSequence != nil {
+		if len(script.RequestSequence) == 0 || len(script.Entries) != 0 || script.RequireMatch || script.MaxRequests != len(script.RequestSequence) || len(script.RequestSequence) > 32 {
+			return fmt.Errorf("%s.requestSequence requires an exclusive finite sequence matching maxRequests (at most 32)", prefix)
+		}
+		// Reuse the exact outcome validation for digest-addressed scripts.
+		copy := *script
+		copy.RequestSequence = nil
+		copy.Entries = []ProtocolEmulatorScriptEntry{{InputSHA256: strings.Repeat("0", 64), Outcomes: script.RequestSequence}}
+		return validateProtocolEmulatorScript(prefix, &copy)
+	}
 	if script.Version != "v1" {
 		return fmt.Errorf("%s.version must be v1", prefix)
 	}
@@ -538,6 +551,7 @@ func validateProtocolEmulatorScript(prefix string, script *ProtocolEmulatorScrip
 		return fmt.Errorf("%s.entries must contain at most 256 items", prefix)
 	}
 	seen := make(map[string]struct{}, len(script.Entries))
+	gates := map[string]bool{}
 	for entryIndex, entry := range script.Entries {
 		digest := strings.TrimSpace(entry.InputSHA256)
 		decoded, err := hex.DecodeString(digest)
@@ -553,9 +567,20 @@ func validateProtocolEmulatorScript(prefix string, script *ProtocolEmulatorScrip
 		}
 		for outcomeIndex, outcome := range entry.Outcomes {
 			switch outcome.Kind {
-			case "success", "http-error", "malformed-json", "truncated-json", "refusal", "wrong-dimensions":
+			case "success", "http-error", "malformed-json", "truncated-json", "refusal", "wrong-dimensions", "connection-drop":
 			default:
 				return fmt.Errorf("%s.entries[%d].outcomes[%d].kind is unsupported", prefix, entryIndex, outcomeIndex)
+			}
+			if outcome.Gate != "" {
+				if !ValidEmulatorGate(outcome.Gate) || gates[outcome.Gate] || outcome.Kind != "success" || outcome.DelayMS != 0 || outcome.GateTimeoutMS < 1 || outcome.GateTimeoutMS > 30000 {
+					return fmt.Errorf("%s gate must be unique, bounded, success-only, and have a 1..30000ms timeout without delay", prefix)
+				}
+				gates[outcome.Gate] = true
+				if len(gates) > 32 {
+					return fmt.Errorf("%s supports at most 32 gates", prefix)
+				}
+			} else if outcome.GateTimeoutMS != 0 {
+				return fmt.Errorf("%s gate timeout requires a gate", prefix)
 			}
 			if outcome.DelayMS < 0 || outcome.DelayMS > 30000 || outcome.RetryAfterMS < 0 || outcome.RetryAfterMS > 30000 {
 				return fmt.Errorf("%s.entries[%d].outcomes[%d] delay bounds exceed 30000ms", prefix, entryIndex, outcomeIndex)

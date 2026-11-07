@@ -401,6 +401,12 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if opts.EnvironmentOverride != nil {
 		scenario.Environment = mergeEnvironmentOverride(scenario.Environment, *opts.EnvironmentOverride)
 	}
+	if err := validateComposeRaftTopology(scenario, opts.ScenarioSourcePath); err != nil {
+		return finish(RunFailed, err)
+	}
+	if err := validateOperationTimeoutBudget(scenario); err != nil {
+		return finish(RunFailed, err)
+	}
 	imageOverride := strings.TrimSpace(opts.ImageOverride)
 	if imageOverride != "" {
 		scenario.Cluster.Image = imageOverride
@@ -1186,6 +1192,40 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 			return out, fmt.Errorf("suite scenario order %v does not match release bundle %v", actualNames, expectedScenarioNames)
 		}
 	}
+	// Check every suite member before the first scenario can provision a
+	// cluster. For release bundles, inspect the verified bound runtime files,
+	// not mutable copies referenced by the scenario source.
+	for _, resolved := range resolvedScenarios {
+		candidate := resolved.scenario
+		if opts.ReleaseBundle != nil {
+			binding, ok := opts.ReleaseBundle.Binding(candidate.Metadata.Name)
+			if !ok {
+				return out, fmt.Errorf("suite scenario %q has no release binding", candidate.Metadata.Name)
+			}
+			candidate.Environment.Driver = binding.Environment.Driver
+			candidate.Environment.Options = cloneStringAnyMap(binding.Environment.Options)
+			for _, runtimeFile := range binding.Environment.RuntimeFiles {
+				path, err := opts.ReleaseBundle.RuntimeFilePath(runtimeFile)
+				if err != nil {
+					return out, err
+				}
+				if runtimeFile.Option == "composeFiles" {
+					files, _ := candidate.Environment.Options["composeFiles"].([]string)
+					candidate.Environment.Options["composeFiles"] = append(files, path)
+				} else {
+					candidate.Environment.Options[runtimeFile.Option] = path
+				}
+			}
+		} else if opts.EnvironmentOverride != nil {
+			candidate.Environment = mergeEnvironmentOverride(candidate.Environment, *opts.EnvironmentOverride)
+		}
+		if err := validateComposeRaftTopology(candidate, resolved.path); err != nil {
+			return out, err
+		}
+		if err := validateOperationTimeoutBudget(candidate); err != nil {
+			return out, err
+		}
+	}
 	for _, resolved := range resolvedScenarios {
 		scenarioOpts := opts
 		scenarioOpts.ScenarioSourcePath = resolved.path
@@ -1210,7 +1250,7 @@ func evidenceSafeResolvedScenario(scenario spec.ResolvedScenario) spec.ResolvedS
 				event.Target = liveSemanticEvidenceTarget(event.Type, event.Target)
 				continue
 			}
-			if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
+			if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" && event.Type != "user-backup-fixture" {
 				continue
 			}
 			target := make(map[string]any, len(event.Target))
@@ -1235,7 +1275,7 @@ func liveSemanticEvidenceTarget(eventType string, target map[string]any) map[str
 	case "semantic-maintenance-await":
 		allowed = map[string]struct{}{"timeout": {}, "pollInterval": {}}
 	case "semantic-search-assert":
-		allowed = map[string]struct{}{"limit": {}, "minimumScore": {}, "expectedResultCount": {}, "requireProvenance": {}, "requireActualRoute": {}, "allPages": {}, "allowWarnings": {}}
+		allowed = map[string]struct{}{"limit": {}, "minimumScore": {}, "expectedResultCount": {}, "requireProvenance": {}, "requireActualRoute": {}, "allPages": {}, "allowWarnings": {}, "expectRebuildFence": {}}
 	case "semantic-reliability-assert":
 		allowed = map[string]struct{}{"expectRebuildRequired": {}, "maximumUnresolvedGapCount": {}, "requireFreshAtLatest": {}, "minimumSemanticGeneration": {}, "requireDeltaAfterPinned": {}}
 	case "semantic-provider-budget-reconcile":

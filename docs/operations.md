@@ -313,9 +313,184 @@ mycel-lab run suite-file tests/reliability/suites/raft-reliability-baseline.yaml
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```
 
-Suites execute scenarios sequentially and honor `stopOnFailure`. Use `--image`
-to replace every resolved scenario's daemon image while preserving the rest of
-the scenario, which supports exact A/B candidate validation. For example:
+Suites execute scenarios sequentially and honor `stopOnFailure`. The canonical semantic graph-index suites for #46 are:
+
+- `semantic-graph-index-contract` — contract/lifecycle convergence, same-space
+  domain isolation, and configured model/dimension/vector-space migration (three scenarios).
+- `semantic-graph-index-recovery` — Tranche B restart persistence, rebuild,
+  delta catch-up, controlled retained pending-work resumption, and true controlled
+  out-of-order publication (three scenarios).
+- `semantic-graph-index-protocol` — Tranche C OpenAI-compatible provider
+  protocol success plus nine finite failure cases with sanitized evidence
+  (ten scenarios).
+- `semantic-graph-index-live` — Tranche D manually gated live-provider
+  coverage with bounded budgets and invariant-based ranking.
+- `semantic-graph-index-release-gate` — Tranche E credential-free aggregate of
+  contract, recovery, pending-work restart, controlled out-of-order completion,
+  domain isolation, configured migration, and protocol success/failure definitions
+  (16 scenarios / 65 phases; fresh
+  environment-backed acceptance required).
+- `semantic-provider-failure-matrix` — nine cases: 429/Retry-After, 503, real
+  connection drop, malformed/truncated JSON, incorrect dimensions, refusal,
+  deadline, and controlled cancellation.
+
+Canonical semantic scenarios now default to the immutable **v0.21.4** index
+`docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7`.
+This is a target selection, not a transferred qualification result. The earlier
+clean v0.21.3 three-scenario pass does not qualify this expanded aggregate.
+
+The [pending-work restart scenario](../tests/reliability/scenarios/compose-semantic-pending-restart/compose-semantic-pending-restart.md)
+uses deliberately disabled background scheduling to capture durable pending work.
+Post-restart `semantic-work-assert` comparisons are read-only and cannot analyze
+or reconstruct a missing queue; normal public maintenance resumes only after the
+preserved work ID, generation, revision range, and attempts are verified. This is
+not automatic/in-flight provider recovery or out-of-order completion proof.
+
+For pinned v0.21.4, `rebuild_required` is also true for unresolved backlog. A
+pending/failure witness must pair that flag with positive gaps, stale freshness,
+healthy bounded capacity, and an explicit idle/completed rebuild status. It does
+not authorize a repair rebuild. Required/running/failed/unknown rebuild states
+remain rejected. Completion still requires zero gaps and a false flag. Safe
+reliability scalars and fixed rejection reasons are retained before validation;
+unpopulated zeros must not be interpreted as a daemon capability response.
+
+The approved clean `6615c17` aggregate stopped at the old pending-capture guard
+after contract/recovery passed; thirteen later cases were not run. The separately
+approved clean `574e690` run passed contract, then failed recovery's second restart
+at the first degraded maintenance observation; fourteen later cases were not run.
+A third approved clean `cbc4274` invocation then failed the disabled-rule wait:
+160 healthy, empty-queue observations kept analyzed/fresh frontiers at 7 after
+revision 8 committed while the rule was disabled. Fifteen later cases were not
+run. All three approvals are consumed. A corrected harness needs a new frozen
+identity and fresh approval, not an automatic rerun.
+
+The [v0.21.4 maintenance-health contract](design/semantic-maintenance-health.md)
+separates entry-node background history from the owner/scoped reliability proof.
+Only exact bounded ownership/startup reasons may wait; the node's degraded bit
+must still clear before passing. Unknown/persistent errors, unsafe current scope,
+generation drift and false freshness fail closed. Once current work is certified,
+health-refresh polls are read-only. Safe cause classes, counters, timestamps and
+current reliability evidence are retained without raw error/provider text.
+
+Default maintenance completion remains `indexed` and requires full freshness.
+The intentional disabled-rule negative control alone uses explicit
+`completion: disabled-quiescent`, with captured generation/pre-disable fresh
+revision and the later acknowledged commit. Authenticated rule reads must prove
+the exact rule disabled before/after status; its old frontiers must be unchanged,
+with healthy scope, no gaps, empty queues and clear background health. The wait
+is read-only and reports `freshnessProved: false`. It does not replace the following
+disabled-search rejection or re-enable indexing/freshness assertions. Unknown modes,
+missing captures, drift or actual enablement fail closed.
+
+The new ordering/failure cases use finite request sequences and local emulator
+controls. Standalone non-candidate suites accept a clean same-source emulator
+image ID via `--environment-option providerEmulatorImage=<image-id>`; **the
+release-candidate aggregate does not**. Its maintained
+[`semantic-graph-index-release-gate.draft.yaml.tmpl`](../tests/reliability/release-bundles/semantic-graph-index-release-gate.draft.yaml.tmpl)
+binds the 16 ordered cases, all referenced profiles and Compose overlays, exact
+local emulator identity, daemon/MinIO images, tools, and finite bounds. Build the
+emulator from the same clean Lab revision with the draft's explicit
+`local/mycel-provider-emulator:issue46-reviewed` capture tag, correct source,
+revision, clean, method and archive-digest labels. A tag is never sufficient:
+`release-bundle build` captures the exact image/config ID and preflight checks
+it again. A changed image, source, tool, profile, overlay or environment needs a
+new bundle and review. The bundle must be outside its clean `mycel-lab`/`mycel`
+source checkouts; only an exact registry daemon digest can be passed at build.
+During preflight set `MINIO_IMAGE` and `MINIO_MC_IMAGE` to the template's exact
+helper references. Inspect the fresh resource/port baseline first; the ordinary
+Compose cases publish host gRPC 19091–19093 on all interfaces and the protocol
+case uses 19791–19793. No destructive run, hosted-provider access or approval
+is implied by building, validating or dry-running a bundle.
+
+Compose scenarios explicitly declare the 16 partitions started by the three-node
+Compose fixture (17 Raft groups including system); the reusable cluster profile
+still defaults to 64 for other deployment shapes. Before a suite runs **any**
+scenario, and before standalone scenario provisioning, the harness checks the
+resolved node count, partition count, and replica factor against each named
+Compose daemon's base/overlay environment. It reads the bound runtime files for
+release bundles, evaluates supported local variable defaults, and fails closed
+on missing, malformed, per-node divergent, or .env-supplied Raft settings.
+Dry-run/CI exercise this pre-provisioning guard but are not runtime acceptance;
+a new suite/fixture/bundle requires fresh review and destructive approval.
+
+Every provider-backed runtime event also reserves a harness operation, even
+when the event makes no provider call. The suite-wide preflight therefore
+rejects an event's declared `target.timeout` if it reaches or exceeds the
+selected profile's `requestTimeout`. The credential-free deterministic profile
+allows the existing 60-second recovery oracle under a finite 75-second
+operation bound; local emulator profiles preserve their finite request scripts,
+retry/cancel witnesses, event waits, and total budgets while leaving room for
+their already-declared 30- or 45-second waits. These source-only bounds do not
+qualify pending-work retention or provider failure behavior at runtime.
+
+A forced older backfill is held before a newer record is published and searched;
+release must report superseded skip with unchanged newer record identity. Fault
+cases require failure/gap/freshness evidence before normal or explicitly authorized
+public retry; no rebuild/reset hides a failure. No arbitrary sleep proves ordering.
+
+The deterministic [domain-isolation case](../tests/reliability/scenarios/compose-semantic-domain-isolation/compose-semantic-domain-isolation.md)
+uses the same actor, principal, space, endpoint credentials, and node UUID in two domains.
+Broad searches omit rule/binding selectors and verify both semantic isolation and hydrated
+content, including after a peer-only update and retained-data restart.
+The [configured-migration case](../tests/reliability/scenarios/compose-semantic-model-migration/compose-semantic-model-migration.md)
+changes selected model identity, dimensions, and vector-space identity separately. Each
+must prove a new generation, rebuild-required state, and a strict rebuild fence
+(empty results with the explicit requires-rebuild warning or `FailedPrecondition`)
+**before** an explicit authorized rebuild. This is not a malformed-vector test or repair
+used to conceal a failed assertion. Extra inference resources remain tracked for cleanup;
+the owning rule is removed before the selected alternate route.
+
+[Provider-stage compositions](design/semantic-provider-composition.md) are planned
+and capability-checked before deployment or secret lookup. The pinned v0.21.4 API
+does not support native semantic enrichment; a compound request fails rather than
+silently becoming embedding-only. See the [acceptance audit](implementation/semantic-graph-index-issue46-acceptance-audit.md).
+
+They run Compose-backed deterministic, emulator, or manually gated live-provider scenarios:
+
+```sh
+mycel-lab run suite semantic-graph-index-contract --dry-run
+mycel-lab run suite semantic-graph-index-contract \
+  --confirm-destructive \
+  --image myceldb/mycel:<candidate>
+
+mycel-lab run suite semantic-graph-index-recovery --dry-run
+mycel-lab run suite semantic-graph-index-recovery \
+  --confirm-destructive \
+  --image myceldb/mycel:<candidate>
+
+mycel-lab run suite semantic-graph-index-protocol --dry-run
+mycel-lab run suite semantic-graph-index-protocol \
+  --confirm-destructive \
+  --image myceldb/mycel:<candidate>
+
+mycel-lab run suite semantic-graph-index-release-gate --dry-run
+# For a separately reviewed, clean, exact-identity candidate only:
+/candidate/bin/mycel-lab release-bundle build /candidate/semantic-draft.yaml \
+  /candidate/semantic-bundle.yaml \
+  --daemon-image docker.io/myceldb/mycel@sha256:<exact-64-hex-digest> \
+  --candidate-id <unique-reviewed-id>
+/candidate/bin/mycel-lab release-bundle validate /candidate/semantic-bundle.yaml
+# Requires fresh explicit destructive approval; NOT an instruction to run now:
+/candidate/bin/mycel-lab run suite semantic-graph-index-release-gate \
+  --release-bundle /candidate/semantic-bundle.yaml \
+  --confirm-destructive --artifact-root /candidate/unique-evidence-root
+
+mycel-lab run suite semantic-graph-index-live --dry-run
+# Separately protected and credentialed; uses its own exact live-provider bundle.
+```
+
+`semantic-graph-index-release-gate` is credential-free and intentionally excludes
+live-provider credentials. Its destructive path now **requires a hermetic bundle**;
+`--image` and independent environment/profile overrides are rejected before
+provisioning, even with `--confirm-destructive`. `semantic-graph-index-live` is
+manual-only: dry-run performs no credential lookup and no provider call;
+destructive execution likewise needs its separate hermetic live-provider bundle,
+approved daemon image, explicit operator approval, an approved outbound provider
+route/budget, and an operator-provided live provider credential.
+
+Use `--image` to replace every resolved scenario's daemon image while preserving
+the rest of the scenario, which supports exact A/B candidate validation. For
+example:
 
 ```sh
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery \

@@ -99,7 +99,7 @@ func reserveRuntimeOperation(ctx context.Context, recorder Recorder, phaseName, 
 }
 
 func evidenceSafeEventTarget(event spec.EventSpec) map[string]any {
-	if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
+	if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" && event.Type != "user-backup-fixture" {
 		return event.Target
 	}
 	out := make(map[string]any, len(event.Target))
@@ -134,13 +134,17 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "image") == "" {
 			return fmt.Errorf("%s requires target.image", event.Type)
 		}
-	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-emulator-assert", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
+	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-emulator-assert", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-work-assert", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
 		return nil
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {
 			return fmt.Errorf("%s requires target.command", event.Type)
 		}
 	case "user-backup-fixture":
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
+			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
+		}
+	case "blob-snapshot-recovery":
 		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
 			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
 		}

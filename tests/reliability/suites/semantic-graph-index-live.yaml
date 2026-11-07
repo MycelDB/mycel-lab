@@ -1,0 +1,11 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: semantic-graph-index-live
+  description: Manually gated live-provider semantic graph-index acceptance with bounded budgets and invariant-based ranking.
+scenarios:
+  - path: ../scenarios/compose-semantic-live-provider/compose-semantic-live-provider.yaml
+execution:
+  mode: sequential
+  parallelism: 1
+  stopOnFailure: true

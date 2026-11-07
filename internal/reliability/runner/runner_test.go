@@ -148,6 +148,7 @@ func TestEvidenceSafeResolvedScenarioRemovesProcedureGraphContent(t *testing.T) 
 	scenario := spec.ResolvedScenario{Phases: []spec.PhaseSpec{{Events: []spec.EventSpec{
 		{Type: "procedure-inference-node-create", Target: map[string]any{"nodeId": "private-id", "text": "private text", "timeout": "1s"}},
 		{Type: "system-backup-fixture", Target: map[string]any{"blobPayload": "private payload", "ordinal": 0}},
+		{Type: "user-backup-fixture", Target: map[string]any{"blobPayload": "private user payload", "actorId": "fixture-user", "ordinal": 0}},
 	}}}}
 	safe := evidenceSafeResolvedScenario(scenario)
 	for _, event := range safe.Phases[0].Events {
@@ -582,7 +583,11 @@ func (d *providerObservationInspector) ProviderEmulatorObservations(context.Cont
 func TestRunScenarioRoutesImageOverrideThroughComposeCreate(t *testing.T) {
 	scenario := resolveFixtureScenario(t, "example.yaml")
 	scenario.Environment.Driver = "compose"
-	scenario.Environment.Options = map[string]any{"composeFile": "compose.yml"}
+	fixture := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(fixture, []byte("services:\n  myceld-a:\n    environment:\n      MYCELD_CLUSTER_RAFT_NODE_COUNT: '3'\n      MYCELD_CLUSTER_RAFT_PARTITION_COUNT: '64'\n      MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: '3'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scenario.Environment.Options = map[string]any{"composeFile": fixture, "serviceNames": []string{"myceld-a"}}
 	scenario.ActorGroups = nil
 	scenario.Phases = nil
 	scenario.Assertions = nil
@@ -987,7 +992,7 @@ func TestPrimaryCaptureFailureIsNotRetriedOrOverwritten(t *testing.T) {
 
 func TestComposeWaitReadyFailureUsesRunnerCleanupBoundary(t *testing.T) {
 	composeFile := filepath.Join(t.TempDir(), "compose.yml")
-	if err := os.WriteFile(composeFile, []byte("services: {}\n"), 0o600); err != nil {
+	if err := os.WriteFile(composeFile, []byte("services:\n  myceld-a:\n    environment:\n      MYCELD_CLUSTER_RAFT_NODE_COUNT: '3'\n      MYCELD_CLUSTER_RAFT_PARTITION_COUNT: '64'\n      MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: '3'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	scenario := resolveFixtureScenario(t, "example.yaml")
@@ -1106,6 +1111,115 @@ func TestAllReliabilitySuiteFilesDryRun(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSemanticGraphIndexContractSuiteCanonicalNameDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-contract.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-contract" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-contract", result.SuiteName)
+	}
+	want := []string{"compose-semantic-graph-contract", "compose-semantic-domain-isolation", "compose-semantic-model-migration"}
+	if len(result.Results) != len(want) {
+		t.Fatalf("contract scenarios=%d want %d", len(result.Results), len(want))
+	}
+	for i, name := range want {
+		if result.Results[i].ScenarioName != name || result.Results[i].Status != RunPassed || !result.Results[i].DryRun {
+			t.Fatalf("contract result[%d]=%+v", i, result.Results[i])
+		}
+	}
+}
+
+func TestSemanticGraphIndexRecoverySuiteCanonicalNameDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-recovery.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-recovery" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-recovery", result.SuiteName)
+	}
+	want := []string{"compose-semantic-graph-recovery", "compose-semantic-pending-restart", "compose-semantic-out-of-order"}
+	if len(result.Results) != len(want) {
+		t.Fatalf("scenario count=%d want %d", len(result.Results), len(want))
+	}
+	for index, name := range want {
+		if result.Results[index].ScenarioName != name || result.Results[index].Status != RunPassed {
+			t.Fatalf("recovery scenario[%d]=%+v, want %s passing", index, result.Results[index], name)
+		}
+	}
+}
+
+func TestSemanticGraphIndexProtocolSuiteCanonicalNameDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-protocol.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-protocol" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-protocol", result.SuiteName)
+	}
+	want := append([]string{"compose-semantic-openai-emulator"}, semanticFaultScenarioNames()...)
+	if len(result.Results) != len(want) {
+		t.Fatalf("scenario count=%d want %d", len(result.Results), len(want))
+	}
+	for i, name := range want {
+		if result.Results[i].ScenarioName != name || result.Results[i].Status != RunPassed {
+			t.Fatalf("protocol result[%d]=%+v, want %s", i, result.Results[i], name)
+		}
+	}
+}
+
+func TestSemanticGraphIndexLiveSuiteCanonicalNameDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-live.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-live" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-live", result.SuiteName)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("scenario count=%d want 1", len(result.Results))
+	}
+	if got := result.Results[0].ScenarioName; got != "compose-semantic-live-provider" {
+		t.Fatalf("ScenarioName=%q want compose-semantic-live-provider", got)
+	}
+	if result.Results[0].Status != RunPassed {
+		t.Fatalf("scenario result=%+v", result.Results[0])
+	}
+}
+
+func TestSemanticGraphIndexReleaseGateSuiteDryRuns(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "suites", "semantic-graph-index-release-gate.yaml")
+	result, err := RunSuiteFile(context.Background(), path, Options{DryRun: true, ArtifactRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("RunSuiteFile(%s) error=%v", path, err)
+	}
+	if result.SuiteName != "semantic-graph-index-release-gate" {
+		t.Fatalf("SuiteName=%q want semantic-graph-index-release-gate", result.SuiteName)
+	}
+	want := append([]string{"compose-semantic-graph-contract", "compose-semantic-graph-recovery", "compose-semantic-pending-restart", "compose-semantic-openai-emulator", "compose-semantic-out-of-order"}, semanticFaultScenarioNames()...)
+	want = append(want, "compose-semantic-domain-isolation", "compose-semantic-model-migration")
+	if len(result.Results) != len(want) {
+		t.Fatalf("scenario count=%d want %d", len(result.Results), len(want))
+	}
+	phases := 0
+	for index, scenario := range want {
+		if got := result.Results[index].ScenarioName; got != scenario {
+			t.Fatalf("result[%d].ScenarioName=%q want %q", index, got, scenario)
+		}
+		if result.Results[index].Status != RunPassed || !result.Results[index].DryRun {
+			t.Fatalf("result[%d]=%+v", index, result.Results[index])
+		}
+		phases += len(result.Results[index].Phases)
+	}
+	if phases != 65 {
+		t.Fatalf("planned phases=%d want 65", phases)
 	}
 }
 

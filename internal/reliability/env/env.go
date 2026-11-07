@@ -125,6 +125,10 @@ type ProviderEmulatorInspector interface {
 	ProviderEmulatorObservations(context.Context, Environment) (ExecResult, error)
 }
 
+type ObjectStoreExecutor interface {
+	ExecObjectStore(context.Context, Environment, string) (ExecResult, error)
+}
+
 func PersistProviderEmulatorObservations(sink *artifacts.Sink, raw string, requireNonempty bool) error {
 	if sink == nil {
 		return errors.New("provider emulator observation sink is required")
@@ -1278,6 +1282,13 @@ func (d ComposeDriver) Exec(ctx context.Context, environment Environment, node N
 	return d.compose(ctx, environment, args...)
 }
 
+func (d ComposeDriver) ExecObjectStore(ctx context.Context, environment Environment, command string) (ExecResult, error) {
+	if strings.TrimSpace(command) == "" {
+		return ExecResult{}, errors.New("object-store command is required")
+	}
+	return d.compose(ctx, environment, "run", "--rm", "--no-deps", "--entrypoint", "sh", "minio-bucket", "-ec", command)
+}
+
 func (d ComposeDriver) RestartNode(ctx context.Context, environment Environment, node NodeRef) error {
 	service := composeNodeService(environment, node)
 	if _, err := d.compose(ctx, environment, "restart", service); err != nil {
@@ -1634,7 +1645,12 @@ func runningImageResolutionStatus(commandErr error, expectedInstances, observedI
 }
 
 func validImageProvenance(provenance imageSourceProvenance, expectedSource string) bool {
-	return provenance.CaptureStatus == "completed" && provenance.Source == expectedSource && provenance.Dirty == "false" && provenance.Revision != "" && provenance.ContextDigest != "" && provenance.BuildCommand != ""
+	switch provenance.BuildCommand {
+	case "docker-buildx-local-linux-amd64", "docker-buildx-local-linux-arm64", "docker-buildx-local-linux-arm64-emulator", "github-actions-buildx-multiarch":
+	default:
+		return false
+	}
+	return provenance.CaptureStatus == "completed" && provenance.Source == expectedSource && provenance.Dirty == "false" && provenance.Revision != "" && provenance.ContextDigest != ""
 }
 
 func runningImageMatchesConfigured(evidence composeImageEvidence) bool {
