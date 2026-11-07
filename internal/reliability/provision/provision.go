@@ -122,6 +122,8 @@ type ProcedureInferenceResources struct {
 }
 
 type SemanticResources struct {
+	DomainPeers                       map[string]*SemanticResources         `json:"domainPeers,omitempty"`
+	Routes                            map[string]*SemanticResources         `json:"routes,omitempty"`
 	TargetActorID                     string                                `json:"targetActorId"`
 	TargetPrincipalID                 string                                `json:"-"`
 	LiveProvider                      bool                                  `json:"-"`
@@ -355,6 +357,9 @@ func semanticOperationPlan() []struct{ action, resource string } {
 func planSemanticResources(scenario spec.ResolvedScenario, resources ScenarioResources, shortRun string) (*SemanticResources, *semanticProvisionPlan, error) {
 	if scenario.Semantic == nil || scenario.ProviderProfile == nil || scenario.ProviderProfile.Profile.Capabilities.Embedding == nil {
 		return nil, nil, errors.New("semantic provisioning requires a resolved embedding provider profile")
+	}
+	if err := validateSemanticCompositionRuntime(scenario); err != nil {
+		return nil, nil, err
 	}
 	var target ActorAssignment
 	for _, assignment := range resources.Assignments {

@@ -1,0 +1,303 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-semantic-graph-recovery
+  description: Credential-free deterministic semantic graph-index recovery, restart persistence, rebuild, and delta catch-up.
+seed: 4606
+providerProfileRef: deterministic-token-basis-v1
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+    projectNamePrefix: mycel-lab-semantic-recovery
+    imageOverride: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - rolling-restart
+      - logs
+clusterRef: raft-3-node
+clusterOverrides:
+  image: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: semantic-controller
+    profileRef: semantic-controller
+    count: 1
+    rate:
+      mode: per-actor
+      commitsPerSecond: 1
+semantic:
+  targetActorGroup: semantic-controller
+  rule:
+    deferProvisioning: true
+    key: deterministic-recovery-search
+    displayName: Deterministic recovery search
+    description: Run-scoped semantic rule for provider-neutral graph-index recovery.
+    targetLabels: [Document]
+    bindingKey: search
+    purpose: semantic_search
+    sourceMode: self
+    includeProperties: [text]
+    minimumTextLength: 1
+    physicalIndex: exact
+    dirtyCooldown: 1ms
+    maxBatchSize: 16
+    workerConcurrency: 1
+  maintenance:
+    timeout: 30s
+    pollInterval: 100ms
+    analyzeLimit: 64
+    processLimit: 64
+phases:
+  - name: seed-rule-backfill-and-capture-baseline
+    duration: 1ms
+    events:
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000201
+          labels: [Document]
+          text: axis-0
+          captureRevisionAs: baseline-node-revision
+          properties:
+            title: recovery-baseline-title
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000202
+          labels: [Document]
+          text: axis-1
+          captureRevisionAs: baseline-corpus-revision
+          properties:
+            title: recovery-confounder-title
+      - type: semantic-rule-create
+        target:
+          semantic: deferred
+      - type: semantic-backfill
+        target:
+          force: true
+          limit: 16
+          expectedSelected: 2
+          minimumGenerated: 2
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 1
+          captureGenerationAs: baseline-generation
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          expectSourceRevisionFrom: baseline-corpus-revision
+          expectGenerationFrom: baseline-generation
+          captureRecordAs: baseline-record
+          captureConfigurationHashAs: baseline-configuration
+          expectedScores: [1.0]
+          scoreTolerance: 0.000000001
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000201
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000000202
+  - name: restart-and-prove-index-persistence
+    duration: 1ms
+    events:
+      - type: rolling-restart
+        target:
+          scope: cluster
+      - type: cluster-recovery-wait
+        target:
+          timeout: 60s
+          interval: 200ms
+          commandTimeout: 3s
+          minimumStablePolls: 3
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 1
+      - type: host-command
+        target:
+          command: [sh, -c, "sleep 2"]
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 3
+          timeout: 30s
+          pollInterval: 500ms
+          minimumScore: 0.99
+          requireProvenance: true
+          expectRecordFrom: baseline-record
+          expectGenerationFrom: baseline-generation
+          expectConfigurationHashFrom: baseline-configuration
+          expectedScores: [1.0]
+          scoreTolerance: 0.000000001
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000201
+    outcome:
+      availability: expected-degradation
+  - name: post-restart-catch-up
+    duration: 1ms
+    events:
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000203
+          labels: [Document]
+          text: axis-2
+          captureRevisionAs: post-restart-node-revision
+          properties:
+            title: post-restart-catch-up-title
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 1
+      - type: semantic-search-assert
+        target:
+          query: axis-2
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          expectSourceRevisionFrom: post-restart-node-revision
+          expectGenerationFrom: baseline-generation
+          expectConfigurationHashFrom: baseline-configuration
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000203
+  - name: rebuild-from-graph-truth-with-delta
+    duration: 1ms
+    events:
+      - type: semantic-rule-projection-update
+        target:
+          includeProperties: [text, title]
+      - type: semantic-reliability-assert
+        target:
+          expectRebuildRequired: true
+          captureGenerationAs: generation-after-projection-change
+      - type: semantic-rebuild
+        target:
+          backfillLimit: 2
+          maintenanceBatchLimit: 64
+          maxCatchupIterations: 64
+          concurrentMutation:
+            eventType: semantic-node-create
+            nodeId: 00000000-0000-4000-8000-000000000204
+            labels: [Document, RecoveryDeltaMarker]
+            text: axis-3
+            captureRevisionAs: rebuild-delta-commit
+            properties:
+              title: rebuild-delta-title
+          captureGenerationAs: rebuilt-generation
+          captureRebuildEpochAs: rebuilt-epoch
+          capturePinnedRevisionAs: rebuilt-pinned-revision
+          captureDeltaCatchupRevisionAs: rebuilt-delta-revision
+          captureFreshRevisionAs: rebuilt-fresh-revision
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 2
+          expectFreshRevisionFrom: rebuild-delta-commit
+          expectDeltaCatchupRevisionFrom: rebuild-delta-commit
+          requireDeltaAfterPinned: true
+      - type: semantic-search-assert
+        target:
+          query: axis-0
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          expectSourceRevisionFrom: rebuilt-pinned-revision
+          expectGenerationFrom: rebuilt-generation
+          expectRebuildEpochFrom: rebuilt-epoch
+          rejectConfigurationHashFrom: baseline-configuration
+          captureConfigurationHashAs: rebuilt-configuration
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000201
+      - type: semantic-search-assert
+        target:
+          query: axis-3
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          expectSourceRevisionFrom: rebuild-delta-commit
+          expectGenerationFrom: rebuilt-generation
+          expectRebuildEpochFrom: rebuilt-epoch
+          expectConfigurationHashFrom: rebuilt-configuration
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000204
+  - name: restart-after-rebuild-and-prove-persistence
+    duration: 1ms
+    events:
+      - type: rolling-restart
+        target:
+          scope: cluster
+      - type: cluster-recovery-wait
+        target:
+          timeout: 60s
+          interval: 200ms
+          commandTimeout: 3s
+          minimumStablePolls: 3
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 2
+          expectFreshRevisionFrom: rebuild-delta-commit
+      - type: host-command
+        target:
+          command: [sh, -c, "sleep 2"]
+      - type: semantic-search-assert
+        target:
+          query: axis-3
+          limit: 3
+          timeout: 30s
+          pollInterval: 500ms
+          minimumScore: 0.99
+          requireProvenance: true
+          expectSourceRevisionFrom: rebuild-delta-commit
+          expectGenerationFrom: rebuilt-generation
+          expectRebuildEpochFrom: rebuilt-epoch
+          expectConfigurationHashFrom: rebuilt-configuration
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000204
+    outcome:
+      availability: expected-degradation
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 60s
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

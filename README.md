@@ -12,6 +12,8 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Mycel Lab model](docs/design/model.md)
 - [Environment driver abstraction design](docs/design/environment-drivers.md)
 - [Provider profiles, budgets, and artifact safety](docs/design/provider-profiles.md)
+- [Semantic graph-index reliability suites](docs/design/semantic-graph-index-reliability-suites.md)
+- [Semantic suite implementation and validation](docs/implementation/semantic-graph-index-reliability-suites-plan.md)
 - [Hermetic release execution bundles](docs/design/release-execution-bundles.md)
 - [Structured reliability harness implementation plan](docs/implementation/reliability-harness-implementation-plan.md)
 - [Environment driver abstraction implementation plan](docs/implementation/environment-driver-abstraction-plan.md)
@@ -20,6 +22,15 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Native wrapper transition inventory](docs/implementation/native-wrapper-transition-inventory.md)
 - [Operations guide](docs/operations.md)
 - [CI and protected reliability execution](docs/operations/ci-release-integration.md)
+
+## Branch integration
+
+New work targets `develop`; release promotion goes from `develop` to `main`.
+If a release fix lands directly on `main`, merge `main` back into `develop` through
+a reviewed merge PR, preserving both histories and testing the combined tree.
+Do not reset either branch or squash away the back-merge ancestry. Check that
+`git merge-base --is-ancestor origin/main origin/develop` succeeds after syncing.
+Branch synchronization does not transfer runtime evidence or authorize a release.
 
 ## Current commands
 
@@ -54,6 +65,9 @@ mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --dry-run
+mycel-lab run suite semantic-graph-index-release-gate --dry-run
+mycel-lab run suite semantic-graph-index-live --dry-run
+mycel-lab run scenario compose-semantic-pending-restart --dry-run
 mycel-lab run suite compose-procedure-inference-control-emulator --dry-run
 mycel-lab run suite k3d-procedure-inference-recovery --dry-run
 mycel-lab run suite k3d-procedure-inference-backup-restore --dry-run
@@ -82,6 +96,15 @@ mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --confirm-destruct
 mycel-lab run suite compose-cluster-soak --confirm-destructive
 mycel-lab run suite raft-reliability-baseline --dry-run
 ```
+
+Canonical semantic scenarios now default to the immutable **v0.21.4** daemon
+image. Recovery includes a [controlled pending-work restart case](tests/reliability/scenarios/compose-semantic-pending-restart/compose-semantic-pending-restart.md),
+with read-only work-identity/generation checks before normal maintenance resumes.
+The expanded 16-scenario / 65-phase aggregate adds controlled out-of-order
+publication, nine protocol-failure cases, same-space domain isolation, and independent
+configured model/dimension/vector-space migration. It requires fresh approved execution; the
+previous v0.21.3 pass is not qualification for this new baseline. Dry-runs do not
+authorize destructive or hosted-provider execution.
 
 Catalog commands require Postgres via `--database-url`, `MYCEL_LAB_DATABASE_URL`,
 `MYCEL_RELIABILITY_DATABASE_URL`, or `DATABASE_URL`:

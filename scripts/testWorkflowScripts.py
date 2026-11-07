@@ -212,7 +212,7 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_additional_unprotected_suite_run_is_rejected(self) -> None:
         for text, live, run_step, suite_target, workflow, job in (
-            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-live-provider", "semantic-live.yml", "live-semantic"),
+            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-graph-index-live", "semantic-live.yml", "live-semantic"),
             (self.release, False, checkWorkflows.RELEASE_RUN_STEP, "cluster-release-gate", "release-gate.yml", "cluster-release-gate"),
         ):
             for command in (
@@ -237,7 +237,7 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_extra_protected_execution_in_decoy_job_is_rejected(self) -> None:
         for text, live, suite_target, workflow, job in (
-            (self.live, True, "semantic-live-provider", "semantic-live.yml", "live-semantic"),
+            (self.live, True, "semantic-graph-index-live", "semantic-live.yml", "live-semantic"),
             (self.release, False, "cluster-release-gate", "release-gate.yml", "cluster-release-gate"),
         ):
             with self.subTest(workflow=workflow):
@@ -256,7 +256,7 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_leading_comment_cannot_hide_extra_protected_execution_step(self) -> None:
         for text, live, run_step, suite_target, workflow, job in (
-            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-live-provider", "semantic-live.yml", "live-semantic"),
+            (self.live, True, checkWorkflows.LIVE_RUN_STEP, "semantic-graph-index-live", "semantic-live.yml", "live-semantic"),
             (self.release, False, checkWorkflows.RELEASE_RUN_STEP, "cluster-release-gate", "release-gate.yml", "cluster-release-gate"),
         ):
             with self.subTest(workflow=workflow):

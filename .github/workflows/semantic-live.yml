@@ -132,7 +132,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set +e
-          "$RUNNER_TEMP/bin/mycel-lab" run suite semantic-live-provider \
+          "$RUNNER_TEMP/bin/mycel-lab" run suite semantic-graph-index-live \
             --confirm-destructive \
             --release-bundle ../release-bundle.yaml \
             --artifact-root "$ARTIFACT_ROOT"

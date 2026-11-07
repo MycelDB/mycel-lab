@@ -65,7 +65,7 @@ func TestCanonicalSchemaIsValidAndVersionLocked(t *testing.T) {
 }
 
 func TestMaintainedDraftTemplatesStrictDecode(t *testing.T) {
-	for _, name := range []string{"cluster-release-gate.draft.yaml.tmpl", "semantic-live-provider.draft.yaml.tmpl"} {
+	for _, name := range []string{"cluster-release-gate.draft.yaml.tmpl", "semantic-live-provider.draft.yaml.tmpl", "semantic-graph-index-release-gate.draft.yaml.tmpl"} {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "reliability", "release-bundles", name))
 		if err != nil {
 			t.Fatal(err)

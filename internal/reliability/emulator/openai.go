@@ -56,6 +56,7 @@ type OpenAIHandler struct {
 	sequence     int
 	attempts     map[string]int
 	observations []Observation
+	gates        map[string]*responseGate
 }
 
 func NewOpenAIHandler(config OpenAIConfig) (*OpenAIHandler, error) {
@@ -65,8 +66,14 @@ func NewOpenAIHandler(config OpenAIConfig) (*OpenAIHandler, error) {
 	if err := provider.ValidateProtocolEmulatorScript(&config.Script); err != nil {
 		return nil, fmt.Errorf("validate emulator script: %w", err)
 	}
-	for _, entry := range config.Script.Entries {
+	entries := append([]provider.ProtocolEmulatorScriptEntry(nil), config.Script.Entries...)
+	entries = append(entries, provider.ProtocolEmulatorScriptEntry{Outcomes: config.Script.RequestSequence})
+	gates := map[string]*responseGate{}
+	for _, entry := range entries {
 		for _, outcome := range entry.Outcomes {
+			if outcome.Gate != "" {
+				gates[outcome.Gate] = &responseGate{state: GateState{SchemaVersion: 1, Name: outcome.Gate, State: "idle"}, release: make(chan struct{})}
+			}
 			if !validProtocolIdentity(outcome.Model, 256) || !validProtocolIdentity(outcome.RequestID, 128) {
 				return nil, errors.New("emulator script contains an unsafe response identity")
 			}
@@ -80,10 +87,14 @@ func NewOpenAIHandler(config OpenAIConfig) (*OpenAIHandler, error) {
 			return nil, err
 		}
 	}
-	return &OpenAIHandler{config: config, attempts: map[string]int{}}, nil
+	return &OpenAIHandler{config: config, attempts: map[string]int{}, gates: gates}, nil
 }
 
 func (h *OpenAIHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if strings.HasPrefix(request.URL.Path, "/control/gates/") {
+		h.serveGate(response, request)
+		return
+	}
 	if request.URL.Path == "/healthz" {
 		response.Header().Set("Content-Type", "application/json")
 		_, _ = response.Write([]byte(`{"status":"ok"}`))
@@ -165,6 +176,13 @@ func (h *OpenAIHandler) serveEmbeddings(response http.ResponseWriter, request *h
 		http.Error(response, selectErr.Error(), http.StatusPreconditionFailed)
 		return
 	}
+	if !h.waitAtGate(request.Context(), outcome, &observation) {
+		h.finishObservation(&observation, started)
+		if observation.Status == http.StatusGatewayTimeout {
+			http.Error(response, "gate deadline exceeded", http.StatusGatewayTimeout)
+		}
+		return
+	}
 	observation.Outcome = outcome.Kind
 	if outcome.DelayMS > 0 {
 		timer := time.NewTimer(time.Duration(outcome.DelayMS) * time.Millisecond)
@@ -209,6 +227,9 @@ func (h *OpenAIHandler) serveEmbeddings(response http.ResponseWriter, request *h
 		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(response).Encode(map[string]any{"error": map[string]any{"message": "scripted content policy refusal", "type": "content_policy", "code": "content_policy_refusal"}})
+	case "connection-drop":
+		dropProviderConnection(response, &observation, func() { h.finishObservation(&observation, started) })
+		return
 	case "wrong-dimensions", "success":
 		dimensions := h.config.Dimensions
 		if outcome.Kind == "wrong-dimensions" {
@@ -288,6 +309,13 @@ func (h *OpenAIHandler) serveChat(response http.ResponseWriter, request *http.Re
 		http.Error(response, selectErr.Error(), http.StatusPreconditionFailed)
 		return
 	}
+	if !h.waitAtGate(request.Context(), outcome, &observation) {
+		h.finishObservation(&observation, started)
+		if observation.Status == http.StatusGatewayTimeout {
+			http.Error(response, "gate deadline exceeded", http.StatusGatewayTimeout)
+		}
+		return
+	}
 	observation.Outcome = outcome.Kind
 	if outcome.DelayMS > 0 {
 		timer := time.NewTimer(time.Duration(outcome.DelayMS) * time.Millisecond)
@@ -329,6 +357,9 @@ func (h *OpenAIHandler) serveChat(response http.ResponseWriter, request *http.Re
 		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(response).Encode(map[string]any{"error": map[string]any{"message": "scripted content policy refusal", "type": "content_policy", "code": "content_policy_refusal"}})
+	case "connection-drop":
+		dropProviderConnection(response, &observation, func() { h.finishObservation(&observation, started) })
+		return
 	case "success":
 		model := payload.Model
 		if outcome.Model != "" {
@@ -356,6 +387,11 @@ func (h *OpenAIHandler) selectOutcome(inputDigest string) (provider.ProtocolEmul
 	}
 	h.sequence++
 	sequence := h.sequence
+	if len(h.config.Script.RequestSequence) > 0 {
+		attempt := h.attempts[inputDigest] + 1
+		h.attempts[inputDigest] = attempt
+		return h.config.Script.RequestSequence[sequence-1], attempt, sequence, nil
+	}
 	for _, entry := range h.config.Script.Entries {
 		if entry.InputSHA256 != inputDigest {
 			continue

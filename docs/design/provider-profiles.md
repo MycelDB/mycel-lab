@@ -25,7 +25,7 @@ budgets:
   enforcement: required # required | advisory
   maxOperations: 4096
   maxConcurrentOperations: 16
-  requestTimeout: 45s
+  requestTimeout: 75s
   totalTimeout: 10m
 artifacts:
   captureBodies: false
@@ -37,6 +37,8 @@ Profiles live under `tests/reliability/provider-profiles/`. They are strict: unk
 Capability slots are independent. The v1alpha1 harness resolves exactly one capability required by the scenario: semantic scenarios select embedding, while procedure-inference scenarios select generation. Other declared slots fail closed rather than being ignored. Deterministic mode supports the daemon's explicit embedding `fake`/`token-basis-v1` contract. Emulator and live embedding or generation profiles support `openai-compatible`; Anthropic and OpenRouter are not inferred from provider names and remain unsupported until matching connectors and pipelines exist.
 
 A scenario selects a profile with `providerProfileRef`. `--provider-profile <name-or-path>` overrides only that selection. Resolution records the selection source and SHA-256 of the exact profile bytes in `provider/provider-profile-resolved.json` and the resolved scenario.
+
+Semantic scenarios may additionally declare ordered [`providerStages`](semantic-provider-composition.md) with a distinct profile and exact source identity per capability. The last stage is embedding; a generation provider need not embed. Composition planning never reads secrets or claims runtime success. Required native adapters are checked before deployment, even for dry-run; v0.21.4 rejects unsupported native generation/enrichment instead of silently dropping a stage. A CLI override cannot silently rewrite a composed stage.
 
 ## Credentials
 
@@ -51,9 +53,9 @@ Deterministic and emulator profiles reject secret references. Live execution fir
 
 ## Local protocol emulator scripts
 
-An emulator embedding or generation capability may include a bounded `emulatorScript` (`version: v1`). The schema accepts only a finite request ceiling and a finite digest-keyed outcome sequence. Inputs are selected by SHA-256; source text is never part of the profile. Supported OpenAI-compatible outcomes are success, HTTP error, malformed JSON, truncated JSON, refusal, and wrong dimensions, with bounded delay and `Retry-After` values. Safe request/model identity fields reject control characters and whitespace.
+An emulator embedding or generation capability may include a bounded `emulatorScript` (`version: v1`). It accepts a finite digest-keyed outcome sequence or an exclusive global `requestSequence` of at most 32 outcomes, with `maxRequests` equal to its length. Exhaustion never silently becomes success. Inputs are selected by SHA-256; source text is never part of the profile. Outcomes include success, HTTP error, malformed/truncated JSON, refusal, wrong dimensions, and a real HTTP/1 connection drop. Delays, `Retry-After`, and named success-response gates are bounded; a gate has a unique synthetic name and a 1..30000ms deadline. Safe request/model identity fields reject control characters and whitespace.
 
-The dedicated `mycel-provider-emulator` command serves only `/healthz`, `/v1/embeddings`, and `/v1/chat/completions`. Compose gives it no host port; k3d uses an internal ClusterIP Service. The environment driver records the exact runtime image ID, script hash, bounded logs, and sanitized JSONL observations. An observation contains method, path, content length, capability, bounded model identities, sequence, attempt, batch count, body/input digests, outcome/status, cancellation, and authorization presence plus an allowlisted `Bearer`/`Basic`/`Other` scheme classification—never body text, vectors, generation output, authorization/arbitrary header values, or credentials. Generation observations also omit provider request IDs. Scenario assertions require contiguous sequence numbers, valid digests, declared batching, bounded attempts/counts, and exact or minimum safe protocol categories.
+The dedicated `mycel-provider-emulator` command serves `/healthz`, `/v1/embeddings`, `/v1/chat/completions`, sanitized `/control/observations`, and finite named `/control/gates/<name>` GET/release controls. Gate control is available only through a fixed local helper/driver interface; it cannot execute arbitrary host commands or choose an external URL. Compose gives it no host port; k3d uses an internal ClusterIP Service. The environment driver records the exact runtime image ID, script hash, bounded logs, and sanitized JSONL observations. An observation contains method, path, content length, capability, bounded model identities, sequence, attempt, batch count, body/input digests, outcome/status, cancellation, and authorization presence plus an allowlisted `Bearer`/`Basic`/`Other` scheme classification—never body text, vectors, generation output, authorization/arbitrary header values, or credentials. Generation observations also omit provider request IDs. Scenario assertions require contiguous sequence numbers, valid digests, declared batching, bounded attempts/counts, and exact or minimum safe protocol categories.
 
 ## Budgets and enforcement
 

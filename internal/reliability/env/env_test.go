@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -1096,9 +1097,24 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 	if err := os.WriteFile(composeFile, []byte("services: {}\n"), 0o600); err != nil {
 		t.Fatalf("write compose file: %v", err)
 	}
+	// This command-shape test has no daemon: choose unoccupied ephemeral ports
+	// instead of assuming the qualification ports are idle on the host.
+	first, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	portA := first.Addr().(*net.TCPAddr).Port
+	portB := second.Addr().(*net.TCPAddr).Port
+	first.Close()
+	second.Close()
 	runner := &fakeRunner{}
 	driver := ComposeDriver{Confirmed: true, Runner: runner}
-	environmentSpec := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "projectName": "mlab-test", "serviceNames": []any{"myceld-a", "myceld-b"}, "grpcPorts": []any{19091, 19092}, "imageOverride": "local/mycel:head"}}
+	environmentSpec := spec.EnvironmentSpec{Driver: "compose", Options: map[string]any{"composeFile": composeFile, "projectName": "mlab-test", "serviceNames": []any{"myceld-a", "myceld-b"}, "grpcPorts": []any{portA, portB}, "imageOverride": "local/mycel:head"}}
 	if err := driver.Preflight(context.Background(), environmentSpec); err != nil {
 		t.Fatalf("Preflight() error=%v", err)
 	}
@@ -1108,7 +1124,7 @@ func TestComposeDriverLifecycleCommands(t *testing.T) {
 		t.Fatalf("Create() error=%v", err)
 	}
 	endpoints, err := driver.Endpoints(context.Background(), environment)
-	if err != nil || len(endpoints) != 2 || endpoints[1].DaemonAddr != "127.0.0.1:19092" {
+	if err != nil || len(endpoints) != 2 || endpoints[1].DaemonAddr != fmt.Sprintf("127.0.0.1:%d", portB) {
 		t.Fatalf("Endpoints()=%+v err=%v", endpoints, err)
 	}
 	if err := driver.RestartNode(context.Background(), environment, NodeRef{Ordinal: 1}); err != nil {

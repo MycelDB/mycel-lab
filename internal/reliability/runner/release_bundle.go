@@ -41,7 +41,7 @@ func rejectIndependentReleaseOverrides(opts Options) error {
 
 func hermeticCandidateSuite(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "compose-procedure-inference-control-emulator", "k3d-procedure-inference-recovery", "k3d-procedure-inference-backup-restore", "cluster-release-gate", "semantic-live-provider":
+	case "compose-procedure-inference-control-emulator", "k3d-procedure-inference-recovery", "k3d-procedure-inference-backup-restore", "cluster-release-gate", "semantic-live-provider", "semantic-graph-index-live", "semantic-graph-index-release-gate":
 		return true
 	default:
 		return false

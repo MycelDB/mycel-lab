@@ -1,0 +1,19 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: semantic-graph-index-protocol
+  description: Provider protocol-emulator reliability coverage for semantic graph indexing.
+scenarios:
+  - path: ../scenarios/compose-semantic-openai-emulator/compose-semantic-openai-emulator.yaml
+  - path: ../scenarios/compose-semantic-fault-rate-limit/compose-semantic-fault-rate-limit.yaml
+  - path: ../scenarios/compose-semantic-fault-server-error/compose-semantic-fault-server-error.yaml
+  - path: ../scenarios/compose-semantic-fault-transport/compose-semantic-fault-transport.yaml
+  - path: ../scenarios/compose-semantic-fault-malformed/compose-semantic-fault-malformed.yaml
+  - path: ../scenarios/compose-semantic-fault-truncated/compose-semantic-fault-truncated.yaml
+  - path: ../scenarios/compose-semantic-fault-dimensions/compose-semantic-fault-dimensions.yaml
+  - path: ../scenarios/compose-semantic-fault-refusal/compose-semantic-fault-refusal.yaml
+  - path: ../scenarios/compose-semantic-fault-deadline/compose-semantic-fault-deadline.yaml
+  - path: ../scenarios/compose-semantic-fault-cancel/compose-semantic-fault-cancel.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

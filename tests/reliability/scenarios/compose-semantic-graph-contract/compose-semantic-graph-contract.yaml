@@ -13,6 +13,7 @@ environment:
       - ../mycel/tests/compose/cluster/compose.yml
       - tests/compose/ports.yml
     projectNamePrefix: mycel-lab-semantic
+    imageOverride: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
     serviceNames:
       - myceld-a
       - myceld-b
@@ -27,6 +28,10 @@ environment:
       - node-exec
       - logs
 clusterRef: raft-3-node
+clusterOverrides:
+  image: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
+  raft:
+    partitionCount: 16
 actorGroups:
   - name: semantic-controller
     profileRef: semantic-controller
@@ -296,6 +301,8 @@ phases:
         target:
           requireFreshAtLatest: true
           maximumUnresolvedGapCount: 0
+          captureGenerationAs: before-disable-generation
+          captureFreshRevisionAs: before-disable-fresh
       - type: semantic-search-assert
         target:
           query: axis-3
@@ -314,8 +321,13 @@ phases:
           nodeId: 00000000-0000-4000-8000-000000000104
           labels: [Document]
           text: axis-4
+          captureRevisionAs: disabled-node-revision
       - type: semantic-maintenance-await
         target:
+          completion: disabled-quiescent
+          expectGenerationFrom: before-disable-generation
+          expectFreshRevisionFrom: before-disable-fresh
+          expectRevisionFrom: disabled-node-revision
           timeout: 30s
           pollInterval: 100ms
       - type: semantic-search-assert

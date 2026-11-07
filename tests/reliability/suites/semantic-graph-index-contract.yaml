@@ -1,0 +1,12 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: semantic-graph-index-contract
+  description: Deterministic semantic lifecycle, same-space domain isolation, and configured model/vector compatibility migration.
+scenarios:
+  - path: ../scenarios/compose-semantic-graph-contract/compose-semantic-graph-contract.yaml
+  - path: ../scenarios/compose-semantic-domain-isolation/compose-semantic-domain-isolation.yaml
+  - path: ../scenarios/compose-semantic-model-migration/compose-semantic-model-migration.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

@@ -1634,7 +1634,12 @@ func runningImageResolutionStatus(commandErr error, expectedInstances, observedI
 }
 
 func validImageProvenance(provenance imageSourceProvenance, expectedSource string) bool {
-	return provenance.CaptureStatus == "completed" && provenance.Source == expectedSource && provenance.Dirty == "false" && provenance.Revision != "" && provenance.ContextDigest != "" && provenance.BuildCommand != ""
+	switch provenance.BuildCommand {
+	case "docker-buildx-local-linux-amd64", "docker-buildx-local-linux-arm64", "docker-buildx-local-linux-arm64-emulator", "github-actions-buildx-multiarch":
+	default:
+		return false
+	}
+	return provenance.CaptureStatus == "completed" && provenance.Source == expectedSource && provenance.Dirty == "false" && provenance.Revision != "" && provenance.ContextDigest != ""
 }
 
 func runningImageMatchesConfigured(evidence composeImageEvidence) bool {
