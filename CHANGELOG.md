@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [v0.21.1] - 2026-11-07
+
 ### Added
 
 - Added strict hermetic release execution bundles and maintained protected-gate draft templates that bind clean source trees, harness/tool binaries (including exact Buildx and Compose plugins), registry and local image identities, native and side manifests, provenance evidence, selected configuration files, resource allocation, and outer/finalization bounds; `release-bundle build` captures a reproducible authoritative bundle, protected gates consume it directly with collision-resistant bounded K3d allocation names, and candidate preflight rejects mismatches and mutable/default provider-emulator identities before environment provisioning (#88).
