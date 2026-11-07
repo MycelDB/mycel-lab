@@ -294,6 +294,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 			payload["endpointRecovery"] = recovery
 		}
 		return payload, recoveryErr
+	case "blob-snapshot-recovery":
+		result, err := executeBlobSnapshotRecoveryEvent(ctx, r.Driver, r.Environment, r.Resources, event.Target)
+		return map[string]any{"blobSnapshotRecovery": result}, err
 	case "identity-duplicate-principal-replay":
 		snapshots := r.managedEndpointSnapshots()
 		result, err := executeIdentityReplayEvent(ctx, r.Driver, r.Environment, r.Scenario, event.Target)

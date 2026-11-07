@@ -1,0 +1,7 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-blob-snapshot-recovery
+  description: Reproduce and repair missing object-store blob payloads during retained Raft snapshot recovery.
+scenarios:
+  - path: ../scenarios/compose-blob-snapshot-recovery/compose-blob-snapshot-recovery.yaml
