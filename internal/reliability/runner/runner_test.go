@@ -148,6 +148,7 @@ func TestEvidenceSafeResolvedScenarioRemovesProcedureGraphContent(t *testing.T) 
 	scenario := spec.ResolvedScenario{Phases: []spec.PhaseSpec{{Events: []spec.EventSpec{
 		{Type: "procedure-inference-node-create", Target: map[string]any{"nodeId": "private-id", "text": "private text", "timeout": "1s"}},
 		{Type: "system-backup-fixture", Target: map[string]any{"blobPayload": "private payload", "ordinal": 0}},
+		{Type: "user-backup-fixture", Target: map[string]any{"blobPayload": "private user payload", "actorId": "fixture-user", "ordinal": 0}},
 	}}}}
 	safe := evidenceSafeResolvedScenario(scenario)
 	for _, event := range safe.Phases[0].Events {

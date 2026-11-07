@@ -99,7 +99,7 @@ func reserveRuntimeOperation(ctx context.Context, recorder Recorder, phaseName, 
 }
 
 func evidenceSafeEventTarget(event spec.EventSpec) map[string]any {
-	if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
+	if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" && event.Type != "user-backup-fixture" {
 		return event.Target
 	}
 	out := make(map[string]any, len(event.Target))
