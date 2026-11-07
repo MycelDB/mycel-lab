@@ -99,7 +99,7 @@ func reserveRuntimeOperation(ctx context.Context, recorder Recorder, phaseName, 
 }
 
 func evidenceSafeEventTarget(event spec.EventSpec) map[string]any {
-	if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
+	if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" && event.Type != "user-backup-fixture" {
 		return event.Target
 	}
 	out := make(map[string]any, len(event.Target))
@@ -141,6 +141,10 @@ func validateEvent(event spec.EventSpec) error {
 			return fmt.Errorf("%s requires target.command", event.Type)
 		}
 	case "user-backup-fixture":
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
+			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
+		}
+	case "blob-snapshot-recovery":
 		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
 			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
 		}

@@ -1250,7 +1250,7 @@ func evidenceSafeResolvedScenario(scenario spec.ResolvedScenario) spec.ResolvedS
 				event.Target = liveSemanticEvidenceTarget(event.Type, event.Target)
 				continue
 			}
-			if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" {
+			if event.Type != "procedure-inference-node-create" && event.Type != "system-backup-fixture" && event.Type != "user-backup-fixture" {
 				continue
 			}
 			target := make(map[string]any, len(event.Target))
