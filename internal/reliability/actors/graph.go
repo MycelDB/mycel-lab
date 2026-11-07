@@ -383,21 +383,24 @@ func (a *GraphActor) commit(ctx context.Context) {
 	a.sequence++
 	tx := GenerateGraphTransaction(a.ID, a.Seed, a.sequence, a.Profile, a.state)
 	a.mu.Unlock()
+	transactionStart := time.Now()
 	if err := a.executeRealTransaction(operationCtx, tx); err != nil {
+		latencyMS := float64(time.Since(transactionStart).Microseconds()) / 1000
 		tx.Acknowledged = false
 		tx.ErrorClass = ClassifyError(err)
 		if a.Recorder != nil {
-			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-failed", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"error": err.Error(), "class": tx.ErrorClass}})
+			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-failed", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"error": err.Error(), "class": tx.ErrorClass, "transactionLatencyMs": latencyMS}})
 		}
 		return
 	}
+	latencyMS := float64(time.Since(transactionStart).Microseconds()) / 1000
 	a.mu.Lock()
 	ApplyAcknowledged(&a.state, tx)
 	a.transactions = append(a.transactions, tx)
 	a.mu.Unlock()
 	if a.Recorder != nil {
 		assignment := a.currentAssignment()
-		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-acknowledged", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr}})
+		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-acknowledged", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr, "transactionLatencyMs": latencyMS}})
 	}
 }
 
@@ -416,13 +419,14 @@ func (a *GraphActor) read(ctx context.Context) {
 	}
 	erredAfterReauth := false
 	reauthenticated := false
+	readStart := time.Now()
 	err = a.readOnce(operationCtx, false)
 	if shouldReauthenticate(err, a.currentAssignment()) {
 		reauthenticated = true
 		err = a.readOnce(operationCtx, true)
 		erredAfterReauth = err != nil
 	}
-	payload := map[string]any{"ok": err == nil, "spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr, "targetActorId": a.ID}
+	payload := map[string]any{"ok": err == nil, "spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr, "targetActorId": a.ID, "readLatencyMs": float64(time.Since(readStart).Microseconds()) / 1000}
 	if reauthenticated {
 		payload["reauthenticated"] = true
 		payload["reauthenticationRetryFailed"] = erredAfterReauth

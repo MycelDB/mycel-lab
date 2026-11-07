@@ -53,9 +53,9 @@ flowchart LR
 
 ## Evidence and artifacts
 
-- `events.jsonl` records acknowledged/failed transactions, commit latency, error class, and read checks.
+- `events.jsonl` records acknowledged/failed transactions, bounded commit/read latency, error class, and read checks.
 - `result.json` and `summary.md` record phase and final assertion outcomes.
-- Compose logs contain bounded `graph_write_commit_timing`, `graph_write_apply_timing`, and `raft_command_bytes` fields; raw graph payloads are not written to actor events.
+- `environment/logs/myceld-*-graph-write-timing.json` contains bounded, allowlisted `graph_write_commit_timing`, `graph_write_apply_timing`, and `raft_command_bytes` fields with scoped identifiers hashed; raw daemon logs and graph payloads are not persisted as scenario evidence.
 - `environment/compose-config.yaml`, `environment/compose-ps.txt`, and cleanup evidence establish the exact disposable environment.
 - Image provenance must identify the immutable digest used by all three daemon services.
 
