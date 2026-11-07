@@ -144,6 +144,10 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
 			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
 		}
+	case "blob-snapshot-recovery":
+		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
+			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
+		}
 	case "user-backup-export":
 		if stringTarget(event.Target, "file") == "" {
 			return fmt.Errorf("%s requires target.file", event.Type)

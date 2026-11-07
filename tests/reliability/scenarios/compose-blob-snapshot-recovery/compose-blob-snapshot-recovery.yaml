@@ -1,0 +1,92 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-blob-snapshot-recovery
+  description: Reproduce and repair a missing object-store blob payload during retained Raft snapshot recovery.
+seed: 312312
+environment:
+  driver: compose
+  namespace: mycel-blob-snapshot-recovery
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/issue312-ports.yml
+    projectNamePrefix: mycel-lab
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19312
+      - 19313
+      - 19314
+    objectStoreFixture: minio
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - node-restart
+      - logs
+      - object-store-fixture
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: blob-repro-users
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 0.0001
+phases:
+  - name: create-blob-fixture
+    duration: 1s
+    events:
+      - type: user-backup-fixture
+        target:
+          actorId: blob-repro-users-0
+          label: issue312-blob-snapshot-fixture
+          blobPayload: mycel-lab issue312 deterministic object-store snapshot payload
+          ordinal: 0
+  - name: capture-retained-snapshot
+    duration: 1s
+    events:
+      - type: raft-snapshot-create
+        target:
+          ordinals: [0]
+          compact: true
+  - name: remove-payload-restart-and-repair
+    duration: 1s
+    events:
+      - type: blob-snapshot-recovery
+        target:
+          actorId: blob-repro-users-0
+          nodeOrdinal: 0
+          bucket: mycel-compose-blobs
+          deleteSpace: true
+          deleteObject: true
+          expectedBlocker: blob snapshot payload unavailable
+          objectWaitTimeout: 30s
+          readinessTimeout: 2m
+          readinessInterval: 500ms
+  - name: final-cluster-recovery
+    duration: 1s
+    events:
+      - type: cluster-recovery-wait
+        target:
+          timeout: 2m
+          interval: 500ms
+          commandTimeout: 5s
+          minimumStablePolls: 3
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 2m
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: false
