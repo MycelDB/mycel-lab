@@ -434,7 +434,8 @@ Broad searches omit rule/binding selectors and verify both semantic isolation an
 content, including after a peer-only update and retained-data restart.
 The [configured-migration case](../tests/reliability/scenarios/compose-semantic-model-migration/compose-semantic-model-migration.md)
 changes selected model identity, dimensions, and vector-space identity separately. Each
-must prove a new generation, rebuild-required state, and `FailedPrecondition` search
+must prove a new generation, rebuild-required state, and a strict rebuild fence
+(empty results with the explicit requires-rebuild warning or `FailedPrecondition`)
 **before** an explicit authorized rebuild. This is not a malformed-vector test or repair
 used to conceal a failed assertion. Extra inference resources remain tracked for cleanup;
 the owning rule is removed before the selected alternate route.

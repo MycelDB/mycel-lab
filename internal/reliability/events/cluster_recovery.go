@@ -192,8 +192,9 @@ func executeClusterRecoveryWaitEventWithSessionFactory(ctx context.Context, driv
 			return ClusterRecoveryWaitResult{}, errors.New("cluster-recovery-wait sessionInitTimeout requires reusable endpoint sessions")
 		}
 		sessionInitTimeout, err = targetDuration(target, "sessionInitTimeout")
-		if err != nil || sessionInitTimeout <= 0 || len(ordinals) == 0 || sessionInitTimeout >= timeout/time.Duration(len(ordinals)) {
-			return ClusterRecoveryWaitResult{}, errors.New("cluster-recovery-wait sessionInitTimeout must leave time for all endpoint logins and recovery polling")
+		recoveryBudget := commandTimeout + interval*time.Duration(minimumStablePolls-1)
+		if err != nil || sessionInitTimeout <= 0 || len(ordinals) == 0 || recoveryBudget >= timeout || sessionInitTimeout >= timeout-recoveryBudget {
+			return ClusterRecoveryWaitResult{}, errors.New("cluster-recovery-wait sessionInitTimeout must leave time for concurrent endpoint logins and recovery polling")
 		}
 	}
 	result := ClusterRecoveryWaitResult{Timeout: timeout.String(), Interval: interval.String(), ExpectedGroups: expectedGroups, CommandTimeout: commandTimeout.String(), MinimumStablePolls: minimumStablePolls, RequireZeroApplyLag: requireZeroApplyLag, RequireConsistentProgress: requireConsistentProgress, InspectionMode: "node-cli"}
@@ -286,6 +287,11 @@ func newReusableClusterRecoveryNodeInspector(ctx context.Context, driver env.Env
 		return nil, fmt.Errorf("resolve daemon endpoints: %w", err)
 	}
 	inspector := &reusableClusterRecoveryNodeInspector{sessions: make(map[int]reusableClusterRecoverySession, len(ordinals))}
+	type endpointSpec struct {
+		ordinal  int
+		endpoint env.Endpoint
+	}
+	targets := make([]endpointSpec, 0, len(ordinals))
 	for _, ordinal := range ordinals {
 		endpoint, ok := clusterRecoveryEndpointForOrdinal(endpoints, ordinal)
 		if !ok || strings.TrimSpace(endpoint.DaemonAddr) == "" {
@@ -296,21 +302,47 @@ func newReusableClusterRecoveryNodeInspector(ctx context.Context, driver env.Env
 			_ = inspector.Close()
 			return nil, fmt.Errorf("daemon endpoint transport for ordinal %d: %w", ordinal, err)
 		}
-		// DialAdmin performs a session-creating Login. Attempt it exactly once:
-		// a timed-out response is ambiguous, so never resubmit that mutation.
-		dialCtx, cancel := context.WithTimeout(ctx, sessionInitTimeout)
-		admin, dialErr := mycel.DialAdmin(dialCtx, mycel.Config{
-			Addr:       endpoint.DaemonAddr,
-			Username:   firstNonEmpty(stringTarget(target, "username"), provision.DefaultAdminUsername),
-			Password:   firstNonEmpty(stringTarget(target, "password"), provision.DefaultAdminPassword),
-			ClientName: "mycel-lab-cluster-recovery",
-		})
-		cancel()
-		if dialErr != nil {
-			_ = inspector.Close()
-			return nil, fmt.Errorf("authenticate daemon endpoint for ordinal %d: %w", ordinal, dialErr)
+		targets = append(targets, endpointSpec{ordinal: ordinal, endpoint: endpoint})
+	}
+
+	// DialAdmin performs a session-creating Login. Attempt each endpoint exactly
+	// once: a timed-out response is ambiguous, so never resubmit that mutation.
+	// Initialize the independent sessions concurrently so one slow post-restart
+	// endpoint does not consume the login budget for every other endpoint.
+	type sessionResult struct {
+		admin *mycel.AdminClient
+		err   error
+	}
+	results := make([]sessionResult, len(targets))
+	var waitGroup sync.WaitGroup
+	for index, endpoint := range targets {
+		waitGroup.Add(1)
+		go func(index int, endpoint endpointSpec) {
+			defer waitGroup.Done()
+			dialCtx, cancel := context.WithTimeout(ctx, sessionInitTimeout)
+			defer cancel()
+			results[index].admin, results[index].err = mycel.DialAdmin(dialCtx, mycel.Config{
+				Addr:       endpoint.endpoint.DaemonAddr,
+				Username:   firstNonEmpty(stringTarget(target, "username"), provision.DefaultAdminUsername),
+				Password:   firstNonEmpty(stringTarget(target, "password"), provision.DefaultAdminPassword),
+				ClientName: "mycel-lab-cluster-recovery",
+			})
+		}(index, endpoint)
+	}
+	waitGroup.Wait()
+	var firstErr error
+	for index, endpoint := range targets {
+		result := results[index]
+		if result.admin != nil {
+			inspector.sessions[endpoint.ordinal] = reusableClusterRecoverySession{admin: result.admin, cluster: adminv1.NewAdminClusterServiceClient(result.admin.Conn)}
 		}
-		inspector.sessions[ordinal] = reusableClusterRecoverySession{admin: admin, cluster: adminv1.NewAdminClusterServiceClient(admin.Conn)}
+		if result.err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("authenticate daemon endpoint for ordinal %d: %w", endpoint.ordinal, result.err)
+		}
+	}
+	if firstErr != nil {
+		_ = inspector.Close()
+		return nil, firstErr
 	}
 	return inspector, nil
 }

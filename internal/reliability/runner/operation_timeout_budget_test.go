@@ -73,7 +73,7 @@ func TestCanonicalReusableRecoveryWaitsKeepSingleLoginAndStablePollBudgets(t *te
 					continue
 				}
 				count++
-				if event.Target["timeout"] != "60s" || event.Target["commandTimeout"] != "3s" || event.Target["sessionInitTimeout"] != "10s" || event.Target["minimumStablePolls"] != 3 {
+				if event.Target["timeout"] != "60s" || event.Target["commandTimeout"] != "3s" || event.Target["sessionInitTimeout"] != "20s" || event.Target["minimumStablePolls"] != 3 {
 					t.Fatalf("%s %s changed recovery/session assertions: %v", name, phase.Name, event.Target)
 				}
 			}
@@ -96,9 +96,9 @@ func TestRecoverySessionInitializationBudgetRejectsImpossibleAndUnauthenticatedP
 				continue
 			}
 			original := probe.Target["sessionInitTimeout"]
-			probe.Target["sessionInitTimeout"] = "20s"
-			if err := validateOperationTimeoutBudget(scenario); err == nil || !strings.Contains(err.Error(), "leave time for every node login") {
-				t.Fatalf("three 20s logins accepted under a 60s recovery budget: %v", err)
+			probe.Target["sessionInitTimeout"] = "58s"
+			if err := validateOperationTimeoutBudget(scenario); err == nil || !strings.Contains(err.Error(), "leave time for concurrent endpoint logins") {
+				t.Fatalf("58s session initialization accepted without recovery polling budget: %v", err)
 			}
 			probe.Target["sessionInitTimeout"] = "nonsense"
 			if err := validateOperationTimeoutBudget(scenario); err == nil || !strings.Contains(err.Error(), "sessionInitTimeout") {
@@ -113,7 +113,7 @@ func TestRecoverySessionInitializationBudgetRejectsImpossibleAndUnauthenticatedP
 		}
 	}
 	if err := validateOperationTimeoutBudget(scenario); err != nil {
-		t.Fatalf("restored 10s-per-session and 60s recovery budget rejected: %v", err)
+		t.Fatalf("restored 20s session initialization and 60s recovery budget rejected: %v", err)
 	}
 }
 
@@ -123,7 +123,7 @@ func TestSuiteRejectsLaterImpossibleSessionInitializationBeforeProvisioning(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	modified := strings.Replace(string(raw), "sessionInitTimeout: 10s", "sessionInitTimeout: 30s", 1)
+	modified := strings.Replace(string(raw), "sessionInitTimeout: 20s", "sessionInitTimeout: 58s", 1)
 	if modified == string(raw) {
 		t.Fatal("pending restart lost its explicit session initialization budget")
 	}
@@ -142,7 +142,7 @@ func TestSuiteRejectsLaterImpossibleSessionInitializationBeforeProvisioning(t *t
 	}
 	artifacts := t.TempDir()
 	result, err := RunSuiteFile(context.Background(), suite, Options{DryRun: true, ArtifactRoot: artifacts, ProfileDirs: []string{filepath.Join("..", "..", "..", "tests", "reliability")}})
-	if err == nil || !strings.Contains(err.Error(), "leave time for every node login") || len(result.Results) != 0 {
+	if err == nil || !strings.Contains(err.Error(), "leave time for concurrent endpoint logins") || len(result.Results) != 0 {
 		t.Fatalf("later impossible session plan must stop before provisioning: results=%+v error=%v", result, err)
 	}
 	entries, err := os.ReadDir(artifacts)

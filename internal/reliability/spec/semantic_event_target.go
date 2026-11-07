@@ -65,6 +65,14 @@ func ValidateSemanticEventTarget(eventType string, target map[string]any) error 
 		if _, configured := target["configuredRoute"]; configured && target["requireConfiguredRoute"] != true {
 			return fmt.Errorf("configuredRoute requires requireConfiguredRoute")
 		}
+		if target["expectRebuildFence"] == true {
+			if _, expectedCode := target["expectFailureCode"]; expectedCode {
+				return fmt.Errorf("expectRebuildFence cannot be combined with expectFailureCode")
+			}
+			if target["allowWarnings"] == true {
+				return fmt.Errorf("expectRebuildFence cannot allow arbitrary warnings")
+			}
+		}
 	}
 	if eventType == "semantic-work-assert" && target["analyze"] == true {
 		if _, preserving := target["expectWorkFrom"]; preserving {
@@ -226,7 +234,7 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 			"query": required(nonEmptySemanticString), "limit": optional(semanticInteger(1, 1000)),
 			"minimumScore": optional(finiteSemanticNumber), "filterNodeLabels": optional(semanticStringList),
 			"filterNodeIds": optional(semanticStringList), "filterProperties": optional(semanticStringMap),
-			"expectFailureCode": stringField, "allPages": boolField, "allowWarnings": boolField,
+			"expectFailureCode": stringField, "expectRebuildFence": boolField, "allPages": boolField, "allowWarnings": boolField,
 			"timeout": optional(positiveSemanticDuration), "pollInterval": optional(positiveSemanticDuration),
 			"expectedResultCount": nonNegativeInt, "requireProvenance": boolField, "requireActualRoute": boolField,
 			"broad": boolField, "requireConfiguredRoute": boolField, "configuredRoute": optional(semanticGate),

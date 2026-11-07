@@ -82,6 +82,7 @@ type SemanticSearchEvidence struct {
 	Results                    []SemanticSearchResultItem `json:"results"`
 	Warnings                   []string                   `json:"warnings,omitempty"`
 	RejectedCode               string                     `json:"rejectedCode,omitempty"`
+	RebuildFenceProved         bool                       `json:"rebuildFenceProved,omitempty"`
 	FilterExecutionMode        string                     `json:"filterExecutionMode,omitempty"`
 	ExaminedSemanticCandidates int32                      `json:"examinedSemanticCandidates,omitempty"`
 	EligibleSemanticCandidates int32                      `json:"eligibleSemanticCandidates,omitempty"`
@@ -1269,6 +1270,7 @@ func executeSemanticSearchAssertion(ctx context.Context, resources *provision.Sc
 	}
 	var searchResults []*clientv1.SemanticSearchResult
 	var warnings []string
+	sawNextPageToken := false
 	filterMode := ""
 	var examinedCandidates, eligibleCandidates int32
 	searchPollInterval := durationTarget(target, "pollInterval", 250*time.Millisecond)
@@ -1276,6 +1278,7 @@ retrySearch:
 	for {
 		searchResults = nil
 		warnings = nil
+		sawNextPageToken = false
 		filterMode = ""
 		examinedCandidates = 0
 		eligibleCandidates = 0
@@ -1291,6 +1294,12 @@ retrySearch:
 			if callErr != nil {
 				expectedCode := strings.TrimSpace(fmt.Sprint(target["expectFailureCode"]))
 				actualCode := status.Code(callErr).String()
+				if boolTarget(target, "expectRebuildFence", false) && strings.EqualFold(actualCode, codes.FailedPrecondition.String()) {
+					if len(searchResults) != 0 || len(warnings) != 0 {
+						return SemanticSearchEvidence{Query: query, Results: make([]SemanticSearchResultItem, 0, len(searchResults)), Warnings: warnings, RejectedCode: actualCode}, errors.New("rebuild fence followed partial semantic search evidence")
+					}
+					return SemanticSearchEvidence{Query: query, RejectedCode: actualCode, RebuildFenceProved: true}, nil
+				}
 				if expectedCode != "" && expectedCode != "<nil>" && strings.EqualFold(expectedCode, actualCode) {
 					return SemanticSearchEvidence{Query: query, RejectedCode: actualCode}, nil
 				}
@@ -1319,12 +1328,27 @@ retrySearch:
 				searchResults = append(searchResults, item)
 			}
 			next := strings.TrimSpace(response.GetNextPageToken())
+			if next != "" {
+				sawNextPageToken = true
+			}
 			if next == "" || !boolTarget(target, "allPages", false) {
 				break
 			}
 			request.PageToken = proto.String(next)
 		}
 		break
+	}
+	if boolTarget(target, "expectRebuildFence", false) {
+		if sawNextPageToken {
+			return SemanticSearchEvidence{Query: query, Results: make([]SemanticSearchResultItem, 0, len(searchResults)), Warnings: warnings}, errors.New("rebuild-fenced semantic search returned a page token")
+		}
+		if len(searchResults) != 0 {
+			return SemanticSearchEvidence{Query: query, Results: make([]SemanticSearchResultItem, 0, len(searchResults)), Warnings: warnings}, errors.New("rebuild-fenced semantic search returned results")
+		}
+		if len(warnings) != 1 || !strings.Contains(strings.ToLower(warnings[0]), "requires rebuild") {
+			return SemanticSearchEvidence{Query: query, Results: []SemanticSearchResultItem{}, Warnings: warnings}, errors.New("rebuild-fenced semantic search lacks the explicit requires-rebuild warning")
+		}
+		return SemanticSearchEvidence{Query: query, Results: []SemanticSearchResultItem{}, Warnings: warnings, RebuildFenceProved: true, FilterExecutionMode: filterMode, ExaminedSemanticCandidates: examinedCandidates, EligibleSemanticCandidates: eligibleCandidates}, nil
 	}
 	if expectedCode := strings.TrimSpace(fmt.Sprint(target["expectFailureCode"])); expectedCode != "" && expectedCode != "<nil>" {
 		return SemanticSearchEvidence{Query: query, Results: make([]SemanticSearchResultItem, 0, len(searchResults)), Warnings: warnings}, fmt.Errorf("semantic search succeeded, want failure code %s", expectedCode)

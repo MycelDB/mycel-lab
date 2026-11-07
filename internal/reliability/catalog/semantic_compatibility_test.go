@@ -34,7 +34,7 @@ func TestSemanticCompatibilityCasesResolveAndRetainStrictBoundaries(t *testing.T
 						if event.Type == "semantic-reliability-assert" && event.Target["expectRebuildRequired"] == true && event.Target["requireGenerationAfter"] != nil {
 							fenced = true
 						}
-						if event.Type == "semantic-search-assert" && event.Target["expectFailureCode"] == "FailedPrecondition" {
+						if event.Type == "semantic-search-assert" && event.Target["expectRebuildFence"] == true {
 							rejected = true
 						}
 						if event.Type == "semantic-rebuild" {

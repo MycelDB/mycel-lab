@@ -49,7 +49,7 @@ multi-domain isolation keeps the actor/principal/node UUID fixed, proves indepen
 indexes with broad positive and negative searches, and checks hydration, peer-only
 updates, and retained restart. Configured migration changes model identity, dimensions,
 and vector space independently, requiring a new generation, rebuild-required state,
-and rejected pre-rebuild search before each explicit authorized rebuild. Final search
+and a strict rebuild fence before each explicit authorized rebuild. Final search
 must retain the acknowledged graph revision and exact configured identity/shape.
 
 These implementations and local harness regressions are not full daemon acceptance.

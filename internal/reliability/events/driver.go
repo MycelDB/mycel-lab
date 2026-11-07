@@ -62,7 +62,7 @@ func evidenceSafeLiveSemanticEventTarget(event spec.EventSpec) map[string]any {
 	case "semantic-maintenance-await":
 		allowed = map[string]struct{}{"timeout": {}, "pollInterval": {}}
 	case "semantic-search-assert":
-		allowed = map[string]struct{}{"limit": {}, "minimumScore": {}, "expectedResultCount": {}, "requireProvenance": {}, "requireActualRoute": {}, "allPages": {}, "allowWarnings": {}}
+		allowed = map[string]struct{}{"limit": {}, "minimumScore": {}, "expectedResultCount": {}, "requireProvenance": {}, "requireActualRoute": {}, "allPages": {}, "allowWarnings": {}, "expectRebuildFence": {}}
 	case "semantic-reliability-assert":
 		allowed = map[string]struct{}{"expectRebuildRequired": {}, "maximumUnresolvedGapCount": {}, "requireFreshAtLatest": {}, "minimumSemanticGeneration": {}, "requireDeltaAfterPinned": {}}
 	case "semantic-provider-budget-reconcile":

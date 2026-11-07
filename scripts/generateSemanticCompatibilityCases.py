@@ -20,7 +20,7 @@ def phase(name, *events):
 def restart():
     return [event('rolling-restart', scope='cluster'),
             event('cluster-recovery-wait', timeout='60s', interval='200ms', commandTimeout='3s',
-                  sessionInitTimeout='10s', minimumStablePolls=3, reuseEndpointSessions=True)]
+                  sessionInitTimeout='20s', minimumStablePolls=3, reuseEndpointSessions=True)]
 
 
 def document(name, proof):
@@ -37,7 +37,9 @@ fixtures and regenerate; generated definitions are not runtime qualification.
 
 Public graph commits, exact semantic scope/route/provenance, negative controls,
 and record/generation persistence contribute directly to the run verdict. No
-lexical/hybrid/scan fallback, warning, missing diagnostic, or repair reset passes.
+lexical/hybrid/scan fallback, stale record, or missing rebuild fence passes. A
+rebuild-fenced search may use either the API's explicit FailedPrecondition or its
+v0.21.4 empty-result response with exactly one requires-rebuild warning.
 
 ## Topology
 
@@ -60,8 +62,8 @@ flowchart LR
 
 The adjacent YAML defines five finite phases, including positive baseline,
 controlled compatibility/isolation transitions, and retained-restart persistence.
-Only migration uses explicit authorized rebuilds, after proving rejection and
-advanced generation. Isolation never repairs its indexes to mask leakage.
+Only migration uses explicit authorized rebuilds, after proving the rebuild
+fence and advanced generation. Isolation never repairs its indexes to mask leakage.
 
 ## Actors
 
@@ -88,8 +90,9 @@ checks retain verdicts, not confidential graph content.
 
 Changed principal/space masquerading as domain isolation, empty decoy indexes,
 rule-filtered queries masquerading as broad isolation, wrong-domain hydration,
-non-advancing generation, stale model/vector identity, accepted pre-rebuild search,
-replayed post-restart records, and incomplete cleanup all fail closed. Failed
+non-advancing generation, stale model/vector identity, a missing or result-bearing
+pre-rebuild fence, replayed post-restart records, and incomplete cleanup all fail
+closed. Failed
 mutations are not automatically resubmitted.
 
 ## When to run
@@ -154,7 +157,7 @@ def generated_files():
                       expectedPayloadText='axis-0', **extra)
     def fence(previous):
         return [event('semantic-reliability-assert', expectRebuildRequired=True, requireGenerationAfter=previous),
-                event('semantic-search-assert', query='axis-0', expectFailureCode='FailedPrecondition')]
+                event('semantic-search-assert', query='axis-0', expectRebuildFence=True)]
     scenario['phases'] = [
         phase('establish-old-configured-model-and-vector-shape',
               event('semantic-node-create', nodeId=node, labels=['Document'], text='axis-0', captureRevisionAs='graph-commit'),
@@ -187,7 +190,7 @@ def generated_files():
     ]
     directory = f'tests/reliability/scenarios/{name}'
     files[f'{directory}/{name}.yaml'] = definition(scenario)
-    files[f'{directory}/{name}.md'] = document(name, 'Migrate to a distinct configured model/profile/endpoint/vector-store route at the same vector shape, then independently change model dimensions and vector-space identity. Unselected route creation must not rotate generation. Each incompatible change must advance generation and reject search until an explicit authorized rebuild. Every rebuilt record must carry the selected route, exact dimensions/vector space, a new configuration/record identity, and the unchanged acknowledged graph revision. Final retained restart must preserve that record.')
+    files[f'{directory}/{name}.md'] = document(name, 'Migrate to a distinct configured model/profile/endpoint/vector-store route at the same vector shape, then independently change model dimensions and vector-space identity. Unselected route creation must not rotate generation. Each incompatible change must advance generation and fence search until an explicit authorized rebuild. Every rebuilt record must carry the selected route, exact dimensions/vector space, a new configuration/record identity, and the unchanged acknowledged graph revision. Final retained restart must preserve that record.')
     return files
 
 

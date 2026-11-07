@@ -106,6 +106,61 @@ func TestSemanticSearchRetriesOnlyTransientFailuresWhenConfigured(t *testing.T) 
 	}
 }
 
+func TestSemanticSearchRebuildFenceAcceptsEmptyWarning(t *testing.T) {
+	resources := semanticSearchProbeFixture(t, func(context.Context, *clientv1.SemanticSearchRequest) (*clientv1.SemanticSearchResponse, error) {
+		return &clientv1.SemanticSearchResponse{Warnings: []string{`rule model-migration binding "search" requires rebuild`}}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	evidence, err := executeSemanticSearchAssertion(ctx, resources, map[string]any{"query": "axis-0", "expectRebuildFence": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.RebuildFenceProved || len(evidence.Results) != 0 || len(evidence.Warnings) != 1 {
+		t.Fatalf("evidence=%+v, want an empty-result rebuild fence", evidence)
+	}
+}
+
+func TestSemanticSearchRebuildFenceAcceptsFailedPrecondition(t *testing.T) {
+	resources := semanticSearchProbeFixture(t, func(context.Context, *clientv1.SemanticSearchRequest) (*clientv1.SemanticSearchResponse, error) {
+		return nil, status.Error(codes.FailedPrecondition, "rebuild required")
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	evidence, err := executeSemanticSearchAssertion(ctx, resources, map[string]any{"query": "axis-0", "expectRebuildFence": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.RebuildFenceProved || evidence.RejectedCode != codes.FailedPrecondition.String() {
+		t.Fatalf("evidence=%+v, want FailedPrecondition rebuild fence", evidence)
+	}
+}
+
+func TestSemanticSearchRebuildFenceRejectsUnsafeSuccess(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *clientv1.SemanticSearchResponse
+	}{
+		{name: "missing warning", response: &clientv1.SemanticSearchResponse{}},
+		{name: "returned result", response: &clientv1.SemanticSearchResponse{
+			Results:  []*clientv1.SemanticSearchResult{semanticSearchProbeResult("stale-node")},
+			Warnings: []string{"rule model-migration binding \"search\" requires rebuild"},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resources := semanticSearchProbeFixture(t, func(context.Context, *clientv1.SemanticSearchRequest) (*clientv1.SemanticSearchResponse, error) {
+				return test.response, nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if _, err := executeSemanticSearchAssertion(ctx, resources, map[string]any{"query": "axis-0", "expectRebuildFence": true}); err == nil {
+				t.Fatal("unsafe rebuild-fence response unexpectedly passed")
+			}
+		})
+	}
+}
+
 func TestSemanticSearchRetryRestartsPaginationWithoutPartialEvidence(t *testing.T) {
 	var calls atomic.Int64
 	resources := semanticSearchProbeFixture(t, func(_ context.Context, request *clientv1.SemanticSearchRequest) (*clientv1.SemanticSearchResponse, error) {

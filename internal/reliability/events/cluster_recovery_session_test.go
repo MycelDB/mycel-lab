@@ -114,15 +114,25 @@ func TestValidateReusableClusterReadinessMatchesDimensionedContract(t *testing.T
 type clusterRecoveryGRPCServer struct {
 	commonv1.UnimplementedAuthServiceServer
 	adminv1.UnimplementedAdminClusterServiceServer
-	loginCalls     atomic.Int64
-	loginDelay     time.Duration
-	statusCalls    atomic.Int64
-	raftGroupCalls atomic.Int64
-	committedIndex atomic.Uint64
+	loginCalls          atomic.Int64
+	loginDelay          time.Duration
+	activeLoginCalls    atomic.Int64
+	maxConcurrentLogins atomic.Int64
+	statusCalls         atomic.Int64
+	raftGroupCalls      atomic.Int64
+	committedIndex      atomic.Uint64
 }
 
 func (s *clusterRecoveryGRPCServer) Login(context.Context, *commonv1.LoginRequest) (*commonv1.LoginResponse, error) {
 	s.loginCalls.Add(1)
+	active := s.activeLoginCalls.Add(1)
+	for {
+		observed := s.maxConcurrentLogins.Load()
+		if active <= observed || s.maxConcurrentLogins.CompareAndSwap(observed, active) {
+			break
+		}
+	}
+	defer s.activeLoginCalls.Add(-1)
 	if s.loginDelay > 0 {
 		// Model an ambiguous timeout: the session might already have been
 		// created even though the caller never sees its delayed response.
@@ -163,7 +173,7 @@ func TestReusableClusterRecoverySessionsAuthenticateOncePerEndpoint(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &clusterRecoveryGRPCServer{}
+	server := &clusterRecoveryGRPCServer{loginDelay: 50 * time.Millisecond}
 	grpcServer := grpc.NewServer()
 	commonv1.RegisterAuthServiceServer(grpcServer, server)
 	adminv1.RegisterAdminClusterServiceServer(grpcServer, server)
@@ -203,6 +213,9 @@ func TestReusableClusterRecoverySessionsAuthenticateOncePerEndpoint(t *testing.T
 	}
 	if got := server.loginCalls.Load(); got != 3 {
 		t.Fatalf("login calls=%d, want one per endpoint", got)
+	}
+	if got := server.maxConcurrentLogins.Load(); got != 3 {
+		t.Fatalf("max concurrent logins=%d, want all endpoint sessions initialized concurrently", got)
 	}
 	if got := server.statusCalls.Load(); got != 9 {
 		t.Fatalf("status calls=%d, want three endpoints across three polls", got)

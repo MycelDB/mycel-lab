@@ -142,7 +142,7 @@ phases:
         type: "semantic-search-assert"
         target:
           query: "axis-0"
-          expectFailureCode: "FailedPrecondition"
+          expectRebuildFence: true
       -
         type: "semantic-rebuild"
         target:
@@ -190,7 +190,7 @@ phases:
         type: "semantic-search-assert"
         target:
           query: "axis-0"
-          expectFailureCode: "FailedPrecondition"
+          expectRebuildFence: true
       -
         type: "semantic-rebuild"
         target:
@@ -238,7 +238,7 @@ phases:
         type: "semantic-search-assert"
         target:
           query: "axis-0"
-          expectFailureCode: "FailedPrecondition"
+          expectRebuildFence: true
       -
         type: "semantic-rebuild"
         target:
@@ -282,7 +282,7 @@ phases:
           timeout: "60s"
           interval: "200ms"
           commandTimeout: "3s"
-          sessionInitTimeout: "10s"
+          sessionInitTimeout: "20s"
           minimumStablePolls: 3
           reuseEndpointSessions: true
       -

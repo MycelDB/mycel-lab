@@ -4,8 +4,8 @@ Issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
 Completion batch: PR #93, clean merge `6615c17`. Follow-up corrections: PR #94
 (pending reliability), PR #95 (transport evidence), PR #96 (maintenance health),
-and disabled-rule quiescence. This audit separates implementation, all seven
-failed approved executions and new harness-only evidence; it is not issue closure.
+and disabled-rule quiescence. This audit separates implementation, all eight
+failed approved executions and the successful ninth exact-source qualification; it records closure evidence for the declared aggregate scope.
 
 ## Evidence levels
 
@@ -13,11 +13,11 @@ failed approved executions and new harness-only evidence; it is not issue closur
   three scenarios / 20 phases. Only that exact scope/image was qualified.
 - **Landed pending-restart tranche:** PR #92, Lab `3b1c222`. Its clean four-case /
   25-phase v0.21.4 bundle was prepared and planned, **not destructively executed**.
-- **Completion batch (runtime unqualified):** adds actual out-of-order publication control, nine
+- **Completion batch:** adds actual out-of-order publication control, nine
   protocol-failure cases, composition contracts/gates, audit hardening, same-space
   domain isolation, and independent configured model/dimension/vector-space migration.
   Canonical aggregate definitions are **16 scenarios / 65 phases**. Local tests
-  and dry-runs are harness evidence, never daemon/runtime evidence.
+  and dry-runs were followed by the exact successful runtime qualification below.
 - **Approved v0.21.4 run (failed):** clean `6615c17` passed contract/recovery,
   then stopped at pending capture before any pending-case restart. Two scenarios
   passed, one failed, thirteen were not run; 17 phases passed, one failed, 47
@@ -76,7 +76,7 @@ failed approved executions and new harness-only evidence; it is not issue closur
 - **Recovery session initialization correction (source only):** the shared
   recovery waiter now checks transport without authentication within the
   declared 60s wait. All four affected Compose fixtures declare a separate
-  10s-per-node single-login bound and retain 3s read-only RPC bounds, exact
+  20s concurrent single-login bound and retain 3s read-only RPC bounds, exact
   Raft identity/groups/progress and stable health polls. Login creates a
   session: an ambiguous timeout is **never resubmitted**. Invalid budgets fail
   before provisioning. This code and planning cannot substitute for runtime
@@ -93,6 +93,29 @@ failed approved executions and new harness-only evidence; it is not issue closur
   final/cluster oracles, cleanup, absence and redaction passed. The 362-file
   inventory is preserved; this is not aggregate acceptance. The one-shot
   approval was consumed without retry or repair.
+- **Eighth approved v0.21.4 run (failed):** clean candidate `02c1120` with
+  bundle `53bc36da74ab4cb0e6816aac960c2ed1270d515793a06acdbb964a9fdb738dda`
+  passed 15 of 16 scenarios. All three migration invalidation fences accepted
+  v0.21.4's empty zero-result response with exactly one requires-rebuild warning,
+  and the first four migration phases passed. The final retained-restart phase
+  failed before recovery polling: reusable endpoint-session initialization for
+  ordinal 0 hit its 10-second Login deadline after the rolling restart, while
+  Raft was still electing leaders. Cleanup, absence and all 16 redaction scans
+  passed. The aggregate remains unqualified; the approval was consumed without
+  retry.
+- **Post-restart session-concurrency correction (source only):** reusable
+  recovery sessions now initialize their one-shot authenticated sessions
+  concurrently, with a bounded 20-second window and an explicit reserve for
+  readiness/Raft RPCs and stable polls. A timed-out Login remains never retried,
+  and successful partial sessions are closed on failure.
+- **Ninth approved v0.21.4 run (qualified):** clean candidate `6b17781` with
+  bundle `94ff95c2c30e9c13a6a464debe6841e203abe2ccbe6fd9fc2dfcf1f210d6c77e`
+  passed all **16 scenarios / 65 phases**. The migration fences accepted the
+  exact v0.21.4 warning response, retained restart passed, all 16 redaction
+  scans passed, and all cleanup/absence checks reported zero residual resources.
+  This is the authoritative runtime evidence for the declared deterministic
+  aggregate; unsupported native enrichment and hosted live execution remain
+  explicit non-goals.
 - **Operator-retry generation correction (source only):** automatic retryable
   failures keep work generation; public operator retry must return the same
   scoped ID/revision and attempt, pending with cleared failure/claim/backoff,
@@ -112,21 +135,39 @@ failed approved executions and new harness-only evidence; it is not issue closur
 
 | # | Criterion | Implementation / evidence | Remaining acceptance |
 | --- | --- | --- | --- |
-| 1 | Committed content is projected, embedded, indexed, and returned from the semantic index | Canonical contract, direct semantic RPC, record/source revision/generation/configuration/model/vector identity assertions. Historical baseline qualified. | Clean 6615c17 contract passed on v0.21.4, but its aggregate failed later; the changed harness still requires fresh full qualification. |
-| 2 | Positive assertions cannot pass through lexical/hybrid/scan fallback | Direct semantic search only; strict IDs/provenance, warnings rejected, negative queries. | Preserve these controls in fresh execution; plausible hydration is not proof. |
-| 3 | Backfill/create/update/delete/transactions/freshness/restart/persistence/rebuild | Contract and recovery baseline qualified on v0.21.3. `589df4c` passed both pending-work retained-data restarts, same-work resumption and post-second-restart no-replay checks. | That same aggregate failed later at the malformed-JSON fault case; its partial success does not qualify unrun cases or this new source. |
-| 4 | Older/out-of-order responses cannot overwrite newer graph state | `589df4c` passed the controlled held-older/newer publication, explicit supersession, unchanged newer record, stale-search rejection, fresh zero-gap frontier and corrected emulator accounting. | This exact scenario passed, but the aggregate failed later; no combination of partial runs qualifies #46 or the new source. |
-| 5 | Space/domain and authorization isolation | Historical contract has outsider-scope and unauthorized-principal controls. New `compose-semantic-domain-isolation` uses the same actor/principal/space/node UUID, different domains, independent indexes, broad positive/cross-query-negative searches without rule/binding selectors, and exact hydrated payload/provenance. Peer-only update and retained restart preserve the other domain's record. | New case has local regressions and planning evidence only; fresh v0.21.4 runtime qualification remains required. Different spaces alone are not domain-isolation proof. |
-| 6 | Dimension/model/projection changes fail closed or require migration/rebuild | Existing projection-change and malformed-vector tests remain separate. New `compose-semantic-model-migration` changes selected configured model, model dimensions, and vector-space identity independently. Each requires generation advancement, explicit rebuild-required state, pre-rebuild `FailedPrecondition`, and authorized rebuild. Post-rebuild search checks changed configuration/record identity, exact configured route/shape, unchanged acknowledged graph revision, and retained-restart preservation. | New case has local regressions and planning evidence only; actual v0.21.4 configuration invalidation, fencing, rebuild, and persistence must still be qualified. No daemon/API modification is inferred from harness tests. |
+| 1 | Committed content is projected, embedded, indexed, and returned from the semantic index | Canonical contract, direct semantic RPC, record/source revision/generation/configuration/model/vector identity assertions. Historical baseline qualified. | Passed in the exact ninth runtime qualification. |
+| 2 | Positive assertions cannot pass through lexical/hybrid/scan fallback | Direct semantic search only; strict IDs/provenance, warnings rejected, negative queries. | Passed in the exact ninth runtime qualification. |
+| 3 | Backfill/create/update/delete/transactions/freshness/restart/persistence/rebuild | Contract and recovery baseline qualified on v0.21.3. `589df4c` passed both pending-work retained-data restarts, same-work resumption and post-second-restart no-replay checks. | Passed in the exact ninth runtime qualification, including retained restart and rebuild persistence. |
+| 4 | Older/out-of-order responses cannot overwrite newer graph state | `589df4c` passed the controlled held-older/newer publication, explicit supersession, unchanged newer record, stale-search rejection, fresh zero-gap frontier and corrected emulator accounting. | Passed in the exact ninth runtime qualification. |
+| 5 | Space/domain and authorization isolation | Historical contract has outsider-scope and unauthorized-principal controls. New `compose-semantic-domain-isolation` uses the same actor/principal/space/node UUID, different domains, independent indexes, broad positive/cross-query-negative searches without rule/binding selectors, and exact hydrated payload/provenance. Peer-only update and retained restart preserve the other domain's record. | Passed in the exact ninth runtime qualification. Different spaces alone are not domain-isolation proof. |
+| 6 | Dimension/model/projection changes fail closed or require migration/rebuild | Existing projection-change and malformed-vector tests remain separate. New `compose-semantic-model-migration` changes selected configured model, model dimensions, and vector-space identity independently. Each requires generation advancement, explicit rebuild-required state, and a strict pre-rebuild fence (empty results with an explicit requires-rebuild warning or `FailedPrecondition`) before authorized rebuild. Post-rebuild search checks changed configuration/record identity, exact configured route/shape, unchanged acknowledged graph revision, and retained-restart preservation. | Passed in the exact ninth runtime qualification. No daemon/API modification is inferred from harness tests. |
 | 7 | Capability-driven profiles; no assumption every provider embeds | Independent generation/embedding/enrichment/structured-output/routing declarations; ordered `providerStages`, exact per-stage profile source/model/endpoint provenance, typed dataflow, finite combined wall-clock ceiling. Tests include generation-only provider plus distinct embeddings. | Native composed execution remains API/adapter-blocked on v0.21.4. Initial forward-compatible contract is implemented; do not invent native execution or require new vendor connectors as an unstated non-goal reversal. |
-| 8 | Deterministic tests require no external credentials | Deterministic/emulator profiles reject secret references; new cases use only direct local fixtures or the local emulator. Credential-lookup negative tests. | Fresh environment execution of expanded cases, not hosted-provider access. |
+| 8 | Deterministic tests require no external credentials | Deterministic/emulator profiles reject secret references; new cases use only direct local fixtures or the local emulator. Credential-lookup negative tests. | Passed in the exact ninth runtime qualification without external credentials. |
 | 9 | Manual live suites, non-gating initially | Existing canonical manual-live suite and protected workflow. | No hosted execution is claimed or automatically required for closure. |
 | 10 | Stable live invariants, not exact hosted scores/vectors | Existing live top-K/lifecycle/provenance/budget invariants. | Keep separate from deterministic exact-vector assertions; live runtime evidence remains unclaimed. |
-| 11 | Protected future GitHub execution, finite budgets, safe artifacts | Existing protected environment/workflow controls; 36 workflow-script regressions and policy checks. | Repository environment approval settings and each future run remain operator responsibilities; unit tests cannot grant approval. |
+| 11 | Protected future GitHub execution, finite budgets, safe artifacts | Existing protected environment/workflow controls; 36 workflow-script regressions and policy checks. | Bundle preflight, finite budgets, safe artifacts, redaction and cleanup passed for the ninth qualification; future hosted approvals remain operator responsibilities. |
 | 12 | Explicit live runs fail missing configuration/credentials | Existing authenticated capability discovery followed by credential resolution, refusal of unsupported budgets, and configuration failures. New composition capability gate precedes any stage secret lookup. | Preserve fail-closed behavior; a dry-run intentionally does not resolve credentials. |
-| 13 | Every subprocess/provider/convergence operation is context-bounded | Existing finite harness/finalization budgets; new finite request sequences, bounded gates/observations/listings, operation/parent deadlines, bounded goroutine cleanup. Audit fixes the legacy maintenance waiter so its timeout bounds RPCs too. | Runtime timing evidence still required; local deadline regressions are not provider/cluster qualification. |
-| 14 | Build/provider/model/index provenance and safe verdict artifacts | Existing sanitized artifacts and safety scanner; new typed ordering/failure/work evidence, no raw provider errors or payloads. Audit rejects the `invalid` build-command sentinel instead of accepting a nonempty unknown identity. | New clean-source build/runtime identities, successful final oracles, mandatory cleanup/absence, and redaction/artifact verification on the exact candidate. |
-| 15 | Operator docs for deterministic/emulator/live/future CI modes | Existing operator docs, generated case docs, composition contract/limitations, this acceptance mapping. | Attach exact new execution results when collected; do not relabel older evidence. |
+| 13 | Every subprocess/provider/convergence operation is context-bounded | Existing finite harness/finalization budgets; new finite request sequences, bounded gates/observations/listings, operation/parent deadlines, bounded goroutine cleanup. Audit fixes the legacy maintenance waiter so its timeout bounds RPCs too. | Passed in the exact ninth runtime qualification. |
+| 14 | Build/provider/model/index provenance and safe verdict artifacts | Existing sanitized artifacts and safety scanner; new typed ordering/failure/work evidence, no raw provider errors or payloads. Audit rejects the `invalid` build-command sentinel instead of accepting a nonempty unknown identity. | Exact clean-source bundle identities, successful final oracles, mandatory cleanup/absence, and redaction verification all passed in the ninth qualification. |
+| 15 | Operator docs for deterministic/emulator/live/future CI modes | Existing operator docs, generated case docs, composition contract/limitations, this acceptance mapping. | Exact ninth-run evidence is attached below and must remain tied to its bundle/candidate identities. |
+
+## Ninth qualification evidence
+
+The authoritative deterministic aggregate run used clean candidate
+`6b17781e17b2182983ceb22d35590b2eb246e9b5` and immutable v0.21.4 daemon image
+`docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7`.
+The release execution bundle was validated before provisioning:
+
+- Bundle: `issue46-fence-v3-release.yaml`
+- Bundle SHA-256: `94ff95c2c30e9c13a6a464debe6841e203abe2ccbe6fd9fc2dfcf1f210d6c77e`
+- Validation evidence SHA-256: `9eb9494e70ad9ae2f1edf2748f10a95999ee032ee1ab927b0d78dbb5316ffdfc`
+- Destructive artifacts: `tmp/issue46-fence-v3-destructive/`
+- Result: 16/16 scenarios and 65/65 phases passed
+- Safety: 16/16 redaction scans passed; 16/16 cleanup/absence checks passed with zero residual containers, networks, volumes, or clusters
+
+The migration scenario recorded `rebuildFenceProved: true` for all three
+incompatible transitions, with zero results and exactly one requires-rebuild
+warning in each response. No external credentials or hosted provider were used.
 
 ## New failure matrix
 
@@ -181,16 +222,15 @@ is held. No backfill, analysis, or repair follows release to hide a stale overwr
   criterion passed**. The two identified coverage gaps now have independent Lab
   scenarios, strict public-API assertions, local regressions, and planning evidence.
   Their runtime acceptance remains open rather than hidden behind a checklist tick.
-- None of the seven approved aggregates completed. The `574e690` recovery,
-  `cbc4274` disabled-rule, `81289a7` topology/budget, `8b13721`
-  per-input-emulator, `dc97cd4` reusable-session and `589df4c` malformed-fault
-  oracle failures are not overridden by other partial scenario passes. The
-  latest run stopped with seven unstarted cases; the aggregate remains
-  unqualified. All seven approvals are consumed.
-- #46 stays open. Final checklist closure requires fresh exact-source runtime
-  evidence and reconciliation against each criterion; native composed execution
-  remains explicitly capability-blocked rather than silently substituted.
+- The first eight approved v0.21.4 aggregates failed at bounded harness/oracle or
+  recovery-environment gates and do not transfer qualification. The ninth exact
+  candidate completed all 16 scenarios and 65 phases; its bundle, cleanup,
+  redaction, and absence evidence are authoritative for this declared aggregate.
+- #46's semantic graph-index reliability aggregate is qualified for the
+  deterministic v0.21.4 scope recorded here. Native composed enrichment and
+  hosted live execution remain explicit non-goals and are not silently substituted.
 - The prior frozen `3b1c222` four-case bundle is valid only for its old subset. It
-  must not be reused as qualification of this new working tree or aggregate.
-- No new PR, commit, hosted-provider call, destructive run, remote deployment
-  change, or release publication is authorized by this document.
+  must not be reused as qualification of this aggregate.
+- The exact bundle and sanitized runtime evidence are attached to the issue and
+  linked from this audit; any future runtime change requires a new candidate,
+  bundle, and approval.

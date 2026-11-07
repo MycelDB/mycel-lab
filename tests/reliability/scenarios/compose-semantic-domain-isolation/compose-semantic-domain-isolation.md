@@ -11,7 +11,9 @@ Prove domain-only isolation with the same authorized principal, the same space, 
 
 Public graph commits, exact semantic scope/route/provenance, negative controls,
 and record/generation persistence contribute directly to the run verdict. No
-lexical/hybrid/scan fallback, warning, missing diagnostic, or repair reset passes.
+lexical/hybrid/scan fallback, stale record, or missing rebuild fence passes. A
+rebuild-fenced search may use either the API's explicit FailedPrecondition or its
+v0.21.4 empty-result response with exactly one requires-rebuild warning.
 
 ## Topology
 
@@ -34,8 +36,8 @@ flowchart LR
 
 The adjacent YAML defines five finite phases, including positive baseline,
 controlled compatibility/isolation transitions, and retained-restart persistence.
-Only migration uses explicit authorized rebuilds, after proving rejection and
-advanced generation. Isolation never repairs its indexes to mask leakage.
+Only migration uses explicit authorized rebuilds, after proving the rebuild
+fence and advanced generation. Isolation never repairs its indexes to mask leakage.
 
 ## Actors
 
@@ -62,8 +64,9 @@ checks retain verdicts, not confidential graph content.
 
 Changed principal/space masquerading as domain isolation, empty decoy indexes,
 rule-filtered queries masquerading as broad isolation, wrong-domain hydration,
-non-advancing generation, stale model/vector identity, accepted pre-rebuild search,
-replayed post-restart records, and incomplete cleanup all fail closed. Failed
+non-advancing generation, stale model/vector identity, a missing or result-bearing
+pre-rebuild fence, replayed post-restart records, and incomplete cleanup all fail
+closed. Failed
 mutations are not automatically resubmitted.
 
 ## When to run

@@ -239,7 +239,7 @@ Each assertion emits structured events and a final verdict section.
 - independent same-space domains with the same principal/node UUID, broad searches
   without rule/binding selectors, exact hydration, peer-only updates, and retained restart;
 - separate selected-model, dimension, and vector-space changes requiring generation
-  advancement and rejected search before explicit authorized rebuild, followed by exact
+  advancement and a strict rebuild fence before explicit authorized rebuild, followed by exact
   configured identity/shape/provenance and retained-record checks;
 - artifact redaction.
 

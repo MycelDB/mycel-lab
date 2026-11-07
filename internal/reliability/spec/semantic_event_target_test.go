@@ -41,6 +41,10 @@ func TestValidateSemanticEventTargetAcceptsTypedContracts(t *testing.T) {
 			},
 		},
 		{
+			eventType: "semantic-search-assert",
+			target:    map[string]any{"query": "axis-0", "expectRebuildFence": true},
+		},
+		{
 			eventType: "semantic-rebuild",
 			target: map[string]any{
 				"backfillLimit": 2, "maintenanceBatchLimit": 64, "maxCatchupIterations": 64,
@@ -76,6 +80,8 @@ func TestValidateSemanticEventTargetRejectsUntypedOrUnknownAssertions(t *testing
 		{name: "limit out of range", eventType: "semantic-search-assert", target: map[string]any{"query": "axis-0", "limit": 1001}, contains: "between 1 and 1000"},
 		{name: "zero search timeout", eventType: "semantic-search-assert", target: map[string]any{"query": "axis-0", "timeout": "0s"}, contains: "positive duration"},
 		{name: "invalid search poll interval", eventType: "semantic-search-assert", target: map[string]any{"query": "axis-0", "pollInterval": "not-a-duration"}, contains: "duration"},
+		{name: "rebuild fence with expected code", eventType: "semantic-search-assert", target: map[string]any{"query": "axis-0", "expectRebuildFence": true, "expectFailureCode": "FailedPrecondition"}, contains: "cannot be combined"},
+		{name: "rebuild fence with arbitrary warnings", eventType: "semantic-search-assert", target: map[string]any{"query": "axis-0", "expectRebuildFence": true, "allowWarnings": true}, contains: "cannot allow"},
 		{name: "emulator authorization typo", eventType: "semantic-provider-emulator-assert", target: map[string]any{"authorization": "abesent"}, contains: "present or absent"},
 		{name: "emulator authorization type", eventType: "semantic-provider-emulator-assert", target: map[string]any{"authorization": true}, contains: "string"},
 		{name: "emulator count map type", eventType: "semantic-provider-emulator-assert", target: map[string]any{"minimumOutcomes": []any{3}}, contains: "object"},

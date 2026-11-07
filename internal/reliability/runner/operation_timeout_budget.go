@@ -44,8 +44,42 @@ func validateOperationTimeoutBudget(scenario spec.ResolvedScenario) error {
 					}
 					text, ok := rawInit.(string)
 					initTimeout, err := time.ParseDuration(text)
-					if !ok || err != nil || initTimeout <= 0 || scenario.Cluster.Nodes <= 0 || initTimeout >= maxWait/time.Duration(scenario.Cluster.Nodes) {
-						return fmt.Errorf("scenario %s phase %s: sessionInitTimeout must leave time for every node login and recovery polling within %s", scenario.Metadata.Name, phase.Name, maxWait)
+					if !ok || err != nil || initTimeout <= 0 || scenario.Cluster.Nodes <= 0 {
+						return fmt.Errorf("scenario %s phase %s: sessionInitTimeout must leave time for concurrent endpoint logins and recovery polling within %s", scenario.Metadata.Name, phase.Name, maxWait)
+					}
+					commandBudget := 10 * time.Second
+					if rawCommand, configured := event.Target["commandTimeout"]; configured {
+						if commandText, valid := rawCommand.(string); valid {
+							if parsed, parseErr := time.ParseDuration(commandText); parseErr == nil && parsed > 0 {
+								commandBudget = parsed
+							}
+						}
+					}
+					pollInterval := 5 * time.Second
+					if rawInterval, configured := event.Target["interval"]; configured {
+						if intervalText, valid := rawInterval.(string); valid {
+							if parsed, parseErr := time.ParseDuration(intervalText); parseErr == nil && parsed > 0 {
+								pollInterval = parsed
+							}
+						}
+					}
+					stablePolls := 1
+					if rawStablePolls, configured := event.Target["minimumStablePolls"]; configured {
+						switch value := rawStablePolls.(type) {
+						case int:
+							stablePolls = value
+						case int64:
+							stablePolls = int(value)
+						case float64:
+							stablePolls = int(value)
+						}
+					}
+					if stablePolls < 1 {
+						stablePolls = 1
+					}
+					recoveryBudget := commandBudget + pollInterval*time.Duration(stablePolls-1)
+					if recoveryBudget >= maxWait || initTimeout >= maxWait-recoveryBudget {
+						return fmt.Errorf("scenario %s phase %s: sessionInitTimeout must leave time for concurrent endpoint logins and recovery polling within %s", scenario.Metadata.Name, phase.Name, maxWait)
 					}
 				}
 			}
