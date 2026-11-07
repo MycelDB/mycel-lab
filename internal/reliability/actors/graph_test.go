@@ -15,6 +15,23 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func TestGraphNodePayloadTextHonorsConfiguredSize(t *testing.T) {
+	text := graphNodePayloadText("actor-1", 7, 768)
+	if len(text) != 768 {
+		t.Fatalf("payload length=%d, want 768", len(text))
+	}
+	if graphNodePayloadText("actor-1", 7, 0) != "actor-1 7" {
+		t.Fatalf("zero-sized payload changed the deterministic base text")
+	}
+}
+
+func TestGraphProfileRejectsExcessiveNodePayloadSize(t *testing.T) {
+	_, err := GraphProfileFromBehavior(map[string]any{"transaction": map[string]any{"dataModel": map[string]any{"nodePayloadBytes": (1 << 20) + 1}}})
+	if err == nil {
+		t.Fatal("GraphProfileFromBehavior() error = nil, want payload-size validation")
+	}
+}
+
 func TestGraphOperationGenerationIsDeterministic(t *testing.T) {
 	profile := testGraphProfile()
 	state := KnownState{Nodes: []string{"n1", "n2"}, Edges: map[string]bool{}}

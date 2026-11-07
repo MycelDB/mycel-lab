@@ -64,8 +64,9 @@ type OperationProfile struct {
 }
 
 type DataModelProfile struct {
-	NodeLabels []string `json:"nodeLabels"`
-	EdgeTypes  []string `json:"edgeTypes"`
+	NodeLabels       []string `json:"nodeLabels"`
+	EdgeTypes        []string `json:"edgeTypes"`
+	NodePayloadBytes int      `json:"nodePayloadBytes"`
 }
 
 type RetryProfile struct {
@@ -115,6 +116,9 @@ func GraphProfileFromBehavior(behavior map[string]any) (GraphProfile, error) {
 	}
 	if profile.Transaction.FallbackOperation == "" {
 		profile.Transaction.FallbackOperation = "createNode"
+	}
+	if profile.Transaction.DataModel.NodePayloadBytes < 0 || profile.Transaction.DataModel.NodePayloadBytes > 1<<20 {
+		return GraphProfile{}, fmt.Errorf("transaction.dataModel.nodePayloadBytes must be between 0 and %d", 1<<20)
 	}
 	if len(profile.Transaction.DataModel.NodeLabels) == 0 {
 		profile.Transaction.DataModel.NodeLabels = []string{"Node"}
@@ -448,7 +452,7 @@ func (a *GraphActor) executeGraphTransaction(ctx context.Context, client graphTr
 		switch op.Type {
 		case oracle.OperationCreateNode:
 			nodeID := op.NodeID
-			payload, _ := structpb.NewStruct(map[string]any{"text": fmt.Sprintf("%s %d", a.ID, tx.Sequence)})
+			payload, _ := structpb.NewStruct(map[string]any{"text": graphNodePayloadText(a.ID, tx.Sequence, a.Profile.Transaction.DataModel.NodePayloadBytes)})
 			if _, err := client.CreateNode(ctx, graphTx, &clientv1.NodeCreate{NodeId: &nodeID, Labels: []string{op.Label}, Properties: props, Payload: payload}); err != nil {
 				return err
 			}
@@ -516,6 +520,14 @@ func (a *GraphActor) executeGraphTransaction(ctx context.Context, client graphTr
 	}
 	committed = true
 	return nil
+}
+
+func graphNodePayloadText(actorID string, sequence int64, targetBytes int) string {
+	text := fmt.Sprintf("%s %d", actorID, sequence)
+	if targetBytes > len(text) {
+		text += strings.Repeat("x", targetBytes-len(text))
+	}
+	return text
 }
 
 func graphCommitIdempotencyKey(actorID string, sequence int64) string {
