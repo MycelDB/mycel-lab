@@ -2,9 +2,18 @@ services:
   myceld-a:
     ports:
       - "19315:9091"
+    environment:
+      MYCELD_GRAPH_WRITE_TRACE: "true"
+      MYCELD_GRAPH_WRITE_TRACE_THRESHOLD: "0"
   myceld-b:
     ports:
       - "19316:9091"
+    environment:
+      MYCELD_GRAPH_WRITE_TRACE: "true"
+      MYCELD_GRAPH_WRITE_TRACE_THRESHOLD: "0"
   myceld-c:
     ports:
       - "19317:9091"
+    environment:
+      MYCELD_GRAPH_WRITE_TRACE: "true"
+      MYCELD_GRAPH_WRITE_TRACE_THRESHOLD: "0"

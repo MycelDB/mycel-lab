@@ -38,6 +38,72 @@ type ActorEvent struct {
 	Payload     map[string]any     `json:"payload,omitempty"`
 }
 
+const maxEvidenceTransactionOperations = 16
+
+// EvidenceSafeActorEvent keeps actor artifacts bounded and excludes operation properties.
+// The full transaction remains available to the in-memory oracle for correctness checks.
+func EvidenceSafeActorEvent(event ActorEvent) ActorEvent {
+	safe := event
+	safe.Transaction = EvidenceSafeTransaction(event.Transaction)
+	if len(event.Transaction.Operations) == 0 {
+		return safe
+	}
+	payload := make(map[string]any, len(event.Payload)+3)
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	payload["operationCount"] = len(event.Transaction.Operations)
+	payload["operationPropertiesRedacted"] = true
+	if len(event.Transaction.Operations) > maxEvidenceTransactionOperations {
+		payload["operationsTruncated"] = true
+	}
+	safe.Payload = payload
+	return safe
+}
+
+func EvidenceSafeTransaction(tx oracle.Transaction) oracle.Transaction {
+	safe := tx
+	if len(tx.Operations) <= maxEvidenceTransactionOperations {
+		safe.Operations = make([]oracle.Operation, len(tx.Operations))
+		for index, operation := range tx.Operations {
+			safe.Operations[index] = evidenceSafeOperation(operation)
+		}
+		return safe
+	}
+	keepHead := maxEvidenceTransactionOperations / 2
+	keepTail := maxEvidenceTransactionOperations - keepHead
+	safe.Operations = make([]oracle.Operation, 0, maxEvidenceTransactionOperations)
+	for _, operation := range tx.Operations[:keepHead] {
+		safe.Operations = append(safe.Operations, evidenceSafeOperation(operation))
+	}
+	for _, operation := range tx.Operations[len(tx.Operations)-keepTail:] {
+		safe.Operations = append(safe.Operations, evidenceSafeOperation(operation))
+	}
+	return safe
+}
+
+func evidenceSafeOperation(operation oracle.Operation) oracle.Operation {
+	operation.Properties = nil
+	return operation
+}
+
+func EvidenceSafeTransactionSummary(tx oracle.Transaction) map[string]any {
+	operationTypes := map[string]int{}
+	for _, operation := range tx.Operations {
+		operationTypes[string(operation.Type)]++
+	}
+	return map[string]any{
+		"actorId":                     tx.ActorID,
+		"sequence":                    tx.Sequence,
+		"acknowledged":                tx.Acknowledged,
+		"operationCount":              len(tx.Operations),
+		"operationTypes":              operationTypes,
+		"errorClass":                  tx.ErrorClass,
+		"operationPropertiesRedacted": true,
+		"operationsTruncated":         len(tx.Operations) > maxEvidenceTransactionOperations,
+	}
+}
+
 type GraphProfile struct {
 	Transaction GraphTransactionProfile `json:"transaction"`
 	Retry       RetryProfile            `json:"retry"`
