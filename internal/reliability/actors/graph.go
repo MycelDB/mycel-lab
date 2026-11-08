@@ -38,6 +38,72 @@ type ActorEvent struct {
 	Payload     map[string]any     `json:"payload,omitempty"`
 }
 
+const maxEvidenceTransactionOperations = 16
+
+// EvidenceSafeActorEvent keeps actor artifacts bounded and excludes operation properties.
+// The full transaction remains available to the in-memory oracle for correctness checks.
+func EvidenceSafeActorEvent(event ActorEvent) ActorEvent {
+	safe := event
+	safe.Transaction = EvidenceSafeTransaction(event.Transaction)
+	if len(event.Transaction.Operations) == 0 {
+		return safe
+	}
+	payload := make(map[string]any, len(event.Payload)+3)
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	payload["operationCount"] = len(event.Transaction.Operations)
+	payload["operationPropertiesRedacted"] = true
+	if len(event.Transaction.Operations) > maxEvidenceTransactionOperations {
+		payload["operationsTruncated"] = true
+	}
+	safe.Payload = payload
+	return safe
+}
+
+func EvidenceSafeTransaction(tx oracle.Transaction) oracle.Transaction {
+	safe := tx
+	if len(tx.Operations) <= maxEvidenceTransactionOperations {
+		safe.Operations = make([]oracle.Operation, len(tx.Operations))
+		for index, operation := range tx.Operations {
+			safe.Operations[index] = evidenceSafeOperation(operation)
+		}
+		return safe
+	}
+	keepHead := maxEvidenceTransactionOperations / 2
+	keepTail := maxEvidenceTransactionOperations - keepHead
+	safe.Operations = make([]oracle.Operation, 0, maxEvidenceTransactionOperations)
+	for _, operation := range tx.Operations[:keepHead] {
+		safe.Operations = append(safe.Operations, evidenceSafeOperation(operation))
+	}
+	for _, operation := range tx.Operations[len(tx.Operations)-keepTail:] {
+		safe.Operations = append(safe.Operations, evidenceSafeOperation(operation))
+	}
+	return safe
+}
+
+func evidenceSafeOperation(operation oracle.Operation) oracle.Operation {
+	operation.Properties = nil
+	return operation
+}
+
+func EvidenceSafeTransactionSummary(tx oracle.Transaction) map[string]any {
+	operationTypes := map[string]int{}
+	for _, operation := range tx.Operations {
+		operationTypes[string(operation.Type)]++
+	}
+	return map[string]any{
+		"actorId":                     tx.ActorID,
+		"sequence":                    tx.Sequence,
+		"acknowledged":                tx.Acknowledged,
+		"operationCount":              len(tx.Operations),
+		"operationTypes":              operationTypes,
+		"errorClass":                  tx.ErrorClass,
+		"operationPropertiesRedacted": true,
+		"operationsTruncated":         len(tx.Operations) > maxEvidenceTransactionOperations,
+	}
+}
+
 type GraphProfile struct {
 	Transaction GraphTransactionProfile `json:"transaction"`
 	Retry       RetryProfile            `json:"retry"`
@@ -64,8 +130,9 @@ type OperationProfile struct {
 }
 
 type DataModelProfile struct {
-	NodeLabels []string `json:"nodeLabels"`
-	EdgeTypes  []string `json:"edgeTypes"`
+	NodeLabels       []string `json:"nodeLabels"`
+	EdgeTypes        []string `json:"edgeTypes"`
+	NodePayloadBytes int      `json:"nodePayloadBytes"`
 }
 
 type RetryProfile struct {
@@ -115,6 +182,9 @@ func GraphProfileFromBehavior(behavior map[string]any) (GraphProfile, error) {
 	}
 	if profile.Transaction.FallbackOperation == "" {
 		profile.Transaction.FallbackOperation = "createNode"
+	}
+	if profile.Transaction.DataModel.NodePayloadBytes < 0 || profile.Transaction.DataModel.NodePayloadBytes > 1<<20 {
+		return GraphProfile{}, fmt.Errorf("transaction.dataModel.nodePayloadBytes must be between 0 and %d", 1<<20)
 	}
 	if len(profile.Transaction.DataModel.NodeLabels) == 0 {
 		profile.Transaction.DataModel.NodeLabels = []string{"Node"}
@@ -313,21 +383,24 @@ func (a *GraphActor) commit(ctx context.Context) {
 	a.sequence++
 	tx := GenerateGraphTransaction(a.ID, a.Seed, a.sequence, a.Profile, a.state)
 	a.mu.Unlock()
+	transactionStart := time.Now()
 	if err := a.executeRealTransaction(operationCtx, tx); err != nil {
+		latencyMS := float64(time.Since(transactionStart).Microseconds()) / 1000
 		tx.Acknowledged = false
 		tx.ErrorClass = ClassifyError(err)
 		if a.Recorder != nil {
-			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-failed", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"error": err.Error(), "class": tx.ErrorClass}})
+			_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-failed", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"error": err.Error(), "class": tx.ErrorClass, "transactionLatencyMs": latencyMS}})
 		}
 		return
 	}
+	latencyMS := float64(time.Since(transactionStart).Microseconds()) / 1000
 	a.mu.Lock()
 	ApplyAcknowledged(&a.state, tx)
 	a.transactions = append(a.transactions, tx)
 	a.mu.Unlock()
 	if a.Recorder != nil {
 		assignment := a.currentAssignment()
-		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-acknowledged", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr}})
+		_ = a.Recorder.RecordActorEvent(ctx, ActorEvent{Type: "graph-transaction-acknowledged", ActorID: a.ID, GroupName: a.GroupName, Sequence: tx.Sequence, Transaction: tx, Payload: map[string]any{"spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr, "transactionLatencyMs": latencyMS}})
 	}
 }
 
@@ -346,13 +419,14 @@ func (a *GraphActor) read(ctx context.Context) {
 	}
 	erredAfterReauth := false
 	reauthenticated := false
+	readStart := time.Now()
 	err = a.readOnce(operationCtx, false)
 	if shouldReauthenticate(err, a.currentAssignment()) {
 		reauthenticated = true
 		err = a.readOnce(operationCtx, true)
 		erredAfterReauth = err != nil
 	}
-	payload := map[string]any{"ok": err == nil, "spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr, "targetActorId": a.ID}
+	payload := map[string]any{"ok": err == nil, "spaceId": assignment.SpaceID, "domainId": assignment.DomainID, "daemonAddr": assignment.DaemonAddr, "targetActorId": a.ID, "readLatencyMs": float64(time.Since(readStart).Microseconds()) / 1000}
 	if reauthenticated {
 		payload["reauthenticated"] = true
 		payload["reauthenticationRetryFailed"] = erredAfterReauth
@@ -448,7 +522,7 @@ func (a *GraphActor) executeGraphTransaction(ctx context.Context, client graphTr
 		switch op.Type {
 		case oracle.OperationCreateNode:
 			nodeID := op.NodeID
-			payload, _ := structpb.NewStruct(map[string]any{"text": fmt.Sprintf("%s %d", a.ID, tx.Sequence)})
+			payload, _ := structpb.NewStruct(map[string]any{"text": graphNodePayloadText(a.ID, tx.Sequence, a.Profile.Transaction.DataModel.NodePayloadBytes)})
 			if _, err := client.CreateNode(ctx, graphTx, &clientv1.NodeCreate{NodeId: &nodeID, Labels: []string{op.Label}, Properties: props, Payload: payload}); err != nil {
 				return err
 			}
@@ -516,6 +590,14 @@ func (a *GraphActor) executeGraphTransaction(ctx context.Context, client graphTr
 	}
 	committed = true
 	return nil
+}
+
+func graphNodePayloadText(actorID string, sequence int64, targetBytes int) string {
+	text := fmt.Sprintf("%s %d", actorID, sequence)
+	if targetBytes > len(text) {
+		text += strings.Repeat("x", targetBytes-len(text))
+	}
+	return text
 }
 
 func graphCommitIdempotencyKey(actorID string, sequence int64) string {

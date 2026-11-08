@@ -1782,6 +1782,14 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 		}
 		diagnosticResult, diagnosticErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", boundedDaemonDiagnosticCommand("/data/mycel/log/myceld.log"))
 		diagnostics := parseProcedureInferenceDaemonDiagnostics(service, diagnosticResult.Stdout)
+		graphTimingResult, graphTimingErr := d.compose(ctx, environment, "exec", "-T", service, "sh", "-c", boundedGraphWriteTimingCommand("/data/mycel/log/myceld.log"))
+		graphTimings := parseGraphWriteTimingDiagnostics(service, graphTimingResult.Stdout)
+		if graphTimingErr != nil {
+			graphTimings.CaptureStatus = "unavailable"
+		}
+		if _, writeErr := sink.WriteJSON(filepath.Join("environment", "logs", service+"-graph-write-timing.json"), graphTimings); writeErr != nil {
+			return writeErr
+		}
 		if diagnosticErr != nil {
 			diagnostics.CaptureStatus = "unavailable"
 			diagnosticCaptureFailed = true
@@ -1798,6 +1806,10 @@ func (d ComposeDriver) CaptureState(ctx context.Context, environment Environment
 
 func boundedDaemonDiagnosticCommand(path string) string {
 	return BoundedDaemonLogCommand(path, 5000)
+}
+
+func boundedGraphWriteTimingCommand(path string) string {
+	return boundedDaemonDiagnosticCommand(path) + ` | grep -E '"event":"graph_write_(stage|commit|apply|semantic_sink|rpc)' || true`
 }
 
 // BoundedDaemonLogCommand returns a command that byte- and line-bounds a daemon
@@ -1860,6 +1872,58 @@ var procedureInferenceDiagnosticCategories = map[string]struct{}{
 	"deadline_exceeded": {}, "canceled": {}, "procedure_disabled": {}, "authorization_revoked": {},
 	"graph_conflict": {}, "failed_precondition": {}, "unavailable": {}, "conflict": {}, "not_found": {},
 	"permission_denied": {}, "resource_exhausted": {}, "operation_failed": {},
+}
+
+type graphWriteTimingDiagnostics struct {
+	SchemaVersion string           `json:"schemaVersion"`
+	Service       string           `json:"service"`
+	CaptureStatus string           `json:"captureStatus"`
+	Records       []map[string]any `json:"records"`
+}
+
+func parseGraphWriteTimingDiagnostics(service, raw string) graphWriteTimingDiagnostics {
+	const maxDiagnosticBytes = 1024 * 1024
+	if len(raw) > maxDiagnosticBytes {
+		raw = raw[len(raw)-maxDiagnosticBytes:]
+	}
+	evidence := graphWriteTimingDiagnostics{
+		SchemaVersion: "reliability.mycel.io/graph-write-timing/v1alpha1",
+		Service:       service,
+		CaptureStatus: "completed",
+		Records:       []map[string]any{},
+	}
+	lines := strings.Split(raw, "\n")
+	if len(lines) > 5000 {
+		lines = lines[len(lines)-5000:]
+	}
+	for _, line := range lines {
+		if len(line) == 0 || len(line) > 64*1024 {
+			continue
+		}
+		var decoded map[string]any
+		decoder := json.NewDecoder(strings.NewReader(line))
+		decoder.UseNumber()
+		if err := decoder.Decode(&decoded); err != nil {
+			continue
+		}
+		event, _ := decoded["event"].(string)
+		if !strings.HasPrefix(event, "graph_write_") {
+			continue
+		}
+		record := map[string]any{}
+		for key, value := range decoded {
+			switch {
+			case key == "time" || key == "level" || key == "event" || key == "operation" || key == "storage_mode":
+				record[key] = value
+			case strings.HasSuffix(key, "_ms") || key == "raft_ready_entries" || key == "raft_ready_messages" || key == "operation_count" || key == "put_nodes" || key == "put_edges" || key == "delete_nodes" || key == "delete_edges" || key == "changes" || key == "created_nodes" || key == "updated_nodes" || key == "changed_edges" || key == "committed_revision" || key == "graph_revision" || key == "raft_command_bytes":
+				record[key] = value
+			case key == "space_id" || key == "domain_id" || key == "transaction_id":
+				record[key+"_hash"] = diagnosticCorrelationHash(value)
+			}
+		}
+		evidence.Records = append(evidence.Records, record)
+	}
+	return evidence
 }
 
 func parseProcedureInferenceDaemonDiagnostics(service, raw string) procedureInferenceDaemonDiagnostics {
