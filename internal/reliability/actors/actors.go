@@ -74,6 +74,14 @@ func defaultFactory(recorder EventRecorder, assignments map[string]provision.Act
 				}
 				return actor
 			}
+		case "import-journal":
+			actor, err := NewJournalImportActor(group, index, seed, rate, recorder)
+			if err == nil {
+				if hasAssignment {
+					actor.Assignment = assignment
+				}
+				return actor
+			}
 		case "gql-read":
 			if hasAssignment {
 				return NewReaderActor(group, index, seed, rate, assignment, recorder)

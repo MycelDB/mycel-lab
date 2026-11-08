@@ -1,0 +1,36 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: issue313-journal-import
+  description: Replays the Commonfolio journal/page import graph shape through one atomic ApplyGraphOperations transaction.
+behavior:
+  type: import-journal
+  identity:
+    mode: per-instance
+    principalPrefix: issue313-importer-user
+  dataScope:
+    space:
+      mode: per-instance
+      prefix: issue313-importer-space
+    domain:
+      mode: per-instance
+      schema: pkm-lite
+      prefix: issue313-importer-domain
+  transaction:
+    journalsPerTransaction: 1
+    entriesPerJournal: 256
+    linksPerEntry: 2
+    existingPageCount: 64
+    sameTransactionPageCount: 64
+    pageTargetMode: existing-reused
+    journalPayloadBytes: 0
+    entryPayloadBytes: 6144
+    pagePayloadBytes: 0
+    indexedProperties: true
+    applyChunkOperations: 100
+    atomic: true
+  checks:
+    readAfterWrite:
+      enabled: false
+    countConvergence:
+      enabled: false

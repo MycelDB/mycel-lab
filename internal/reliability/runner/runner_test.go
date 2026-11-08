@@ -1548,6 +1548,7 @@ func TestLiveFinalOracleChecksBoundEveryAssignment(t *testing.T) {
 	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{
 		{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space-0", DomainID: "domain-0", DaemonAddr: "daemon-0"},
 		{ActorID: "writer-1", BehaviorType: "graph-transaction", SpaceID: "space-1", DomainID: "domain-1", DaemonAddr: "daemon-1"},
+		{ActorID: "importer-0", BehaviorType: "import-journal", SpaceID: "space-2", DomainID: "domain-2", DaemonAddr: "daemon-2"},
 	}}
 	started := time.Now()
 	checks := runLiveFinalOracleChecksWithReader(context.Background(), resources, map[string]graphCounts{}, 10*time.Millisecond, func(ctx context.Context, _ provision.ActorAssignment, _ graphCounts) (graphCounts, error) {
@@ -1557,7 +1558,7 @@ func TestLiveFinalOracleChecksBoundEveryAssignment(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
 		t.Fatalf("bounded oracle checks took %s", elapsed)
 	}
-	if len(checks) != 2 {
+	if len(checks) != 3 {
 		t.Fatalf("checks=%+v", checks)
 	}
 	for _, check := range checks {
