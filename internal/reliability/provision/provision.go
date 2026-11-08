@@ -233,7 +233,7 @@ func PlanScenario(scenario spec.ResolvedScenario, opts Options) (ScenarioResourc
 	for _, group := range scenario.ActorGroups {
 		behaviorType := behaviorType(group)
 		switch behaviorType {
-		case "graph-transaction", "semantic-control":
+		case "graph-transaction", "import-journal", "semantic-control":
 			for i := 0; i < group.Count; i++ {
 				actorID := fmt.Sprintf("%s-%d", group.Name, i)
 				groupResourceName := spec.NormalizeActorGroupResourceName(group.Name)

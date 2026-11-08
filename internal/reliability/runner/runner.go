@@ -1537,7 +1537,7 @@ func evaluateFinalOracleAssertions(report *finalOracleReport, resources provisio
 	}
 	expectedChecks := 0
 	for _, assignment := range resources.Assignments {
-		if assignment.BehaviorType == "graph-transaction" && assignment.SpaceID != "" && assignment.DomainID != "" && assignment.DaemonAddr != "" {
+		if (assignment.BehaviorType == "graph-transaction" || assignment.BehaviorType == "import-journal") && assignment.SpaceID != "" && assignment.DomainID != "" && assignment.DaemonAddr != "" {
 			expectedChecks++
 		}
 	}
@@ -1585,7 +1585,7 @@ func runLiveFinalOracleChecks(ctx context.Context, resources provision.ScenarioR
 func runLiveFinalOracleChecksWithReader(ctx context.Context, resources provision.ScenarioResources, expectedByActor map[string]graphCounts, assignmentTimeout time.Duration, reader finalOracleCountReader) []finalOracleLiveCheck {
 	checks := []finalOracleLiveCheck{}
 	for _, assignment := range resources.Assignments {
-		if assignment.BehaviorType != "graph-transaction" || assignment.SpaceID == "" || assignment.DomainID == "" || assignment.DaemonAddr == "" {
+		if (assignment.BehaviorType != "graph-transaction" && assignment.BehaviorType != "import-journal") || assignment.SpaceID == "" || assignment.DomainID == "" || assignment.DaemonAddr == "" {
 			continue
 		}
 		expected := expectedByActor[assignment.ActorID]
