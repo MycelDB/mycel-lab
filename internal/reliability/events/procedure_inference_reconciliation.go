@@ -42,7 +42,7 @@ func startProcedureInferenceReconciliation(ctx context.Context, driver env.Envir
 	}
 	operationCtx, cancel := procedureInferenceTimeout(ctx, target, 30*time.Second)
 	defer cancel()
-	res, execErr := driver.Exec(operationCtx, environment, env.NodeRef{Ordinal: 0}, env.ExecRequest{Command: cmd})
+	res, execErr := execReconciliationCommand(operationCtx, driver, environment, resources, cmd)
 	if execErr != nil {
 		return ProcedureInferenceResult{Operation: "procedure-inference-reconciliation-start"}, errors.New("start reconciliation command failed")
 	}
@@ -102,7 +102,7 @@ func awaitProcedureInferenceReconciliation(ctx context.Context, driver env.Envir
 			"mycel", "--daemon-addr", "127.0.0.1:9091", "--username", auditor.Username, "--password", auditor.Password, "--output", "json",
 			"automation", "reconciliation", "get", "--space-id", configured.SpaceID, operationID,
 		}
-		res, execErr := driver.Exec(waitCtx, environment, env.NodeRef{Ordinal: 0}, env.ExecRequest{Command: cmd})
+		res, execErr := execReconciliationCommand(waitCtx, driver, environment, resources, cmd)
 		if execErr == nil {
 			if err := json.Unmarshal([]byte(res.Stdout), &last); err == nil {
 				if isTerminalReconciliationStatus(last.Status) {
@@ -121,6 +121,22 @@ func awaitProcedureInferenceReconciliation(ctx context.Context, driver env.Envir
 			return procedureInferenceReconciliationResult("procedure-inference-reconciliation-await-terminal", last), err
 		}
 	}
+}
+
+func execReconciliationCommand(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, command []string) (env.ExecResult, error) {
+	ordinals := 1
+	if resources != nil && len(resources.DaemonAddrs) > 0 {
+		ordinals = len(resources.DaemonAddrs)
+	}
+	var last env.ExecResult
+	var lastErr error
+	for ordinal := 0; ordinal < ordinals; ordinal++ {
+		last, lastErr = driver.Exec(ctx, environment, env.NodeRef{Ordinal: ordinal}, env.ExecRequest{Command: command})
+		if lastErr == nil {
+			return last, nil
+		}
+	}
+	return last, lastErr
 }
 
 func procedureInferenceReconciliationContext(resources *provision.ScenarioResources) (*provision.ProcedureInferenceResources, provision.ActorAssignment, error) {
