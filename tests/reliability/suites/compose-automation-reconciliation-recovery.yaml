@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-automation-reconciliation-recovery
+  description: Credential-free durable graph automation reconciliation restart and idempotency qualification.
+scenarios:
+  - path: ../scenarios/compose-automation-reconciliation-recovery/compose-automation-reconciliation-recovery.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

@@ -215,7 +215,7 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 		recoveries, recoveryErr := r.recoverEndpoints(ctx, snapshots)
 		payload["endpointRecoveries"] = recoveries
 		return payload, recoveryErr
-	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert":
+	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-reconciliation-start", "procedure-inference-reconciliation-await-terminal":
 		result, err := executeProcedureInferenceEvent(ctx, r.Driver, r.Environment, r.Resources, r.procedureInferenceCheckpoints, event.Type, event.Target)
 		return map[string]any{"procedureInference": result}, err
 	case "procedure-inference-emulator-assert":

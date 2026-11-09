@@ -1,0 +1,189 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-automation-reconciliation-recovery
+  description: Durable graph automation reconciliation resumes across retained-data restart and remains idempotent after completion.
+seed: 3112026
+providerProfileRef: openai-compatible-procedure-emulator
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/automation-reconciliation-ports.yml
+    projectNamePrefix: mycel-lab-automation-reconciliation
+    providerEmulatorImage: local/mycel-provider-emulator:dev
+    imageOverride: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
+    serviceNames: [myceld-a, myceld-b, myceld-c]
+    grpcPorts: [19791, 19792, 19793]
+  capabilities:
+    required: [per-node-endpoints, node-exec, rolling-restart, logs, provider-emulator]
+clusterRef: raft-3-node
+clusterOverrides:
+  image: docker.io/myceldb/mycel@sha256:0973cddd9c282abff40d8edeb2e8f7a801e58d40bfbab4c8507ce2d9daae2dd7
+  raft:
+    partitionCount: 16
+  env:
+    MYCELD_AUTOMATION_WORKER_INTERVAL: 20s
+    MYCELD_AUTOMATION_WORKER_BATCH_SIZE: "1"
+    MYCELD_AUTOMATION_WORKER_CONCURRENCY: "1"
+actorGroups:
+  - name: graph-writers
+    profileRef: procedure-inference-writer
+    count: 1
+    rate: {mode: per-actor, commitsPerSecond: 0.001}
+  - name: inference-auditors
+    profileRef: procedure-inference-auditor
+    count: 1
+    rate: {mode: per-actor, queriesPerSecond: 0.001}
+    target:
+      actorGroups: [graph-writers]
+procedureInference:
+  targetActorGroup: graph-writers
+  auditActorGroup: inference-auditors
+  procedureId: mycel-lab.automation-reconciliation
+  bindingId: mycel-lab.automation-reconciliation.graph-trigger
+  targetLabels: [ReconciliationFixture]
+phases:
+  - name: seed-existing-targets-before-binding
+    duration: 1s
+    events:
+      - type: procedure-inference-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000003111
+          text: durable reconciliation fixture alpha
+          timeout: 30s
+      - type: procedure-inference-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000003112
+          text: durable reconciliation fixture beta
+          timeout: 30s
+  - name: configure-reconciliation-binding
+    duration: 1ms
+    events:
+      - type: cluster-recovery-wait
+        target:
+          timeout: 60s
+          interval: 200ms
+          commandTimeout: 3s
+          sessionInitTimeout: 20s
+          minimumStablePolls: 3
+          requireZeroApplyLag: true
+          requireConsistentProgress: true
+          reuseEndpointSessions: true
+      - type: procedure-inference-setup
+        target:
+          timeout: 30s
+          reconciliation: true
+  - name: start-durable-reconciliation
+    duration: 1ms
+    events:
+      - type: procedure-inference-reconciliation-start
+        target:
+          timeout: 30s
+          checkpoint: initial
+          idempotencyKey: reconciliation-run-1
+          batchSize: 2
+          maxConcurrency: 2
+  - name: restart-before-reconciliation-completes
+    duration: 1ms
+    events:
+      - type: rolling-restart
+        target: {scope: cluster}
+      - type: cluster-recovery-wait
+        target:
+          timeout: 90s
+          interval: 200ms
+          commandTimeout: 3s
+          sessionInitTimeout: 20s
+          minimumStablePolls: 3
+          requireZeroApplyLag: true
+          requireConsistentProgress: true
+          reuseEndpointSessions: true
+    outcome:
+      availability: expected-degradation
+  - name: resume-same-operation-after-restart
+    duration: 1ms
+    events:
+      - type: procedure-inference-reconciliation-start
+        target:
+          timeout: 30s
+          checkpoint: initial
+          idempotencyKey: reconciliation-run-1
+          batchSize: 1
+          maxConcurrency: 1
+          expectExisting: true
+      - type: procedure-inference-reconciliation-await-terminal
+        target:
+          timeout: 120s
+          interval: 500ms
+          checkpoint: initial
+          requireCompleted: true
+          minimumScanned: 2
+          minimumScheduled: 2
+          minimumCompleted: 2
+          maximumFailed: 0
+      - type: procedure-inference-emulator-assert
+        target:
+          minimumRequests: 2
+          maximumRequests: 2
+          requireSingleItem: true
+          maximumBatchItems: 1
+          maximumAttemptsPerInput: 1
+          authorization: absent
+          expectedModels: [procedure-generation-v1]
+          minimumOutcomes: {success: 2}
+          minimumStatuses: {"200": 2}
+  - name: restart-completed-operation-without-replay
+    duration: 1ms
+    events:
+      - type: rolling-restart
+        target: {scope: cluster}
+      - type: cluster-recovery-wait
+        target:
+          timeout: 90s
+          interval: 200ms
+          commandTimeout: 3s
+          sessionInitTimeout: 20s
+          minimumStablePolls: 3
+          requireZeroApplyLag: true
+          requireConsistentProgress: true
+          reuseEndpointSessions: true
+      - type: procedure-inference-reconciliation-start
+        target:
+          timeout: 30s
+          checkpoint: initial
+          idempotencyKey: reconciliation-run-1
+          expectExisting: true
+      - type: procedure-inference-reconciliation-await-terminal
+        target:
+          timeout: 30s
+          interval: 500ms
+          checkpoint: initial
+          requireCompleted: true
+          minimumScanned: 2
+          minimumScheduled: 2
+          minimumCompleted: 2
+          maximumFailed: 0
+      - type: procedure-inference-emulator-assert
+        target:
+          minimumRequests: 2
+          maximumRequests: 2
+          requireSingleItem: true
+          maximumBatchItems: 1
+          maximumAttemptsPerInput: 1
+          authorization: absent
+          expectedModels: [procedure-generation-v1]
+          minimumOutcomes: {success: 2}
+          minimumStatuses: {"200": 2}
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 90s
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

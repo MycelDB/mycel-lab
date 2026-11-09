@@ -74,6 +74,13 @@ type ProcedureInferenceResult struct {
 	AttemptValidationCategory      string   `json:"attemptValidationCategory,omitempty"`
 	ObservedPublicationDisposition string   `json:"observedPublicationDisposition,omitempty"`
 	CheckpointProved               bool     `json:"checkpointProved,omitempty"`
+	ReconciliationOperationID      string   `json:"reconciliationOperationId,omitempty"`
+	ReconciliationStatus           string   `json:"reconciliationStatus,omitempty"`
+	ReconciliationScanned          int64    `json:"reconciliationScanned,omitempty"`
+	ReconciliationScheduled        int64    `json:"reconciliationScheduled,omitempty"`
+	ReconciliationCompleted        int64    `json:"reconciliationCompleted,omitempty"`
+	ReconciliationFreshSkipped     int64    `json:"reconciliationFreshSkipped,omitempty"`
+	ReconciliationFailed           int64    `json:"reconciliationFailed,omitempty"`
 }
 
 type procedureInferenceCheckpoint struct {
@@ -84,6 +91,7 @@ type procedureInferenceCheckpoint struct {
 	EarliestRetainedSequence      uint64
 	EarliestRetainedStateSequence uint64
 	Control                       *procedureControlCheckpoint
+	ReconciliationOperationID     string
 }
 
 type procedureControlCheckpoint struct {
@@ -263,6 +271,10 @@ func executeProcedureInferenceEvent(ctx context.Context, driver env.EnvironmentD
 		return controlProcedureInference(ctx, driver, environment, resources, checkpoints, target)
 	case "procedure-inference-capacity-diagnostics-assert":
 		return assertProcedureInferenceCapacityDiagnostics(ctx, environment, resources, target)
+	case "procedure-inference-reconciliation-start":
+		return startProcedureInferenceReconciliation(ctx, driver, environment, resources, checkpoints, target)
+	case "procedure-inference-reconciliation-await-terminal":
+		return awaitProcedureInferenceReconciliation(ctx, driver, environment, resources, checkpoints, target)
 	default:
 		return result, fmt.Errorf("unsupported procedure inference event %q", eventType)
 	}
@@ -292,6 +304,15 @@ func setupProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 		"trigger":     map[string]any{"type": "graph_event", "events": []string{"node.created"}, "labels": configured.TargetLabels},
 		"runtime":     map[string]any{"actor_principal_id": "automation", "owner_principal_id": writer.PrincipalID, "on_behalf_of_principal_id": writer.PrincipalID, "inference_profile_id": configured.IntelligenceProfileID, "event_origin_override": "if_present"},
 		"idempotency": map[string]any{"scope": "target", "target": "changed", "inputHashFields": []string{"payload.text"}, "skipIfOutputUnchanged": true},
+	}
+	if enabled, ok := target["reconciliation"].(bool); ok && enabled {
+		binding["reconciliation"] = map[string]any{
+			"target": "changed",
+			"discovery": map[string]any{
+				"gql":       "MATCH (changed:ReconciliationFixture) RETURN changed, changed.node_id FETCH FIRST 50 ROWS ONLY",
+				"page_size": 2,
+			},
+		}
 	}
 	procedureJSON, _ := json.Marshal(procedure)
 	bindingJSON, _ := json.Marshal(binding)
