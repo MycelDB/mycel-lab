@@ -310,7 +310,7 @@ func setupProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 			"target": "changed",
 			"discovery": map[string]any{
 				"gql":       "MATCH (changed) RETURN changed, changed.node_id FETCH FIRST 50 ROWS ONLY",
-				"page_size": 1,
+				"page_size": 2,
 			},
 		}
 	}
