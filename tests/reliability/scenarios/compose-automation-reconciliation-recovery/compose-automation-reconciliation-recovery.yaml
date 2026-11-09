@@ -84,8 +84,8 @@ phases:
           timeout: 30s
           checkpoint: initial
           idempotencyKey: reconciliation-run-1
-          batchSize: 1
-          maxConcurrency: 1
+          batchSize: 2
+          maxConcurrency: 2
   - name: restart-before-reconciliation-completes
     duration: 1ms
     events:
