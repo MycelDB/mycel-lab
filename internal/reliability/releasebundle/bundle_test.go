@@ -378,6 +378,24 @@ func resolvedDaemon(image ImageIdentity) ResolvedImage {
 	return resolved
 }
 
+func TestProviderEmulatorRuntimeReferenceUsesHostReference(t *testing.T) {
+	const imageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	bundle := Bundle{Images: Images{ProviderEmulator: &ImageIdentity{
+		Reference: "local/mycel-provider-emulator:issue50-reviewed",
+		Local:     true,
+		ImageID:   imageID,
+	}}}
+	if got := bundle.ProviderEmulatorRuntimeReference(); got != "local/mycel-provider-emulator:issue50-reviewed" {
+		t.Fatalf("local runtime reference=%q, want host image reference", got)
+	}
+
+	bundle.Images.ProviderEmulator.Local = false
+	bundle.Images.ProviderEmulator.Reference = "docker.io/myceldb/provider@sha256:" + strings.Repeat("b", 64)
+	if got := bundle.ProviderEmulatorRuntimeReference(); got != bundle.Images.ProviderEmulator.Reference {
+		t.Fatalf("registry runtime reference=%q, want %q", got, bundle.Images.ProviderEmulator.Reference)
+	}
+}
+
 func writeBundle(t *testing.T, path string, bundle Bundle) {
 	t.Helper()
 	raw, err := yaml.Marshal(bundle)
