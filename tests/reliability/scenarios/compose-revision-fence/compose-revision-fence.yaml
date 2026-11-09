@@ -1,0 +1,56 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-revision-fence
+  description: Real gRPC qualification of additive revision-fenced graph commits.
+seed: 54054
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+    projectNamePrefix: mycel-lab-revision-fence
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+    objectStoreFixture: minio
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-restart
+      - logs
+      - object-store-fixture
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: revision-fence-writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      queriesPerSecond: 0.001
+phases:
+  - name: qualify-revision-fence
+    duration: 1ms
+    events:
+      - type: revision-fence-assert
+        target:
+          actorId: revision-fence-writers-0
+  - name: settle
+    duration: 1s
+assertions:
+  final:
+    requireHealthyCluster: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

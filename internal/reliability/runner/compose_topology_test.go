@@ -52,8 +52,8 @@ func TestAllCanonicalComposeRaftInputsMatchResolvedProfiles(t *testing.T) {
 			}
 		})
 	}
-	if count != 26 {
-		t.Fatalf("audited %d Compose scenarios, want 26; review newly added/removed scenarios", count)
+	if count != 27 {
+		t.Fatalf("audited %d Compose scenarios, want 27; review newly added/removed scenarios", count)
 	}
 }
 

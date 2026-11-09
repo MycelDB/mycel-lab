@@ -248,6 +248,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "log-assert-absent":
 		result, err := executeLogAssertAbsentEvent(ctx, r.Environment, event.Target)
 		return map[string]any{"logAssertAbsent": result}, err
+	case "revision-fence-assert":
+		result, err := executeRevisionFenceAssertion(ctx, r.Resources, event.Target)
+		return map[string]any{"revisionFence": result}, err
 	case "host-command":
 		result, err := ExecuteHostCommand(ctx, event.Target)
 		return map[string]any{"hostCommand": result}, err
