@@ -118,6 +118,38 @@ func TestProcedureInferenceBackupRestoreScenarioRecoveryFences(t *testing.T) {
 	}
 }
 
+func TestProcedureInferenceReconciliationScenarioContract(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "reliability", "scenarios", "compose-automation-reconciliation-recovery", "compose-automation-reconciliation-recovery.yaml")
+	loaded, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario := loaded.(Scenario)
+	if scenario.ProcedureInference == nil || scenario.ProcedureInference.ProcedureID == "" || scenario.ProcedureInference.BindingID == "" {
+		t.Fatalf("procedure inference contract=%+v", scenario.ProcedureInference)
+	}
+	var sawSetup, sawStart, sawRestart, sawResume bool
+	for _, phase := range scenario.Phases {
+		for _, event := range phase.Events {
+			switch event.Type {
+			case "procedure-inference-setup":
+				sawSetup = event.Target["reconciliation"] == true
+			case "procedure-inference-reconciliation-start":
+				if event.Target["expectExisting"] == true {
+					sawResume = true
+				} else {
+					sawStart = true
+				}
+			case "rolling-restart":
+				sawRestart = true
+			}
+		}
+	}
+	if !sawSetup || !sawStart || !sawRestart || !sawResume {
+		t.Fatalf("reconciliation scenario lacks setup/start/restart/resume: setup=%t start=%t restart=%t resume=%t", sawSetup, sawStart, sawRestart, sawResume)
+	}
+}
+
 func TestProcedureInferenceEventTargetsFailClosed(t *testing.T) {
 	tests := []struct {
 		name, event string

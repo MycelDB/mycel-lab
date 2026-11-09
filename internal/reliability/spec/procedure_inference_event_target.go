@@ -60,7 +60,7 @@ func (s ProcedureInferenceScenarioSpec) Validate(actorGroups map[string]bool, pr
 func ValidateProcedureInferenceEventTarget(eventType string, target map[string]any) error {
 	allowed := map[string]map[string]struct{}{
 		"procedure-inference-setup": {
-			"timeout": {},
+			"timeout": {}, "reconciliation": {},
 		},
 		"procedure-inference-node-create": {
 			"nodeId": {}, "text": {}, "timeout": {},
@@ -73,6 +73,12 @@ func ValidateProcedureInferenceEventTarget(eventType string, target map[string]a
 		},
 		"procedure-inference-capacity-diagnostics-assert": {
 			"timeout": {}, "tail": {}, "requirePressure": {},
+		},
+		"procedure-inference-reconciliation-start": {
+			"timeout": {}, "checkpoint": {}, "idempotencyKey": {}, "batchSize": {}, "maxConcurrency": {}, "expectExisting": {},
+		},
+		"procedure-inference-reconciliation-await-terminal": {
+			"timeout": {}, "interval": {}, "checkpoint": {}, "requireCompleted": {}, "minimumScanned": {}, "minimumScheduled": {}, "minimumCompleted": {}, "minimumFreshSkipped": {}, "maximumFailed": {},
 		},
 		"procedure-inference-emulator-assert": {
 			"minimumRequests": {}, "maximumRequests": {}, "requireSingleItem": {}, "maximumBatchItems": {},
@@ -101,6 +107,53 @@ func ValidateProcedureInferenceEventTarget(eventType string, target map[string]a
 		}
 	}
 	switch eventType {
+	case "procedure-inference-setup":
+		if raw, exists := target["reconciliation"]; exists {
+			if _, ok := raw.(bool); !ok {
+				return fmt.Errorf("%s target.reconciliation must be boolean", eventType)
+			}
+		}
+	case "procedure-inference-reconciliation-start":
+		if value := strings.TrimSpace(fmt.Sprint(target["checkpoint"])); value != "" && value != "<nil>" && !validCheckpointName(value) {
+			return fmt.Errorf("%s target.checkpoint must be a safe checkpoint name", eventType)
+		}
+		if value := strings.TrimSpace(fmt.Sprint(target["idempotencyKey"])); value != "" && value != "<nil>" && (len(value) > 128 || strings.ContainsAny(value, "\r\n")) {
+			return fmt.Errorf("%s target.idempotencyKey must be a bounded single-line value", eventType)
+		}
+		if raw, exists := target["batchSize"]; exists {
+			value, ok := strictPositiveInteger(raw, 0)
+			if !ok || value > 500 {
+				return fmt.Errorf("%s target.batchSize must be a bounded positive integer", eventType)
+			}
+		}
+		if raw, exists := target["maxConcurrency"]; exists {
+			value, ok := optionalNonnegativeInteger(raw, 0)
+			if !ok || value > 32 {
+				return fmt.Errorf("%s target.maxConcurrency must be a bounded nonnegative integer", eventType)
+			}
+		}
+		if raw, exists := target["expectExisting"]; exists {
+			if _, ok := raw.(bool); !ok {
+				return fmt.Errorf("%s target.expectExisting must be boolean", eventType)
+			}
+		}
+	case "procedure-inference-reconciliation-await-terminal":
+		if value := strings.TrimSpace(fmt.Sprint(target["checkpoint"])); value != "" && value != "<nil>" && !validCheckpointName(value) {
+			return fmt.Errorf("%s target.checkpoint must be a safe checkpoint name", eventType)
+		}
+		for _, key := range []string{"minimumScanned", "minimumScheduled", "minimumCompleted", "minimumFreshSkipped", "maximumFailed"} {
+			if raw, exists := target[key]; exists {
+				value, ok := optionalNonnegativeInteger(raw, 0)
+				if !ok || value > 100000 {
+					return fmt.Errorf("%s target.%s must be a bounded nonnegative integer", eventType, key)
+				}
+			}
+		}
+		if raw, exists := target["requireCompleted"]; exists {
+			if _, ok := raw.(bool); !ok {
+				return fmt.Errorf("%s target.requireCompleted must be boolean", eventType)
+			}
+		}
 	case "procedure-inference-node-create":
 		if strings.TrimSpace(fmt.Sprint(target["nodeId"])) == "" || strings.TrimSpace(fmt.Sprint(target["nodeId"])) == "<nil>" {
 			return fmt.Errorf("%s target.nodeId is required", eventType)
