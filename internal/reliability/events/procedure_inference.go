@@ -309,7 +309,7 @@ func setupProcedureInference(ctx context.Context, driver env.EnvironmentDriver, 
 		binding["reconciliation"] = map[string]any{
 			"target": "changed",
 			"discovery": map[string]any{
-				"gql":       "MATCH (changed) RETURN changed, changed.node_id FETCH FIRST 50 ROWS ONLY",
+				"gql":       "MATCH (changed:ReconciliationFixture) RETURN changed, changed.node_id FETCH FIRST 50 ROWS ONLY",
 				"page_size": 2,
 			},
 		}
