@@ -1537,7 +1537,7 @@ func evaluateFinalOracleAssertions(report *finalOracleReport, resources provisio
 	}
 	expectedChecks := 0
 	for _, assignment := range resources.Assignments {
-		if assignment.BehaviorType == "graph-transaction" && assignment.SpaceID != "" && assignment.DomainID != "" && assignment.DaemonAddr != "" {
+		if (assignment.BehaviorType == "graph-transaction" || assignment.BehaviorType == "import-journal") && assignment.SpaceID != "" && assignment.DomainID != "" && assignment.DaemonAddr != "" {
 			expectedChecks++
 		}
 	}
@@ -1585,7 +1585,7 @@ func runLiveFinalOracleChecks(ctx context.Context, resources provision.ScenarioR
 func runLiveFinalOracleChecksWithReader(ctx context.Context, resources provision.ScenarioResources, expectedByActor map[string]graphCounts, assignmentTimeout time.Duration, reader finalOracleCountReader) []finalOracleLiveCheck {
 	checks := []finalOracleLiveCheck{}
 	for _, assignment := range resources.Assignments {
-		if assignment.BehaviorType != "graph-transaction" || assignment.SpaceID == "" || assignment.DomainID == "" || assignment.DaemonAddr == "" {
+		if (assignment.BehaviorType != "graph-transaction" && assignment.BehaviorType != "import-journal") || assignment.SpaceID == "" || assignment.DomainID == "" || assignment.DaemonAddr == "" {
 			continue
 		}
 		expected := expectedByActor[assignment.ActorID]
@@ -2016,7 +2016,8 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 		return errors.New("run recorder is disabled")
 	}
 	defer r.endRecording()
-	if err := appendEvent(ctx, r.store, r.sink, r.runID, artifacts.EventNow(event.Type, "", event.ActorID, event)); err != nil {
+	safeEvent := actors.EvidenceSafeActorEvent(event)
+	if err := appendEvent(ctx, r.store, r.sink, r.runID, artifacts.EventNow(event.Type, "", event.ActorID, safeEvent)); err != nil {
 		return err
 	}
 	switch event.Type {
@@ -2035,7 +2036,7 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 		r.acknowledged = append(r.acknowledged, event.Transaction)
 		r.expectedByActor[event.ActorID] = updated
 		r.mu.Unlock()
-		_, _ = r.sink.AppendJSONL("actors/acknowledged-commits.jsonl", event.Transaction)
+		_, _ = r.sink.AppendJSONL("actors/acknowledged-commits.jsonl", actors.EvidenceSafeTransactionSummary(event.Transaction))
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName})
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "transaction_latency_ms", 0, map[string]any{"actorId": event.ActorID})
 	case "graph-transaction-commit-unresolved":

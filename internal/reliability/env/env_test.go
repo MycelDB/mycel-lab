@@ -1372,6 +1372,26 @@ func TestParseProcedureInferenceDaemonDiagnosticsIsClosedAndSecretFree(t *testin
 	}
 }
 
+func TestParseGraphWriteTimingDiagnosticsIsBoundedAndClosed(t *testing.T) {
+	raw := strings.Repeat("x", 2*1024*1024) + "\n" + `{"time":"2026-10-24T13:40:22.1Z","level":"INFO","event":"graph_write_commit_timing","operation":"commit_transaction","space_id":"space-secret","domain_id":"domain-secret","transaction_id":"tx-secret","total_ms":12.5,"raft_command_bytes":1048576,"operation_count":1024,"payload":"never-persist"}`
+	evidence := parseGraphWriteTimingDiagnostics("myceld-a", raw)
+	if evidence.CaptureStatus != "completed" || len(evidence.Records) != 1 {
+		t.Fatalf("evidence=%+v", evidence)
+	}
+	if evidence.Records[0]["raft_command_bytes"] != json.Number("1048576") || evidence.Records[0]["transaction_id_hash"] == nil {
+		t.Fatalf("timing record=%+v", evidence.Records[0])
+	}
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prohibited := range []string{"never-persist", "space-secret", "domain-secret", "tx-secret", "payload"} {
+		if bytes.Contains(encoded, []byte(prohibited)) {
+			t.Fatalf("timing evidence leaked %q: %s", prohibited, encoded)
+		}
+	}
+}
+
 func TestSelectDriverRejectsGenericKubernetesDriver(t *testing.T) {
 	_, _, err := SelectDriver(spec.EnvironmentSpec{Driver: "kubernetes"}, DriverSelectionOptions{})
 	if err == nil || !strings.Contains(err.Error(), "unsupported environment driver") {

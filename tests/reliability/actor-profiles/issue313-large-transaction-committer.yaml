@@ -1,0 +1,39 @@
+apiVersion: myceldb.io/reliability/v1
+kind: ActorProfile
+metadata:
+  name: issue313-large-transaction-committer
+  description: Creates deterministic large atomic graph transactions for Mycel issue 313 baseline reproduction.
+behavior:
+  type: graph-transaction
+  identity:
+    mode: per-instance
+    principalPrefix: issue313-user
+  dataScope:
+    space:
+      mode: per-instance
+      prefix: issue313-space
+    domain:
+      mode: per-instance
+      schema: pkm-lite
+      prefix: issue313-domain
+  transaction:
+    commitUnit: graph-transaction
+    operationsPerTransaction:
+      min: 1024
+      max: 1024
+    operationMix:
+      createNode:
+        weight: 1
+        maxPerTransaction: 1024
+    fallbackOperation: createNode
+    dataModel:
+      nodeLabels: [Note]
+      edgeTypes: [LINKS_TO]
+      nodePayloadBytes: 768
+  retry:
+    maxAttempts: 1
+  checks:
+    readAfterWrite:
+      enabled: false
+    countConvergence:
+      enabled: false

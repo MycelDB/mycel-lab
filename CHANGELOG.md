@@ -6,8 +6,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [v0.22.0] - 2026-11-09
+
 ### Added
 
+- Added the credential-free Compose graph automation reconciliation recovery scenario, including bounded restart/idempotency events and progress assertions for MycelDB/mycel#311.
+- Added v0.22 release alignment for the Go SDK dependency and qualification coverage for the matching daemon/API contract.
 - Added strict hermetic release execution bundles and maintained protected-gate draft templates that bind clean source trees, harness/tool binaries (including exact Buildx and Compose plugins), registry and local image identities, native and side manifests, provenance evidence, selected configuration files, resource allocation, and outer/finalization bounds; `release-bundle build` captures a reproducible authoritative bundle, protected gates consume it directly with collision-resistant bounded K3d allocation names, and candidate preflight rejects mismatches and mutable/default provider-emulator identities before environment provisioning (#88).
 - Added a controlled out-of-order semantic publication scenario: hold an older pinned backfill response until a newer maintenance record is searched, then require superseded skip and unchanged newer record identity. Added bounded local emulator gates and real connection-drop outcomes (#46).
 - Added nine finite provider-failure cases for 429/Retry-After, 503, transport loss, malformed/truncated JSON, incorrect dimensions, refusal, deadline, and controlled cancellation. Failure/frontier evidence precedes recovery of the same work ID and semantic generation; automatic retries preserve work generation, while explicit operator retries require one exact version advance. Request sequences have no implicit successful fallback (#46).

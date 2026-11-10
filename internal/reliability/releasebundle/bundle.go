@@ -339,9 +339,9 @@ func (b *Bundle) ProviderEmulatorRuntimeReference() string {
 	if b.Images.ProviderEmulator == nil {
 		return ""
 	}
-	if b.Images.ProviderEmulator.Local {
-		return b.Images.ProviderEmulator.ImageID
-	}
+	// Runtime drivers need the host-visible image reference so Compose and k3d
+	// can inspect/import the image. ImageID remains provenance evidence, not a
+	// usable image name for `k3d image import`.
 	return b.Images.ProviderEmulator.Reference
 }
 

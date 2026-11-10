@@ -1,0 +1,70 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-issue313-large-transaction
+  description: Reproduce Mycel issue 313 with large atomic graph transactions and concurrent read/session traffic.
+seed: 313313
+environment:
+  driver: compose
+  namespace: mycel-issue313
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/issue313-ports.yml
+    projectNamePrefix: mycel-issue313
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19315
+      - 19316
+      - 19317
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - logs
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
+  env:
+    MYCELD_GRAPH_WRITE_TRACE: "true"
+    MYCELD_GRAPH_WRITE_TRACE_THRESHOLD: "0"
+actorGroups:
+  - name: large-transaction-writers
+    profileRef: issue313-large-transaction-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 0.1
+  - name: concurrent-readers
+    profileRef: gql-reader
+    count: 3
+    target:
+      actorGroups:
+        - large-transaction-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 4
+phases:
+  - name: bootstrap
+    duration: 8s
+  - name: large-transaction-stress
+    duration: 35s
+  - name: settle
+    duration: 8s
+    assertions:
+      requireConvergedCounts: false
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 90s
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

@@ -2,7 +2,9 @@ package actors
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,44 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestEvidenceSafeActorEventBoundsGraphTransactions(t *testing.T) {
+	operations := make([]oracle.Operation, 20)
+	for index := range operations {
+		operations[index] = oracle.Operation{Type: oracle.OperationCreateNode, NodeID: fmt.Sprintf("node-%d", index), Properties: map[string]any{"secret": strings.Repeat("x", 1024)}}
+	}
+	transaction := oracle.Transaction{ActorID: "actor-1", Sequence: 7, Operations: operations, Acknowledged: true}
+	event := EvidenceSafeActorEvent(ActorEvent{Type: "graph-transaction-acknowledged", Transaction: transaction})
+	if len(event.Transaction.Operations) != maxEvidenceTransactionOperations {
+		t.Fatalf("evidence operations=%d, want %d", len(event.Transaction.Operations), maxEvidenceTransactionOperations)
+	}
+	if event.Transaction.Operations[0].Properties != nil || event.Transaction.Operations[len(event.Transaction.Operations)-1].Properties != nil {
+		t.Fatal("evidence operation properties were not redacted")
+	}
+	if event.Payload["operationCount"] != 20 || event.Payload["operationsTruncated"] != true {
+		t.Fatalf("evidence payload=%+v, want bounded transaction metadata", event.Payload)
+	}
+	if summary := EvidenceSafeTransactionSummary(transaction); summary["operationCount"] != 20 {
+		t.Fatalf("summary=%+v, want full operation count", summary)
+	}
+}
+
+func TestGraphNodePayloadTextHonorsConfiguredSize(t *testing.T) {
+	text := graphNodePayloadText("actor-1", 7, 768)
+	if len(text) != 768 {
+		t.Fatalf("payload length=%d, want 768", len(text))
+	}
+	if graphNodePayloadText("actor-1", 7, 0) != "actor-1 7" {
+		t.Fatalf("zero-sized payload changed the deterministic base text")
+	}
+}
+
+func TestGraphProfileRejectsExcessiveNodePayloadSize(t *testing.T) {
+	_, err := GraphProfileFromBehavior(map[string]any{"transaction": map[string]any{"dataModel": map[string]any{"nodePayloadBytes": (1 << 20) + 1}}})
+	if err == nil {
+		t.Fatal("GraphProfileFromBehavior() error = nil, want payload-size validation")
+	}
+}
 
 func TestGraphOperationGenerationIsDeterministic(t *testing.T) {
 	profile := testGraphProfile()

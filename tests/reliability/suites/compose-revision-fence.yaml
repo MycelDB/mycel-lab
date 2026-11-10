@@ -1,0 +1,7 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-revision-fence
+  description: Real gRPC revision-fenced graph commit qualification.
+scenarios:
+  - path: ../scenarios/compose-revision-fence/compose-revision-fence.yaml
