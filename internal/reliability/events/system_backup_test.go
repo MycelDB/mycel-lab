@@ -100,7 +100,7 @@ func TestClusterRestoreVerifyRetriesUntilRestoredAuthIsReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeClusterRestoreVerify() error=%v", err)
 	}
-	if result.VerifiedPods != 1 || driver.execCalls != 3 || !result.FixtureProved || result.FixtureNodes != 3 || result.FixtureEdges != 1 || counterCalls != 1 {
+	if result.VerifiedPods != 1 || driver.execCalls != 3 || driver.deadlineCalls != 3 || !result.FixtureProved || result.FixtureNodes != 3 || result.FixtureEdges != 1 || counterCalls != 1 {
 		t.Fatalf("result=%+v execCalls=%d counterCalls=%d, want endpoint retries and exact fixture proof", result, driver.execCalls, counterCalls)
 	}
 }
@@ -266,6 +266,7 @@ func (d *clusterBackupCreateDriver) CopyToNode(context.Context, env.Environment,
 type restoreVerifyDriver struct {
 	failuresRemaining int
 	execCalls         int
+	deadlineCalls     int
 }
 
 func (d *restoreVerifyDriver) Name() string { return "test" }
@@ -286,8 +287,11 @@ func (d *restoreVerifyDriver) Nodes(context.Context, env.Environment) ([]env.Nod
 func (d *restoreVerifyDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
 	return nil, nil
 }
-func (d *restoreVerifyDriver) Exec(context.Context, env.Environment, env.NodeRef, env.ExecRequest) (env.ExecResult, error) {
+func (d *restoreVerifyDriver) Exec(ctx context.Context, _ env.Environment, _ env.NodeRef, _ env.ExecRequest) (env.ExecResult, error) {
 	d.execCalls++
+	if _, ok := ctx.Deadline(); ok {
+		d.deadlineCalls++
+	}
 	if d.failuresRemaining > 0 {
 		d.failuresRemaining--
 		return env.ExecResult{}, errors.New("login principal: invalid credentials")

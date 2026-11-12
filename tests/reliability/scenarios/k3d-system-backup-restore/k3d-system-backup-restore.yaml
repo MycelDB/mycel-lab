@@ -70,6 +70,7 @@ phases:
           actorId: system-backup-writers-0
           verifyTimeout: 5m
           verifyInterval: 5s
+          execTimeout: 30s
 assertions:
   final:
     requireHealthyCluster: true

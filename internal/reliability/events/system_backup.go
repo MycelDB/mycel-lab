@@ -422,8 +422,15 @@ func executeClusterRestoreVerifyWithCounter(ctx context.Context, driver env.Envi
 	}
 	verifyTimeout := durationTarget(target, "verifyTimeout", 5*time.Minute)
 	verifyInterval := durationTarget(target, "verifyInterval", 5*time.Second)
+	execTimeout := durationTarget(target, "execTimeout", 30*time.Second)
 	if verifyInterval <= 0 {
 		verifyInterval = 5 * time.Second
+	}
+	if execTimeout <= 0 {
+		execTimeout = 30 * time.Second
+	}
+	if verifyTimeout > 0 && execTimeout > verifyTimeout {
+		execTimeout = verifyTimeout
 	}
 	verifyCtx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
@@ -435,7 +442,11 @@ func executeClusterRestoreVerifyWithCounter(ctx context.Context, driver env.Envi
 				continue
 			}
 			cmd := append(principalCLIBase(assignment.Username, assignment.Password), "query", "gql", "--space-id", assignment.SpaceID, "--domain-id", assignment.DomainID, "MATCH (n) RETURN count(n)")
-			if _, err := driver.Exec(verifyCtx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: cmd}); err != nil {
+			attemptCtx, attemptCancel := context.WithTimeout(verifyCtx, execTimeout)
+			_, execErr := driver.Exec(attemptCtx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: cmd})
+			attemptCancel()
+			if execErr != nil {
+				err := execErr
 				lastErr = fmt.Errorf("restored workload query on %s: %w", node.Name, err)
 				continue
 			}
