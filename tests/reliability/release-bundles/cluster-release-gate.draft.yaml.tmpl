@@ -18,7 +18,7 @@ files:
   - {source: lab, role: scenario, path: tests/reliability/scenarios/compose-cluster-validation/compose-cluster-validation.yaml}
   - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-cluster-validation/k3d-cluster-validation.yaml}
   - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-system-backup-restore/k3d-system-backup-restore.yaml}
-  - {source: lab, role: runtime-config, path: tests/compose/ports.yml}
+  - {source: lab, role: runtime-config, path: tests/compose/semantic-protocol-ports.yml}
   - {source: daemon, role: runtime-config, path: tests/compose/cluster/compose.yml}
   - {source: lab, role: source, path: tests/reliability/clusters/raft-3-node.yaml}
   - {source: lab, role: source, path: tests/reliability/actor-profiles/graph-committer.yaml}
@@ -64,7 +64,7 @@ scenarios:
         grpcPorts: [19091, 19092, 19093]
       runtimeFiles:
         - {option: composeFiles, source: daemon, path: tests/compose/cluster/compose.yml}
-        - {option: composeFiles, source: lab, path: tests/compose/ports.yml}
+        - {option: composeFiles, source: lab, path: tests/compose/semantic-protocol-ports.yml}
     outerTimeout: 30m
     finalization: &finalization
       actorStop: 2m
@@ -100,6 +100,6 @@ scenarios:
         clusterNamePrefix: draft
         digestPinnedImagePolicy: node-pull
         createArguments: [--agents, "3", --timeout, 180s]
-        consolePortBase: 19191
+        consolePortBase: 29191
     outerTimeout: 90m
     finalization: *finalization
