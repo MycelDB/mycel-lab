@@ -46,7 +46,7 @@ phases:
       - type: cluster-backup-create
         target:
           backupDir: /tmp/mycel-system-backups
-          hostDir: /tmp/{runID}-system-backup
+          hostDir: "{tempDir}/{runID}-system-backup"
           archiveFormat: tar
           reason: native mycel-lab k3d system backup restore test
           convergenceTimeout: 10m
