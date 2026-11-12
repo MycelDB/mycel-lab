@@ -189,6 +189,52 @@ phases:
           expectConfigurationHashFrom: baseline-configuration
           expectedNodeIds:
             - 00000000-0000-4000-8000-000000000203
+  - name: tombstone-delete-and-freshness-recovery
+    duration: 1ms
+    events:
+      - type: semantic-node-create
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000205
+          labels: [Document]
+          text: axis-delete
+          captureRevisionAs: tombstone-create-commit
+          properties:
+            title: tombstone-delete-title
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-search-assert
+        target:
+          query: axis-delete
+          limit: 3
+          minimumScore: 0.99
+          requireProvenance: true
+          expectSourceRevisionFrom: tombstone-create-commit
+          expectGenerationFrom: baseline-generation
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000205
+      - type: semantic-node-delete
+        target:
+          nodeId: 00000000-0000-4000-8000-000000000205
+          captureRevisionAs: tombstone-delete-commit
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 1
+          expectFreshRevisionFrom: tombstone-delete-commit
+      - type: semantic-search-assert
+        target:
+          query: axis-delete
+          limit: 3
+          expectedResultCount: 0
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000000205
   - name: rebuild-from-graph-truth-with-delta
     duration: 1ms
     events:
@@ -289,6 +335,57 @@ phases:
           expectConfigurationHashFrom: rebuilt-configuration
           expectedNodeIds:
             - 00000000-0000-4000-8000-000000000204
+    outcome:
+      availability: expected-degradation
+  - name: local-baseline-loss-and-readiness-recovery
+    duration: 1ms
+    events:
+      - type: semantic-local-baseline-loss
+        target:
+          ordinal: 0
+      - type: semantic-local-baseline-loss
+        target:
+          ordinal: 1
+      - type: semantic-local-baseline-loss
+        target:
+          ordinal: 2
+      - type: cluster-recovery-wait
+        target:
+          timeout: 60s
+          interval: 200ms
+          commandTimeout: 3s
+          minimumStablePolls: 3
+      - type: semantic-maintenance-await
+        target:
+          timeout: 30s
+          pollInterval: 100ms
+      - type: semantic-reliability-assert
+        target:
+          requireFreshAtLatest: true
+          maximumUnresolvedGapCount: 0
+          minimumSemanticGeneration: 2
+          expectFreshRevisionFrom: rebuild-delta-commit
+      - type: semantic-search-assert
+        target:
+          query: axis-3
+          limit: 3
+          timeout: 30s
+          pollInterval: 500ms
+          minimumScore: 0.99
+          requireProvenance: true
+          expectSourceRevisionFrom: rebuild-delta-commit
+          expectGenerationFrom: rebuilt-generation
+          expectRebuildEpochFrom: rebuilt-epoch
+          expectConfigurationHashFrom: rebuilt-configuration
+          expectedNodeIds:
+            - 00000000-0000-4000-8000-000000000204
+      - type: semantic-search-assert
+        target:
+          query: axis-delete
+          limit: 3
+          expectedResultCount: 0
+          forbiddenNodeIds:
+            - 00000000-0000-4000-8000-000000000205
     outcome:
       availability: expected-degradation
 assertions:

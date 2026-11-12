@@ -1218,8 +1218,8 @@ func TestSemanticGraphIndexReleaseGateSuiteDryRuns(t *testing.T) {
 		}
 		phases += len(result.Results[index].Phases)
 	}
-	if phases != 65 {
-		t.Fatalf("planned phases=%d want 65", phases)
+	if phases != 67 {
+		t.Fatalf("planned phases=%d want 67", phases)
 	}
 }
 

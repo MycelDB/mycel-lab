@@ -1,6 +1,6 @@
 # Semantic graph-index reliability suites implementation plan
 
-Status: v0.21.4 batch defines 16 scenarios / 65 phases; runtime acceptance pending, native composition capability-blocked
+Status: v0.21.4 batch defines 16 scenarios / 67 phases; runtime acceptance pending, native composition capability-blocked
 
 Tracking issue: [MycelDB/mycel-lab#46](https://github.com/MycelDB/mycel-lab/issues/46)
 
@@ -28,7 +28,7 @@ checks completed-work and semantic-record identity without replay.
 
 The contract suite contains three scenarios, recovery three, protocol ten, the
 standalone failure matrix nine, and the credential-free aggregate
-contains **16 scenarios / 65 phases**. The out-of-order case holds an older pinned
+contains **16 scenarios / 67 phases**. The out-of-order case holds an older pinned
 backfill response until a newer maintenance publication is searched successfully,
 then requires explicit superseded skip and unchanged newer record identity after
 release. It does not rely on racing two ordinary rule-fenced workers.

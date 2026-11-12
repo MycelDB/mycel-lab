@@ -328,7 +328,7 @@ Suites execute scenarios sequentially and honor `stopOnFailure`. The canonical s
 - `semantic-graph-index-release-gate` — Tranche E credential-free aggregate of
   contract, recovery, pending-work restart, controlled out-of-order completion,
   domain isolation, configured migration, and protocol success/failure definitions
-  (16 scenarios / 65 phases; fresh
+  (16 scenarios / 67 phases; fresh
   environment-backed acceptance required).
 - `semantic-provider-failure-matrix` — nine cases: 429/Retry-After, 503, real
   connection drop, malformed/truncated JSON, incorrect dimensions, refusal,

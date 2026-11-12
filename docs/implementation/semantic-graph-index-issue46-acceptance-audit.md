@@ -16,7 +16,7 @@ failed approved executions and the successful ninth exact-source qualification; 
 - **Completion batch:** adds actual out-of-order publication control, nine
   protocol-failure cases, composition contracts/gates, audit hardening, same-space
   domain isolation, and independent configured model/dimension/vector-space migration.
-  Canonical aggregate definitions are **16 scenarios / 65 phases**. Local tests
+  Canonical aggregate definitions are **16 scenarios / 67 phases**. Local tests
   and dry-runs were followed by the exact successful runtime qualification below.
 - **Approved v0.21.4 run (failed):** clean `6615c17` passed contract/recovery,
   then stopped at pending capture before any pending-case restart. Two scenarios
@@ -110,7 +110,7 @@ failed approved executions and the successful ninth exact-source qualification; 
   and successful partial sessions are closed on failure.
 - **Ninth approved v0.21.4 run (qualified):** clean candidate `6b17781` with
   bundle `94ff95c2c30e9c13a6a464debe6841e203abe2ccbe6fd9fc2dfcf1f210d6c77e`
-  passed all **16 scenarios / 65 phases**. The migration fences accepted the
+  passed all **16 scenarios / 67 phases**. The migration fences accepted the
   exact v0.21.4 warning response, retained restart passed, all 16 redaction
   scans passed, and all cleanup/absence checks reported zero residual resources.
   This is the authoritative runtime evidence for the declared deterministic
@@ -162,7 +162,7 @@ The release execution bundle was validated before provisioning:
 - Bundle SHA-256: `94ff95c2c30e9c13a6a464debe6841e203abe2ccbe6fd9fc2dfcf1f210d6c77e`
 - Validation evidence SHA-256: `9eb9494e70ad9ae2f1edf2748f10a95999ee032ee1ab927b0d78dbb5316ffdfc`
 - Destructive artifacts: `tmp/issue46-fence-v3-destructive/`
-- Result: 16/16 scenarios and 65/65 phases passed
+- Result: 16/16 scenarios and 67/67 phases passed
 - Safety: 16/16 redaction scans passed; 16/16 cleanup/absence checks passed with zero residual containers, networks, volumes, or clusters
 
 The migration scenario recorded `rebuildFenceProved: true` for all three
@@ -224,7 +224,7 @@ is held. No backfill, analysis, or repair follows release to hide a stale overwr
   Their runtime acceptance remains open rather than hidden behind a checklist tick.
 - The first eight approved v0.21.4 aggregates failed at bounded harness/oracle or
   recovery-environment gates and do not transfer qualification. The ninth exact
-  candidate completed all 16 scenarios and 65 phases; its bundle, cleanup,
+  candidate completed all 16 scenarios and 67 phases; its bundle, cleanup,
   redaction, and absence evidence are authoritative for this declared aggregate.
 - #46's semantic graph-index reliability aggregate is qualified for the
   deterministic v0.21.4 scope recorded here. Native composed enrichment and
