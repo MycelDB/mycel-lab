@@ -1,0 +1,117 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-lexical-replay-frontier
+  description: Three-node graph burst and retained restart guardrail for lexical historical replay frontier publication.
+seed: 22330222
+environment:
+  driver: compose
+  namespace: mycel-lab-lexical-replay
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/lexical-replay-ports.yml
+    projectNamePrefix: mycel-lab-lexical-replay
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19191
+      - 19192
+      - 19193
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - rolling-restart
+      - logs
+clusterRef: raft-3-node
+clusterOverrides:
+  image: myceldb/mycel:v0.22.2
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: graph-writers
+    profileRef: commonfolio-graph-committer
+    count: 3
+    rate:
+      mode: group-total
+      commitsPerSecond: 24
+  - name: readers
+    profileRef: gql-reader
+    count: 3
+    target:
+      actorGroups:
+        - graph-writers
+    rate:
+      mode: group-total
+      queriesPerSecond: 6
+phases:
+  - name: seed-retained-graph-history
+    duration: 5s
+  - name: remove-local-lexical-artifacts
+    duration: 1ms
+    events:
+      - type: lexical-local-artifact-loss
+        target:
+          ordinals: [0, 1, 2]
+  - name: restart-for-historical-replay
+    duration: 1s
+    events:
+      - type: rolling-restart
+        target:
+          scope: cluster
+    outcome:
+      availability: expected-degradation
+  - name: wait-for-replay-recovery
+    duration: 1s
+    events:
+      - type: cluster-recovery-wait
+        target:
+          ordinals: [0, 1, 2]
+          expectedGroups: 17
+          timeout: 10m
+          interval: 2s
+          commandTimeout: 10s
+    outcome:
+      availability: expected-degradation
+  - name: post-replay-validation
+    duration: 8s
+    actorGroupOverrides:
+      graph-writers:
+        rate:
+          mode: group-total
+          commitsPerSecond: 12
+      readers:
+        rate:
+          mode: group-total
+          queriesPerSecond: 6
+    assertions:
+      requireWorkloadProgress: true
+      requireConvergedCounts: true
+  - name: collect-frontier-diagnostics
+    duration: 1s
+    events:
+      - type: log-assert-absent
+        target:
+          selector: app=myceld
+          tail: -1
+          since: 20m
+          patterns:
+            - projection desired frontier
+            - raft graph strong read
+            - projection.frontier.advance.v1
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 10m
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
+  collectKubernetesState: false

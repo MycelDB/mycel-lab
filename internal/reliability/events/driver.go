@@ -238,6 +238,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "commonfolio-automation-await-terminal":
 		result, err := executeCommonFolioAwaitTerminalEvent(ctx, r.Driver, r.Environment, r.Resources, event.Target)
 		return map[string]any{"commonfolioTerminalFixture": result}, err
+	case "lexical-local-artifact-loss":
+		result, err := executeLexicalLocalArtifactLoss(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"lexicalArtifactLoss": result}, err
 	case "semantic-local-baseline-loss":
 		result, err := executeSemanticLocalBaselineLoss(ctx, r.Driver, r.Environment, r.Resources, event.Target)
 		if err != nil {
