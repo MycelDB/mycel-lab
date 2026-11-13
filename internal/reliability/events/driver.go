@@ -241,6 +241,12 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "lexical-local-artifact-loss":
 		result, err := executeLexicalLocalArtifactLoss(ctx, r.Driver, r.Environment, event.Target)
 		return map[string]any{"lexicalArtifactLoss": result}, err
+	case "graph-change-notification-fault":
+		result, err := executeGraphChangeNotificationFault(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"graphChangeNotificationFault": result}, err
+	case "graph-change-notification-restore":
+		result, err := executeGraphChangeNotificationRestore(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"graphChangeNotificationRestore": result}, err
 	case "semantic-local-baseline-loss":
 		result, err := executeSemanticLocalBaselineLoss(ctx, r.Driver, r.Environment, r.Resources, event.Target)
 		if err != nil {

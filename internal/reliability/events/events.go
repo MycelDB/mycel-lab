@@ -130,7 +130,7 @@ func validateEvent(event spec.EventSpec) error {
 		}
 	case "rolling-restart", "environment-reset":
 		return nil
-	case "lexical-local-artifact-loss":
+	case "lexical-local-artifact-loss", "graph-change-notification-fault", "graph-change-notification-restore":
 		if nodeTargetOrdinal(event.Target) < 0 && len(nodeTargetOrdinalSequence(event.Target)) == 0 && len(intSliceTarget(event.Target, "ordinals")) == 0 {
 			return fmt.Errorf("%s requires target.ordinal, target.ordinalSequence, or target.ordinals", event.Type)
 		}

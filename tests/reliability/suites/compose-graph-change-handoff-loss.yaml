@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-graph-change-handoff-loss
+  description: Reproduce loss of the authoritative graph-change handoff to derived consumers.
+scenarios:
+  - path: ../scenarios/compose-graph-change-handoff-loss/compose-graph-change-handoff-loss.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true
