@@ -130,6 +130,11 @@ func validateEvent(event spec.EventSpec) error {
 		}
 	case "rolling-restart", "environment-reset":
 		return nil
+	case "lexical-local-artifact-loss":
+		if nodeTargetOrdinal(event.Target) < 0 && len(nodeTargetOrdinalSequence(event.Target)) == 0 && len(intSliceTarget(event.Target, "ordinals")) == 0 {
+			return fmt.Errorf("%s requires target.ordinal, target.ordinalSequence, or target.ordinals", event.Type)
+		}
+		return nil
 	case "statefulset-image-upgrade":
 		if stringTarget(event.Target, "image") == "" {
 			return fmt.Errorf("%s requires target.image", event.Type)

@@ -52,6 +52,35 @@ done
 	}
 }
 
+func TestLogAssertAbsentUsesComposeLogsForComposeEnvironment(t *testing.T) {
+	binDir := t.TempDir()
+	compose := filepath.Join(binDir, "docker-compose")
+	script := `#!/bin/sh
+case "$*" in
+  *"-f compose.yml -p mycel-test logs --no-color --no-log-prefix --tail=-1 --since=20m myceld-a myceld-b myceld-c"*) ;;
+  *) echo "unexpected compose logs arguments: $*" >&2; exit 2 ;;
+esac
+echo "ordinary compose log line"
+`
+	if err := os.WriteFile(compose, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake docker-compose: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	result, err := executeLogAssertAbsentEvent(context.Background(), env.Environment{Driver: "compose", Metadata: map[string]string{
+		"composeFile":  "compose.yml",
+		"projectName":  "mycel-test",
+		"serviceNames": "myceld-a,myceld-b,myceld-c",
+	}}, map[string]any{
+		"selector": "app=myceld",
+		"tail":     -1,
+		"since":    "20m",
+		"patterns": []any{"projection desired frontier"},
+	})
+	if err != nil {
+		t.Fatalf("executeLogAssertAbsentEvent() error=%v result=%+v", err, result)
+	}
+}
+
 func TestLogAssertAbsentRejectsEmptyLogWindows(t *testing.T) {
 	for _, target := range []map[string]any{{"tail": 0}, {"tail": -2}, {"since": "0s"}, {"since": "not-a-duration"}, {"timeout": "not-a-duration"}} {
 		if _, err := executeLogAssertAbsentEvent(context.Background(), env.Environment{}, target); err == nil {

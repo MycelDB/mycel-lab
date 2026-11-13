@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -51,28 +52,13 @@ func executeLogAssertAbsentEvent(ctx context.Context, environment env.Environmen
 	if len(patterns) == 0 {
 		patterns = []string{"stale automation invocation update", "handler=graph: graph conflict", "restore raft snapshot and replay committed entries"}
 	}
-	args := []string{}
-	if environment.Context != "" {
-		args = append(args, "--context", environment.Context)
-	}
-	if environment.Namespace != "" {
-		args = append(args, "-n", environment.Namespace)
-	}
-	args = append(args, "logs")
-	logTarget := resource
-	if selector != "" {
-		args = append(args, "-l", selector, "--prefix=true")
-		logTarget = "selector " + selector
-	} else {
-		args = append(args, resource)
-	}
-	args = append(args, "--all-containers=true", fmt.Sprintf("--tail=%d", tail))
-	if since != "" {
-		args = append(args, "--since="+since)
+	commandName, args, logTarget, err := logCommand(environment, selector, resource, tail, since)
+	if err != nil {
+		return LogAssertAbsentResult{}, err
 	}
 	commandCtx, commandCancel := context.WithTimeout(ctx, commandTimeout)
 	defer commandCancel()
-	cmd := exec.CommandContext(commandCtx, "kubectl", args...)
+	cmd := exec.CommandContext(commandCtx, commandName, args...)
 	capture := newForbiddenLogCapture(patterns, 16384)
 	cmd.Stdout = capture
 	cmd.Stderr = capture
@@ -80,12 +66,70 @@ func executeLogAssertAbsentEvent(ctx context.Context, environment env.Environmen
 	result := LogAssertAbsentResult{Resource: resource, Selector: selector, Tail: tail, Since: since, Timeout: commandTimeout.String(), Patterns: patterns, Matches: capture.matches(), Stdout: capture.output()}
 	if err != nil {
 		result.Stderr = err.Error()
-		return result, fmt.Errorf("kubectl logs %s: %w", logTarget, err)
+		return result, fmt.Errorf("%s logs %s: %w", commandName, logTarget, err)
 	}
 	if len(result.Matches) > 0 {
 		return result, fmt.Errorf("logs for %s contain forbidden replay failure pattern(s): %s", logTarget, strings.Join(result.Matches, ", "))
 	}
 	return result, nil
+}
+
+func logCommand(environment env.Environment, selector, resource string, tail int, since string) (string, []string, string, error) {
+	if environment.Driver != "compose" {
+		args := []string{}
+		if environment.Context != "" {
+			args = append(args, "--context", environment.Context)
+		}
+		if environment.Namespace != "" {
+			args = append(args, "-n", environment.Namespace)
+		}
+		args = append(args, "logs")
+		logTarget := resource
+		if selector != "" {
+			args = append(args, "-l", selector, "--prefix=true")
+			logTarget = "selector " + selector
+		} else {
+			args = append(args, resource)
+		}
+		args = append(args, "--all-containers=true", fmt.Sprintf("--tail=%d", tail))
+		if since != "" {
+			args = append(args, "--since="+since)
+		}
+		return "kubectl", args, logTarget, nil
+	}
+
+	files := filepath.SplitList(environment.Metadata["composeFiles"])
+	if len(files) == 0 && environment.Metadata["composeFile"] != "" {
+		files = []string{environment.Metadata["composeFile"]}
+	}
+	project := strings.TrimSpace(environment.Metadata["projectName"])
+	if len(files) == 0 || project == "" {
+		return "", nil, "", fmt.Errorf("compose log assertion requires compose files and project name")
+	}
+	args := make([]string, 0, len(files)*2+10)
+	for _, file := range files {
+		if strings.TrimSpace(file) != "" {
+			args = append(args, "-f", file)
+		}
+	}
+	args = append(args, "-p", project, "logs", "--no-color", "--no-log-prefix", fmt.Sprintf("--tail=%d", tail))
+	if since != "" {
+		args = append(args, "--since="+since)
+	}
+	services := strings.Split(environment.Metadata["serviceNames"], ",")
+	if len(services) == 0 || (len(services) == 1 && strings.TrimSpace(services[0]) == "") {
+		services = []string{"myceld-a", "myceld-b", "myceld-c"}
+	}
+	for _, service := range services {
+		if service = strings.TrimSpace(service); service != "" {
+			args = append(args, service)
+		}
+	}
+	logTarget := resource
+	if selector != "" {
+		logTarget = "selector " + selector
+	}
+	return "docker-compose", args, logTarget, nil
 }
 
 type forbiddenLogCapture struct {
