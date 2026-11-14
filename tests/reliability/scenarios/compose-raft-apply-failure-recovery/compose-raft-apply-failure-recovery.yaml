@@ -52,6 +52,7 @@ phases:
         target:
           ordinal: 0
       - type: node-restart
+        duration: 3s
         target:
           ordinal: 0
       - type: cluster-recovery-wait
@@ -59,7 +60,7 @@ phases:
           timeout: 90s
           interval: 200ms
           commandTimeout: 3s
-          sessionInitTimeout: 20s
+          sessionInitTimeout: 60s
           minimumStablePolls: 3
           reuseEndpointSessions: true
           requireZeroApplyLag: true

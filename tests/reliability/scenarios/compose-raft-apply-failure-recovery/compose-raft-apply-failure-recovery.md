@@ -30,7 +30,7 @@ flowchart LR
 1. **establish-committed-graph-work**. Graph actors create committed transactions.
 2. **inject-local-apply-storage-failure**. Makes `/data/mycel/graphs` unavailable on `myceld-a` while actors continue writing.
 3. **assert-failed-apply-is-fenced**. Requires the daemon log to contain the apply-stop diagnostic.
-4. **restore-and-replay**. Restores graph storage, restarts node `0`, and waits for zero apply lag and consistent cluster progress.
+4. **restore-and-replay**. Restores graph storage, restarts node `0`, allows the restarted endpoint to settle, and waits for zero apply lag and consistent cluster progress.
 
 ## Actors
 
@@ -46,6 +46,7 @@ flowchart LR
 | `partitionCount` | `16` | Must match the Compose cluster topology. |
 | `ordinal` | `0` | Selects the node whose graph storage is faulted and restored. |
 | graph-writer rate | `8 commits/second` | Increase only when extending the bounded fault window. |
+| restart settle delay | `3s` | Keep recovery polling from racing the restarted Compose endpoint. |
 
 ## Evidence and artifacts
 

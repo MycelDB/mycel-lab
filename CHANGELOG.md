@@ -6,6 +6,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- Final graph convergence now accounts for ambiguous graph commits that may have been durably applied before their response was lost, while still fencing acknowledged-write loss and unexpected duplicate counts. The apply-failure recovery scenario also waits for restarted Compose endpoints and allows the longer Raft leadership convergence window.
+
 ### Added
 
 - Added the Compose `compose-raft-apply-failure-recovery` reliability scenario and suite. It makes one node's graph storage unavailable during a committed Raft apply, requires the local group to fence without advancing past the failed entry, then restores storage and verifies replay, zero apply lag, convergence, and no acknowledged graph transaction loss for MycelDB/mycel#340.
