@@ -130,7 +130,7 @@ func validateEvent(event spec.EventSpec) error {
 		}
 	case "rolling-restart", "environment-reset":
 		return nil
-	case "lexical-local-artifact-loss", "graph-change-notification-fault", "graph-change-notification-restore":
+	case "lexical-local-artifact-loss", "graph-change-notification-fault", "graph-change-notification-restore", "graph-raft-apply-storage-fault", "graph-raft-apply-storage-restore":
 		if nodeTargetOrdinal(event.Target) < 0 && len(nodeTargetOrdinalSequence(event.Target)) == 0 && len(intSliceTarget(event.Target, "ordinals")) == 0 {
 			return fmt.Errorf("%s requires target.ordinal, target.ordinalSequence, or target.ordinals", event.Type)
 		}
@@ -139,7 +139,7 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "image") == "" {
 			return fmt.Errorf("%s requires target.image", event.Type)
 		}
-	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-reconciliation-start", "procedure-inference-reconciliation-await-terminal", "procedure-inference-emulator-assert", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "revision-fence-assert", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-work-assert", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
+	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-reconciliation-start", "procedure-inference-reconciliation-await-terminal", "procedure-inference-emulator-assert", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "log-assert", "revision-fence-assert", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-work-assert", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
 		return nil
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {

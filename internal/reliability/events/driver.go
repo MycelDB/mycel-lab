@@ -247,6 +247,12 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "graph-change-notification-restore":
 		result, err := executeGraphChangeNotificationRestore(ctx, r.Driver, r.Environment, event.Target)
 		return map[string]any{"graphChangeNotificationRestore": result}, err
+	case "graph-raft-apply-storage-fault":
+		result, err := executeGraphRaftApplyStorageFault(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"graphRaftApplyStorageFault": result}, err
+	case "graph-raft-apply-storage-restore":
+		result, err := executeGraphRaftApplyStorageRestore(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"graphRaftApplyStorageRestore": result}, err
 	case "semantic-local-baseline-loss":
 		result, err := executeSemanticLocalBaselineLoss(ctx, r.Driver, r.Environment, r.Resources, event.Target)
 		if err != nil {
@@ -266,6 +272,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "log-assert-absent":
 		result, err := executeLogAssertAbsentEvent(ctx, r.Environment, event.Target)
 		return map[string]any{"logAssertAbsent": result}, err
+	case "log-assert":
+		result, err := executeLogAssertEvent(ctx, r.Environment, event.Target)
+		return map[string]any{"logAssert": result}, err
 	case "revision-fence-assert":
 		result, err := executeRevisionFenceAssertion(ctx, r.Resources, event.Target)
 		return map[string]any{"revisionFence": result}, err

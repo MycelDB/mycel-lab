@@ -74,6 +74,68 @@ func executeLogAssertAbsentEvent(ctx context.Context, environment env.Environmen
 	return result, nil
 }
 
+type LogAssertResult struct {
+	Resource string   `json:"resource,omitempty"`
+	Selector string   `json:"selector,omitempty"`
+	Tail     int      `json:"tail"`
+	Since    string   `json:"since,omitempty"`
+	Timeout  string   `json:"timeout"`
+	Patterns []string `json:"patterns"`
+	Matches  []string `json:"matches,omitempty"`
+	Stdout   string   `json:"stdout,omitempty"`
+	Stderr   string   `json:"stderr,omitempty"`
+}
+
+func executeLogAssertEvent(ctx context.Context, environment env.Environment, target map[string]any) (LogAssertResult, error) {
+	selector := stringTarget(target, "selector")
+	resource := stringTarget(target, "resource")
+	if selector == "" && resource == "" {
+		resource = "statefulset/myceld"
+	}
+	tail := intTarget(target, "tail", 1000)
+	if tail == 0 || tail < -1 {
+		return LogAssertResult{}, fmt.Errorf("log-assert tail must be -1 or a positive line count")
+	}
+	since := stringTarget(target, "since")
+	if since != "" {
+		duration, err := time.ParseDuration(since)
+		if err != nil || duration <= 0 {
+			return LogAssertResult{}, fmt.Errorf("log-assert since must be a positive duration, got %q", since)
+		}
+	}
+	commandTimeout, err := targetDuration(target, "timeout")
+	if err != nil {
+		return LogAssertResult{}, err
+	}
+	if commandTimeout <= 0 {
+		commandTimeout = 2 * time.Minute
+	}
+	patterns := stringListTarget(target, "patterns")
+	if len(patterns) == 0 {
+		patterns = []string{"raft group apply stopped"}
+	}
+	commandName, args, logTarget, err := logCommand(environment, selector, resource, tail, since)
+	if err != nil {
+		return LogAssertResult{}, err
+	}
+	commandCtx, commandCancel := context.WithTimeout(ctx, commandTimeout)
+	defer commandCancel()
+	cmd := exec.CommandContext(commandCtx, commandName, args...)
+	capture := newForbiddenLogCapture(patterns, 16384)
+	cmd.Stdout = capture
+	cmd.Stderr = capture
+	err = cmd.Run()
+	result := LogAssertResult{Resource: resource, Selector: selector, Tail: tail, Since: since, Timeout: commandTimeout.String(), Patterns: patterns, Matches: capture.matches(), Stdout: capture.output()}
+	if err != nil {
+		result.Stderr = err.Error()
+		return result, fmt.Errorf("%s logs %s: %w", commandName, logTarget, err)
+	}
+	if len(result.Matches) == 0 {
+		return result, fmt.Errorf("logs for %s do not contain required pattern(s): %s", logTarget, strings.Join(patterns, ", "))
+	}
+	return result, nil
+}
+
 func logCommand(environment env.Environment, selector, resource string, tail int, since string) (string, []string, string, error) {
 	if environment.Driver != "compose" {
 		args := []string{}

@@ -6,6 +6,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Added the Compose `compose-raft-apply-failure-recovery` reliability scenario and suite. It makes one node's graph storage unavailable during a committed Raft apply, requires the local group to fence without advancing past the failed entry, then restores storage and verifies replay, zero apply lag, convergence, and no acknowledged graph transaction loss for MycelDB/mycel#340.
+
 ## [v0.22.0] - 2026-11-09
 
 ### Added
