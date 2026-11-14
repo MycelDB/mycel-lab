@@ -1,0 +1,78 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-raft-apply-failure-recovery
+  description: Stop one node after a committed graph apply hits unavailable local storage, then restore and replay the entry without advancing past the failure.
+seed: 340
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/graph-change-outbox-ports.yml
+    projectNamePrefix: mycel-lab-raft-apply-failure
+    imageOverride: local/mycel:dev
+    serviceNames: [myceld-a, myceld-b, myceld-c]
+    grpcPorts: [19291, 19292, 19293]
+  capabilities:
+    required: [per-node-endpoints, node-exec, rolling-restart, logs]
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: graph-writers
+    profileRef: graph-committer
+    count: 2
+    rate:
+      mode: group-total
+      commitsPerSecond: 8
+phases:
+  - name: establish-committed-graph-work
+    duration: 2s
+  - name: inject-local-apply-storage-failure
+    duration: 3s
+    events:
+      - type: graph-raft-apply-storage-fault
+        target:
+          ordinal: 0
+  - name: assert-failed-apply-is-fenced
+    duration: 1ms
+    events:
+      - type: log-assert
+        target:
+          since: 60s
+          timeout: 30s
+          patterns: ["raft group apply stopped"]
+  - name: restore-and-replay
+    duration: 1ms
+    events:
+      - type: graph-raft-apply-storage-restore
+        target:
+          ordinal: 0
+      - type: node-restart
+        target:
+          ordinal: 0
+      - type: cluster-recovery-wait
+        target:
+          timeout: 90s
+          interval: 200ms
+          commandTimeout: 3s
+          sessionInitTimeout: 20s
+          minimumStablePolls: 3
+          reuseEndpointSessions: true
+          requireZeroApplyLag: true
+          requireConsistentProgress: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 90s
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+    requireConvergedCounts: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true
