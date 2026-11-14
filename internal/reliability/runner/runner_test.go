@@ -1649,12 +1649,19 @@ func TestRunRecorderCountsUnresolvedGraphCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := &runRecorder{sink: sink, runID: "run-1"}
-	event := actors.ActorEvent{Type: "graph-transaction-commit-unresolved", ActorID: "writer-0", Transaction: oracle.Transaction{ErrorClass: "unavailable"}}
+	event := actors.ActorEvent{Type: "graph-transaction-commit-unresolved", ActorID: "writer-0", Transaction: oracle.Transaction{ErrorClass: "unavailable", Operations: []oracle.Operation{
+		{Type: oracle.OperationCreateNode},
+		{Type: oracle.OperationCreateNode},
+		{Type: oracle.OperationCreateEdge},
+	}}}
 	if err := recorder.RecordActorEvent(context.Background(), event); err != nil {
 		t.Fatalf("RecordActorEvent() error=%v", err)
 	}
 	if recorder.unresolvedGraphCommits != 1 {
 		t.Fatalf("unresolvedGraphCommits=%d, want 1", recorder.unresolvedGraphCommits)
+	}
+	if got := recorder.unresolvedByActor["writer-0"]; got != (graphCounts{Nodes: 2, Edges: 1}) {
+		t.Fatalf("unresolvedByActor=%+v, want nodes=2 edges=1", got)
 	}
 }
 
@@ -1668,6 +1675,42 @@ func TestFinalOracleAssertionsFailOnUnresolvedGraphCommit(t *testing.T) {
 	evaluateFinalOracleAssertions(&report, resources, true)
 	if report.AssertionsOK || !strings.Contains(strings.Join(report.AssertionErrors, " "), "unresolved graph commits=1") {
 		t.Fatalf("report=%+v, want unresolved commit failure", report)
+	}
+}
+
+func TestFinalOracleAssertionsAllowPossiblyCommittedGraphTransaction(t *testing.T) {
+	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space", DomainID: "domain", DaemonAddr: "daemon"}}}
+	report := finalOracleReport{
+		RequiredAssertions: finalOracleAssertionOptions{RequireConvergedCounts: true, RequireNoAcknowledgedGraphTransactionLoss: true},
+		LiveChecks: []finalOracleLiveCheck{{
+			ActorID:            "writer-0",
+			Expected:           graphCounts{Nodes: 2, Edges: 1},
+			PossibleUnresolved: graphCounts{Nodes: 2, Edges: 1},
+			Actual:             graphCounts{Nodes: 4, Edges: 2},
+			OK:                 true,
+		}},
+	}
+	evaluateFinalOracleAssertions(&report, resources, true)
+	if !report.AssertionsOK {
+		t.Fatalf("report=%+v, want possibly committed transaction accepted", report)
+	}
+}
+
+func TestFinalOracleAssertionsRejectCountsBeyondPossiblyCommittedGraphTransaction(t *testing.T) {
+	resources := provision.ScenarioResources{Assignments: []provision.ActorAssignment{{ActorID: "writer-0", BehaviorType: "graph-transaction", SpaceID: "space", DomainID: "domain", DaemonAddr: "daemon"}}}
+	report := finalOracleReport{
+		RequiredAssertions: finalOracleAssertionOptions{RequireConvergedCounts: true},
+		LiveChecks: []finalOracleLiveCheck{{
+			ActorID:            "writer-0",
+			Expected:           graphCounts{Nodes: 2, Edges: 1},
+			PossibleUnresolved: graphCounts{Nodes: 2, Edges: 1},
+			Actual:             graphCounts{Nodes: 5, Edges: 2},
+			OK:                 false,
+		}},
+	}
+	evaluateFinalOracleAssertions(&report, resources, true)
+	if report.AssertionsOK || len(report.AssertionErrors) == 0 {
+		t.Fatalf("report=%+v, want out-of-range count failure", report)
 	}
 }
 
