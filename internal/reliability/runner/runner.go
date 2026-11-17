@@ -1420,6 +1420,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 	failedWrites := recorder.failedWrites
 	unresolvedGraphCommits := recorder.unresolvedGraphCommits
 	expectedByActor := cloneGraphCountsMap(recorder.expectedByActor)
+	unresolvedByActor := cloneGraphCountsMap(recorder.unresolvedByActor)
 	recorder.mu.Unlock()
 	failedReads := 0
 	for _, check := range readChecks {
@@ -1435,6 +1436,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 		AcknowledgedTransactions: len(acknowledged),
 		ExpectedCounts:           expectedCounts,
 		ExpectedCountsByActor:    expectedByActor,
+		UnresolvedCountsByActor:  unresolvedByActor,
 		ReadChecks:               len(readChecks),
 		FailedReads:              failedReads,
 		FailedWrites:             failedWrites,
@@ -1442,7 +1444,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 		RequiredAssertions:       finalOracleAssertionOptionsFrom(assertions),
 	}
 	if live {
-		report.LiveChecks = runLiveFinalOracleChecks(ctx, resources, expectedByActor)
+		report.LiveChecks = runLiveFinalOracleChecksWithUnresolved(ctx, resources, expectedByActor, unresolvedByActor)
 	}
 	report.OK = report.FailedReads == 0 && report.FailedWrites == 0
 	for _, check := range report.LiveChecks {
@@ -1467,7 +1469,7 @@ func writeFinalOracleReport(ctx context.Context, sink *artifacts.Sink, recorder 
 	if len(report.LiveChecks) > 0 {
 		fmt.Fprintf(&b, "\n## Live graph checks\n\n")
 		for _, check := range report.LiveChecks {
-			fmt.Fprintf(&b, "- `%s`: expected nodes=%d, actual nodes=%d, expected edges=%d, actual edges=%d, ok=%t", check.ActorID, check.Expected.Nodes, check.Actual.Nodes, check.Expected.Edges, check.Actual.Edges, check.OK)
+			fmt.Fprintf(&b, "- `%s`: expected nodes=%d, actual nodes=%d, expected edges=%d, actual edges=%d, possible unresolved nodes=%d edges=%d, ok=%t", check.ActorID, check.Expected.Nodes, check.Actual.Nodes, check.Expected.Edges, check.Actual.Edges, check.PossibleUnresolved.Nodes, check.PossibleUnresolved.Edges, check.OK)
 			if check.Error != "" {
 				fmt.Fprintf(&b, ", error=%s", check.Error)
 			}
@@ -1495,6 +1497,7 @@ type finalOracleReport struct {
 	AcknowledgedTransactions int                         `json:"acknowledgedTransactions"`
 	ExpectedCounts           oracle.Counts               `json:"expectedCounts"`
 	ExpectedCountsByActor    map[string]graphCounts      `json:"expectedCountsByActor,omitempty"`
+	UnresolvedCountsByActor  map[string]graphCounts      `json:"unresolvedCountsByActor,omitempty"`
 	LiveChecks               []finalOracleLiveCheck      `json:"liveChecks,omitempty"`
 	ReadChecks               int                         `json:"readChecks"`
 	FailedReads              int                         `json:"failedReads"`
@@ -1548,7 +1551,7 @@ func evaluateFinalOracleAssertions(report *finalOracleReport, resources provisio
 		report.AssertionErrors = append(report.AssertionErrors, fmt.Sprintf("live graph checks=%d, expected graph assignments=%d", len(report.LiveChecks), expectedChecks))
 	}
 	for _, check := range report.LiveChecks {
-		if check.OK && check.Error == "" && check.Actual == check.Expected {
+		if check.OK && check.Error == "" && graphCountsWithinUnresolvedRange(check.Expected, check.Actual, check.PossibleUnresolved) {
 			continue
 		}
 		message := fmt.Sprintf("actor %s graph counts differ: expected nodes=%d edges=%d, actual nodes=%d edges=%d", check.ActorID, check.Expected.Nodes, check.Expected.Edges, check.Actual.Nodes, check.Actual.Edges)
@@ -1561,14 +1564,15 @@ func evaluateFinalOracleAssertions(report *finalOracleReport, resources provisio
 }
 
 type finalOracleLiveCheck struct {
-	ActorID    string      `json:"actorId"`
-	SpaceID    string      `json:"spaceId"`
-	DomainID   string      `json:"domainId"`
-	DaemonAddr string      `json:"daemonAddr"`
-	Expected   graphCounts `json:"expected"`
-	Actual     graphCounts `json:"actual"`
-	OK         bool        `json:"ok"`
-	Error      string      `json:"error,omitempty"`
+	ActorID            string      `json:"actorId"`
+	SpaceID            string      `json:"spaceId"`
+	DomainID           string      `json:"domainId"`
+	DaemonAddr         string      `json:"daemonAddr"`
+	Expected           graphCounts `json:"expected"`
+	PossibleUnresolved graphCounts `json:"possibleUnresolved,omitempty"`
+	Actual             graphCounts `json:"actual"`
+	OK                 bool        `json:"ok"`
+	Error              string      `json:"error,omitempty"`
 }
 
 type graphCounts struct {
@@ -1580,6 +1584,10 @@ type finalOracleCountReader func(context.Context, provision.ActorAssignment, gra
 
 func runLiveFinalOracleChecks(ctx context.Context, resources provision.ScenarioResources, expectedByActor map[string]graphCounts) []finalOracleLiveCheck {
 	return runLiveFinalOracleChecksWithReader(ctx, resources, expectedByActor, 20*time.Second, readFinalGraphCounts)
+}
+
+func runLiveFinalOracleChecksWithUnresolved(ctx context.Context, resources provision.ScenarioResources, expectedByActor, unresolvedByActor map[string]graphCounts) []finalOracleLiveCheck {
+	return runLiveFinalOracleChecksWithUnresolvedAndReader(ctx, resources, expectedByActor, unresolvedByActor, 20*time.Second, readFinalGraphCountsWithUnresolved)
 }
 
 func runLiveFinalOracleChecksWithReader(ctx context.Context, resources provision.ScenarioResources, expectedByActor map[string]graphCounts, assignmentTimeout time.Duration, reader finalOracleCountReader) []finalOracleLiveCheck {
@@ -1625,7 +1633,69 @@ func runLiveFinalOracleChecksWithReader(ctx context.Context, resources provision
 	return checks
 }
 
+func runLiveFinalOracleChecksWithUnresolvedAndReader(ctx context.Context, resources provision.ScenarioResources, expectedByActor, unresolvedByActor map[string]graphCounts, assignmentTimeout time.Duration, reader func(context.Context, provision.ActorAssignment, graphCounts, graphCounts) (graphCounts, error)) []finalOracleLiveCheck {
+	checks := []finalOracleLiveCheck{}
+	for _, assignment := range resources.Assignments {
+		if (assignment.BehaviorType != "graph-transaction" && assignment.BehaviorType != "import-journal") || assignment.SpaceID == "" || assignment.DomainID == "" || assignment.DaemonAddr == "" {
+			continue
+		}
+		expected := expectedByActor[assignment.ActorID]
+		possible := unresolvedByActor[assignment.ActorID]
+		check := finalOracleLiveCheck{ActorID: assignment.ActorID, SpaceID: assignment.SpaceID, DomainID: assignment.DomainID, DaemonAddr: assignment.DaemonAddr, Expected: expected, PossibleUnresolved: possible}
+		assignmentCtx, assignmentCancel := context.WithTimeout(ctx, assignmentTimeout)
+		type countResult struct {
+			actual graphCounts
+			err    error
+		}
+		result := make(chan countResult, 1)
+		go func() {
+			actual, readErr := reader(assignmentCtx, assignment, expected, possible)
+			result <- countResult{actual: actual, err: readErr}
+		}()
+		var actual graphCounts
+		var err error
+		select {
+		case completed := <-result:
+			actual = completed.actual
+			err = completed.err
+		case <-assignmentCtx.Done():
+			err = assignmentCtx.Err()
+		}
+		contextErr := assignmentCtx.Err()
+		assignmentCancel()
+		check.Actual = actual
+		if err == nil && contextErr != nil {
+			err = contextErr
+		}
+		if err != nil {
+			check.Error = err.Error()
+		} else {
+			check.OK = graphCountsWithinUnresolvedRange(expected, actual, possible)
+		}
+		checks = append(checks, check)
+	}
+	return checks
+}
+
 func readFinalGraphCounts(ctx context.Context, assignment provision.ActorAssignment, expected graphCounts) (graphCounts, error) {
+	if expected.Edges == int(^uint(0)>>1) {
+		return graphCounts{}, errors.New("final graph edge count limit overflow")
+	}
+	return readFinalGraphCountsWithEdgeLimit(ctx, assignment, expected.Edges)
+}
+
+func readFinalGraphCountsWithUnresolved(ctx context.Context, assignment provision.ActorAssignment, expected, possible graphCounts) (graphCounts, error) {
+	maximum, err := checkedAddGraphCounts(expected, possible)
+	if err != nil {
+		return graphCounts{}, err
+	}
+	if maximum.Edges == int(^uint(0)>>1) {
+		return graphCounts{}, errors.New("final graph edge count limit overflow")
+	}
+	return readFinalGraphCountsWithEdgeLimit(ctx, assignment, maximum.Edges)
+}
+
+func readFinalGraphCountsWithEdgeLimit(ctx context.Context, assignment provision.ActorAssignment, edgeLimit int) (graphCounts, error) {
 	cfg := mycel.Config{Addr: assignment.DaemonAddr, Username: assignment.Username, Password: assignment.Password, ClientName: "mycel-lab-oracle"}
 	if assignment.AccessToken != "" {
 		cfg.Username = ""
@@ -1640,7 +1710,7 @@ func readFinalGraphCounts(ctx context.Context, assignment provision.ActorAssignm
 	}
 	defer client.Close()
 	nodes, nodeErr := queryCount(ctx, client, assignment.SpaceID, assignment.DomainID, "MATCH (n) RETURN count(n) FETCH FIRST 1 ROW ONLY")
-	edges, edgeErr := queryEdgeCount(ctx, client, assignment.SpaceID, assignment.DomainID, expected.Edges)
+	edges, edgeErr := queryEdgeCount(ctx, client, assignment.SpaceID, assignment.DomainID, edgeLimit)
 	actual := graphCounts{Nodes: int(nodes), Edges: int(edges)}
 	switch {
 	case nodeErr != nil && edgeErr != nil:
@@ -1747,6 +1817,14 @@ func cloneGraphCountsMap(in map[string]graphCounts) map[string]graphCounts {
 		out[k] = v
 	}
 	return out
+}
+
+func graphCountsWithinUnresolvedRange(expected, actual, possible graphCounts) bool {
+	maximum, err := checkedAddGraphCounts(expected, possible)
+	if err != nil {
+		return false
+	}
+	return actual.Nodes >= expected.Nodes && actual.Nodes <= maximum.Nodes && actual.Edges >= expected.Edges && actual.Edges <= maximum.Edges
 }
 
 func aggregateExpectedGraphCounts(expectedByActor map[string]graphCounts) (oracle.Counts, error) {
@@ -1906,6 +1984,7 @@ type runRecorder struct {
 	budgetErr              error
 	acknowledged           []oracle.Transaction
 	expectedByActor        map[string]graphCounts
+	unresolvedByActor      map[string]graphCounts
 	readChecks             []map[string]any
 	successfulReads        int
 	failedWrites           int
@@ -2042,6 +2121,17 @@ func (r *runRecorder) RecordActorEvent(ctx context.Context, event actors.ActorEv
 	case "graph-transaction-commit-unresolved":
 		r.mu.Lock()
 		r.unresolvedGraphCommits++
+		if r.unresolvedByActor == nil {
+			r.unresolvedByActor = map[string]graphCounts{}
+		}
+		counts := countTransactionOps(event.Transaction)
+		current := r.unresolvedByActor[event.ActorID]
+		updated, err := checkedAddGraphCounts(current, counts)
+		if err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		r.unresolvedByActor[event.ActorID] = updated
 		r.mu.Unlock()
 		_ = appendMetric(ctx, r.store, r.sink, r.runID, "unresolved_graph_commits", 1, map[string]any{"actorId": event.ActorID, "groupName": event.GroupName, "class": event.Transaction.ErrorClass})
 	case "graph-transaction-failed":

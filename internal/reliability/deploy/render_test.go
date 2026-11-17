@@ -38,6 +38,7 @@ func TestRenderKubernetesManifestsReflectClusterProfile(t *testing.T) {
 		`MYCELD_BOOTSTRAP_ADMIN_USERNAME: "admin"`,
 		`MYCELD_BOOTSTRAP_ADMIN_PASSWORD: "admin-password"`,
 		`MYCELD_CLUSTER_BACKEND_AUTH_TOKEN: "mycel-lab-local-backend-token"`,
+		`MYCELD_ACCESS_TOKEN_SIGNING_SECRET_B64: "bXljZWwtbGFiLWFjY2Vzcy10b2tlbi1zaWduaW5nLXNlY3JldC12MQ=="`,
 		`MYCELD_CLUSTER_RAFT_NODE_COUNT: "3"`,
 		`MYCELD_CLUSTER_RAFT_PARTITION_COUNT: "32"`,
 		`MYCELD_CLUSTER_RAFT_REPLICA_FACTOR: "3"`,

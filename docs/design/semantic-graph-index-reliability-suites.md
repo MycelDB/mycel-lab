@@ -244,7 +244,7 @@ Each assertion emits structured events and a final verdict section.
 - artifact redaction.
 
 The current contract definition contains three cases; the full credential-free
-aggregate defines 16 cases / 65 phases. Definitions and local harness tests are not
+aggregate defines 16 cases / 67 phases. Definitions and local harness tests are not
 runtime acceptance: fresh exact-source v0.21.4 qualification remains required.
 
 ### Tranche B: recovery suite

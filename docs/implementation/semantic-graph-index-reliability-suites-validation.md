@@ -34,7 +34,7 @@ allowed. Unknown capabilities, truncated/ambiguous evidence, falsely fresh work,
 changed identity/generation, and replayed attempts fail closed.
 
 The completion batch expands the aggregate from the landed four cases /
-25 phases to **16 scenarios / 65 phases**: true controlled out-of-order publication,
+25 phases to **16 scenarios / 67 phases**: true controlled out-of-order publication,
 nine finite provider-failure cases, independent same-space domain isolation, and
 configured model/dimension/vector-space migration. It also adds provider-stage planning and
 pre-deployment capability rejection for unsupported native composition. See the
@@ -214,7 +214,7 @@ and provisioning rejects a forged resolved plan that bypasses catalog checks.
 
 Earlier dirty-development planning-only evidence:
 `artifacts/dry-runs/issue46-domain-model-final-20261105T015350Z`.
-The credential-free aggregate resolves 16 scenarios / 65 phases; manual-live
+The credential-free aggregate resolves 16 scenarios / 67 phases; manual-live
 planning resolves one / four. All 17 terminal results declare `dryRun: true`,
 all manifest/Compose daemon selections match immutable v0.21.4, and provider
 request counts are zero. Artifact safety passed for 17 runs / 361 files.

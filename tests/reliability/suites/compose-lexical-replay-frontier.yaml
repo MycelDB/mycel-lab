@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-lexical-replay-frontier
+  description: Lexical historical replay frontier publication guardrail on a three-node Compose cluster.
+scenarios:
+  - path: ../scenarios/compose-lexical-replay-frontier/compose-lexical-replay-frontier.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

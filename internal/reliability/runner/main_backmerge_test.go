@@ -37,7 +37,7 @@ func TestSemanticGateNamesStillAllowExplicitPlanningWithoutRuntime(t *testing.T)
 	for _, test := range []struct {
 		name              string
 		scenarios, phases int
-	}{{"semantic-graph-index-live", 1, 4}, {"semantic-graph-index-release-gate", 16, 65}} {
+	}{{"semantic-graph-index-live", 1, 4}, {"semantic-graph-index-release-gate", 16, 67}} {
 		t.Run(test.name, func(t *testing.T) {
 			result, err := RunSuiteFile(context.Background(), filepath.Join("..", "..", "..", "tests", "reliability", "suites", test.name+".yaml"), Options{DryRun: true, ArtifactRoot: t.TempDir()})
 			if err != nil || !result.DryRun || len(result.Results) != test.scenarios {

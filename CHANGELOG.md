@@ -6,6 +6,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [v0.23.0] - 2026-11-17
+
+### Added
+
+- Added the Compose `compose-raft-apply-failure-recovery` reliability scenario and suite. It makes one node's graph storage unavailable during a committed Raft apply, requires the local group to fence without advancing past the failed entry, then restores storage and verifies replay, zero apply lag, convergence, and no acknowledged graph transaction loss for MycelDB/mycel#340.
+- Added v0.23 release alignment for the Go SDK dependency and qualification harness build against the coordinated Mycel daemon/API v0.23 contract.
+
+### Fixed
+
+- Final graph convergence now accounts for ambiguous graph commits that may have been durably applied before their response was lost, while still fencing acknowledged-write loss and unexpected duplicate counts. The apply-failure recovery scenario also waits for restarted Compose endpoints and allows the longer Raft leadership convergence window.
+
 ## [v0.22.0] - 2026-11-09
 
 ### Added

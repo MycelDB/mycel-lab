@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide the credential-free compose-first Tranche B recovery suite for Mycel Lab issue #46. The scenario complements the semantic graph-index contract by proving deterministic semantic records remain valid through rolling restarts, post-restart indexing, rebuild from graph truth, and rebuild delta catch-up.
+Provide the credential-free Compose recovery scenario for projection materialization. The scenario complements the semantic graph-index contract by proving deterministic semantic records remain valid through leadership/restart changes, post-restart indexing, tombstone deletion, rebuild from graph truth, rebuild delta catch-up, and local-baseline loss.
 
 ## What this test proves
 
@@ -12,9 +12,11 @@ The scenario proves:
 - unchanged semantic content retains the same vector-record identity across restart;
 - new graph data committed after restart is indexed and searchable;
 - a projection change marks the rule as rebuild-required;
+- deleting a graph node advances freshness and removes its semantic result through a tombstone;
 - rebuild from graph truth creates a new semantic generation/configuration;
 - a graph mutation committed while rebuild is running is caught up by the rebuilt generation;
-- rebuilt semantic records remain usable after another rolling restart.
+- rebuilt semantic records remain usable after another rolling restart;
+- deleting each node's local semantic baseline and restarting recovers readiness from graph truth without losing tombstone behavior.
 
 This initial Tranche B scenario does not yet prove scripted stale/out-of-order provider responses or scripted provider retry/degraded-state behavior. Those require deterministic provider outcome scripts or emulator profiles and are tracked as later Tranche B/C work.
 
@@ -36,8 +38,10 @@ flowchart LR
 1. Seed deterministic graph fixtures, create the deferred semantic rule, force backfill, reach convergence, and capture the baseline semantic record, generation, and configuration hash.
 2. Perform a rolling Compose restart and prove the baseline record remains directly searchable with the same record identity and configuration.
 3. Commit a new post-restart graph node and prove semantic maintenance catches it up.
-4. Change the projection, require rebuild, rebuild from graph truth while committing a concurrent delta node, and prove both pinned baseline and delta records belong to the rebuilt generation/epoch.
-5. Perform another rolling restart and prove rebuilt delta search remains valid.
+4. Create and then delete a graph node, proving tombstone freshness and that the deleted node is not searchable.
+5. Change the projection, require rebuild, rebuild from graph truth while committing a concurrent delta node, and prove both pinned baseline and delta records belong to the rebuilt generation/epoch.
+6. Perform another rolling restart and prove rebuilt delta search remains valid.
+7. Remove the local semantic baseline on all three nodes, restart each node, and prove readiness, rebuilt search provenance, and tombstone filtering recover.
 
 ## Actors
 
@@ -58,7 +62,8 @@ Required events emit graph transaction/revision evidence, rolling-restart eviden
 - Maintenance timeout, degraded state, unresolved gap, or rebuild-required marker after rebuild.
 - Baseline record identity changes across restart without a graph/projection change.
 - Rebuild does not advance generation/configuration or fails to catch up the concurrent delta.
-- Unexpected warning, fallback, stale record, or redaction finding.
+- Local baseline loss does not recover from graph truth, or readiness remains fenced.
+- Unexpected warning, fallback, stale record, deleted result, or redaction finding.
 
 ## When to run
 

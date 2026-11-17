@@ -130,7 +130,7 @@ func TestSemanticReleaseGateDraftBindsAllSuiteInputsInOrder(t *testing.T) {
 			t.Fatalf("case %s ports %v != %v", item.Name, item.Environment.Options["grpcPorts"], wantPorts)
 		}
 	}
-	if phases != 65 {
-		t.Fatalf("phase count=%d, want 65", phases)
+	if phases != 67 {
+		t.Fatalf("phase count=%d, want 67", phases)
 	}
 }

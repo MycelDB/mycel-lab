@@ -69,6 +69,8 @@ func evidenceSafeLiveSemanticEventTarget(event spec.EventSpec) map[string]any {
 		allowed = map[string]struct{}{"minimumAttempts": {}, "requireTerminal": {}}
 	case "semantic-rule-enable":
 		allowed = map[string]struct{}{"enabled": {}}
+	case "semantic-local-baseline-loss":
+		allowed = map[string]struct{}{"ordinal": {}}
 	}
 	out := map[string]any{"sensitiveSemanticInputsRedacted": true}
 	for key, value := range event.Target {
@@ -236,6 +238,28 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "commonfolio-automation-await-terminal":
 		result, err := executeCommonFolioAwaitTerminalEvent(ctx, r.Driver, r.Environment, r.Resources, event.Target)
 		return map[string]any{"commonfolioTerminalFixture": result}, err
+	case "lexical-local-artifact-loss":
+		result, err := executeLexicalLocalArtifactLoss(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"lexicalArtifactLoss": result}, err
+	case "graph-change-notification-fault":
+		result, err := executeGraphChangeNotificationFault(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"graphChangeNotificationFault": result}, err
+	case "graph-change-notification-restore":
+		result, err := executeGraphChangeNotificationRestore(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"graphChangeNotificationRestore": result}, err
+	case "graph-raft-apply-storage-fault":
+		result, err := executeGraphRaftApplyStorageFault(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"graphRaftApplyStorageFault": result}, err
+	case "graph-raft-apply-storage-restore":
+		result, err := executeGraphRaftApplyStorageRestore(ctx, r.Driver, r.Environment, event.Target)
+		return map[string]any{"graphRaftApplyStorageRestore": result}, err
+	case "semantic-local-baseline-loss":
+		result, err := executeSemanticLocalBaselineLoss(ctx, r.Driver, r.Environment, r.Resources, event.Target)
+		if err != nil {
+			return map[string]any{"semanticBaselineLoss": result}, err
+		}
+		recovery, recoveryErr := r.restartNodeAndRecoverEndpoint(ctx, event.Target)
+		return map[string]any{"semanticBaselineLoss": result, "endpointRecovery": recovery}, recoveryErr
 	case "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-work-assert", "semantic-domain-peer-create", "semantic-domain-isolation-assert", "semantic-route-create", "semantic-route-bind", "semantic-model-config-update", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
 		result, err := executeSemanticEvent(ctx, r.Resources, event.Type, event.Target)
 		if r.liveSemanticProvider() {
@@ -248,6 +272,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "log-assert-absent":
 		result, err := executeLogAssertAbsentEvent(ctx, r.Environment, event.Target)
 		return map[string]any{"logAssertAbsent": result}, err
+	case "log-assert":
+		result, err := executeLogAssertEvent(ctx, r.Environment, event.Target)
+		return map[string]any{"logAssert": result}, err
 	case "revision-fence-assert":
 		result, err := executeRevisionFenceAssertion(ctx, r.Resources, event.Target)
 		return map[string]any{"revisionFence": result}, err

@@ -6,6 +6,9 @@ metadata:
 cluster:
   nodes: 3
   image: myceldb/mycel:latest
+  env:
+    # Every node must verify access tokens minted by another node.
+    MYCELD_ACCESS_TOKEN_SIGNING_SECRET_B64: bXljZWwtbGFiLWFjY2Vzcy10b2tlbi1zaWduaW5nLXNlY3JldC12MQ==
   raft:
     nodeCount: 3
     partitionCount: 64

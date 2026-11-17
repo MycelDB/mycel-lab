@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-raft-apply-failure-recovery
+  description: Verify a committed Raft apply failure fences the local group and replays after storage recovery.
+scenarios:
+  - path: ../scenarios/compose-raft-apply-failure-recovery/compose-raft-apply-failure-recovery.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

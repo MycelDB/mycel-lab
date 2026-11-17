@@ -53,6 +53,7 @@ func TestValidateSemanticEventTargetAcceptsTypedContracts(t *testing.T) {
 				},
 			},
 		},
+		{eventType: "semantic-local-baseline-loss", target: map[string]any{"ordinal": 2}},
 	}
 	for _, test := range tests {
 		t.Run(test.eventType, func(t *testing.T) {

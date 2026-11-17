@@ -164,6 +164,8 @@ func semanticTargetFields(eventType string) (map[string]semanticTargetField, err
 	}
 
 	switch eventType {
+	case "semantic-local-baseline-loss":
+		return map[string]semanticTargetField{"ordinal": nonNegativeInt}, nil
 	case "semantic-domain-peer-create":
 		return map[string]semanticTargetField{"name": required(semanticGate)}, nil
 	case "semantic-route-create":
