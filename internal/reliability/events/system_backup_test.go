@@ -48,6 +48,7 @@ func TestClusterBackupCreateUsesAsyncStartWait(t *testing.T) {
 func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) {
 	hostDir := t.TempDir()
 	writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"complete":true,"state":"succeeded","nodes":[{"applied_indexes":{"system":1}}]}`)
+	writeFile(t, filepath.Join(hostDir, "COMPLETE"), `{"schema":"mycel.backup_complete","state":"COMPLETE"}`)
 	writeFile(t, filepath.Join(hostDir, "myceld-0", "node-0.tar"), "archive-0")
 	writeFile(t, filepath.Join(hostDir, "myceld-0", "node-0.manifest.json"), `{}`)
 	writeFile(t, filepath.Join(hostDir, "myceld-1", "node-1.tar"), "archive-1")
@@ -73,6 +74,7 @@ func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) 
 	joinedCopies := strings.Join(driver.copies, "\n")
 	for _, want := range []string{
 		filepath.Join(hostDir, "backup-set.json") + " -> /tmp/mycel-system-backups/backup-set.json",
+		filepath.Join(hostDir, "COMPLETE") + " -> /tmp/mycel-system-backups/COMPLETE",
 		filepath.Join(hostDir, "myceld-0", "node-0.tar") + " -> /tmp/mycel-system-backups/node-0.tar",
 		filepath.Join(hostDir, "myceld-0", "node-0.manifest.json") + " -> /tmp/mycel-system-backups/node-0.manifest.json",
 		filepath.Join(hostDir, "myceld-1", "node-1.tar") + " -> /tmp/mycel-system-backups/node-1.tar",
@@ -84,6 +86,49 @@ func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) 
 	joinedExecs := strings.Join(driver.execs, "\n")
 	if !strings.Contains(joinedExecs, "mkdir -p '/tmp/mycel-system-backups'") || !strings.Contains(joinedExecs, "admin backup cluster validate --backup-set /tmp/mycel-system-backups") {
 		t.Fatalf("missing expected execs:\n%s", joinedExecs)
+	}
+}
+
+func TestClusterBackupValidateSupportsNegativeFixtureExpectations(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing complete marker", body: `{"valid":false,"errors":["missing COMPLETE marker"]}`, want: "missing COMPLETE"},
+		{name: "manifest checksum mismatch", body: `{"valid":false,"validation":{"errors":["manifest checksum mismatch"]}}`, want: "manifest checksum"},
+		{name: "corrupt required artifact", body: `{"valid":false,"validation":{"blockers":[{"reason":"artifact_corrupt","detail":"required artifact checksum mismatch"}]}}`, want: "artifact_corrupt"},
+		{name: "unsupported required feature", body: `{"valid":false,"validation":{"blockers":[{"reason":"unsupported_required_feature","detail":"future feature missing"}]}}`, want: "unsupported_required_feature"},
+		{name: "topology mismatch", body: `{"valid":false,"validation":{"blockers":[{"reason":"topology_mismatch","detail":"expected 3 nodes got 2"}]}}`, want: "topology_mismatch"},
+		{name: "raw secret artifact evidence", body: `{"valid":false,"validation":{"errors":["raw secret-like material detected in artifact evidence"]}}`, want: "raw secret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hostDir := t.TempDir()
+			writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"schema":"mycel.backup_set","manifest_version":1}`)
+			writeFile(t, filepath.Join(hostDir, "myceld-0", "node-0.tar"), "archive-0")
+			driver := &backupValidationDriver{validateStdout: tc.body}
+			backup := SystemBackupOperationResult{Operation: "cluster-backup-create", BackupSetID: "backup-set-negative", BackupDir: "/tmp/mycel-system-backups", HostDir: hostDir, Artifacts: []SystemBackupArtifact{{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", LocalArchive: filepath.Join(hostDir, "myceld-0", "node-0.tar")}}}
+			result, err := executeClusterBackupValidate(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d"}, map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"ordinal": 0, "expectValid": false}, SystemBackupOperationResult{Operation: "cluster-backup-validate", BackupDir: "/tmp/mycel-system-backups"})
+			if err != nil {
+				t.Fatalf("executeClusterBackupValidate() error=%v", err)
+			}
+			if result.BackupSetID != "backup-set-negative" || len(result.ValidationErrors) == 0 || !strings.Contains(strings.Join(result.ValidationErrors, "; "), tc.want) {
+				t.Fatalf("result=%+v, want validation error containing %q", result, tc.want)
+			}
+		})
+	}
+}
+
+func TestClusterBackupValidateFailsWhenNegativeFixtureUnexpectedlyPasses(t *testing.T) {
+	hostDir := t.TempDir()
+	writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"complete":true,"state":"succeeded","nodes":[{"applied_indexes":{"system":1}}]}`)
+	writeFile(t, filepath.Join(hostDir, "myceld-0", "node-0.tar"), "archive-0")
+	driver := &backupValidationDriver{validateStdout: `{"valid":true,"errors":[]}`}
+	backup := SystemBackupOperationResult{Operation: "cluster-backup-create", BackupSetID: "backup-set-positive", BackupDir: "/tmp/mycel-system-backups", HostDir: hostDir, Artifacts: []SystemBackupArtifact{{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", LocalArchive: filepath.Join(hostDir, "myceld-0", "node-0.tar")}}}
+	_, err := executeClusterBackupValidate(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d"}, map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"expectValid": false}, SystemBackupOperationResult{Operation: "cluster-backup-validate", BackupDir: "/tmp/mycel-system-backups"})
+	if err == nil || !strings.Contains(err.Error(), "unexpectedly validated") {
+		t.Fatalf("error=%v, want unexpected pass rejection", err)
 	}
 }
 
@@ -392,8 +437,9 @@ func (d *restoreApplyDriver) RestoreBackupSetOrdinalToPVC(_ context.Context, _ e
 }
 
 type backupValidationDriver struct {
-	execs  []string
-	copies []string
+	execs          []string
+	copies         []string
+	validateStdout string
 }
 
 func (d *backupValidationDriver) Name() string { return "test" }
@@ -416,7 +462,11 @@ func (d *backupValidationDriver) Exec(_ context.Context, _ env.Environment, _ en
 	cmd := strings.Join(req.Command, " ")
 	d.execs = append(d.execs, cmd)
 	if strings.Contains(cmd, "admin backup cluster validate") {
-		return executil.Result{Command: cmd, Stdout: `{"valid":true,"errors":[]}`}, nil
+		stdout := d.validateStdout
+		if strings.TrimSpace(stdout) == "" {
+			stdout = `{"valid":true,"errors":[]}`
+		}
+		return executil.Result{Command: cmd, Stdout: stdout}, nil
 	}
 	return executil.Result{Command: cmd, Stdout: "ok"}, nil
 }

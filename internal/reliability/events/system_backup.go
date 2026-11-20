@@ -24,22 +24,23 @@ import (
 )
 
 type SystemBackupOperationResult struct {
-	Operation      string                      `json:"operation"`
-	BackupSetID    string                      `json:"backupSetId,omitempty"`
-	BackupDir      string                      `json:"backupDir,omitempty"`
-	HostDir        string                      `json:"hostDir,omitempty"`
-	Artifacts      []SystemBackupArtifact      `json:"artifacts,omitempty"`
-	OldPVCUIDs     map[string]string           `json:"oldPvcUids,omitempty"`
-	NewPVCUIDs     map[string]string           `json:"newPvcUids,omitempty"`
-	RestorePlan    string                      `json:"restorePlan,omitempty"`
-	RestoreResults []SystemBackupRestoreResult `json:"restoreResults,omitempty"`
-	VerifiedPods   int                         `json:"verifiedPods,omitempty"`
-	FixtureNodes   int64                       `json:"fixtureNodes,omitempty"`
-	FixtureEdges   int64                       `json:"fixtureEdges,omitempty"`
-	FixtureProved  bool                        `json:"fixtureProved,omitempty"`
-	Stdout         string                      `json:"stdout,omitempty"`
-	Stderr         string                      `json:"stderr,omitempty"`
-	fixture        *userBackupFixtureResult
+	Operation        string                      `json:"operation"`
+	BackupSetID      string                      `json:"backupSetId,omitempty"`
+	BackupDir        string                      `json:"backupDir,omitempty"`
+	HostDir          string                      `json:"hostDir,omitempty"`
+	Artifacts        []SystemBackupArtifact      `json:"artifacts,omitempty"`
+	OldPVCUIDs       map[string]string           `json:"oldPvcUids,omitempty"`
+	NewPVCUIDs       map[string]string           `json:"newPvcUids,omitempty"`
+	RestorePlan      string                      `json:"restorePlan,omitempty"`
+	RestoreResults   []SystemBackupRestoreResult `json:"restoreResults,omitempty"`
+	VerifiedPods     int                         `json:"verifiedPods,omitempty"`
+	FixtureNodes     int64                       `json:"fixtureNodes,omitempty"`
+	FixtureEdges     int64                       `json:"fixtureEdges,omitempty"`
+	FixtureProved    bool                        `json:"fixtureProved,omitempty"`
+	Stdout           string                      `json:"stdout,omitempty"`
+	Stderr           string                      `json:"stderr,omitempty"`
+	ValidationErrors []string                    `json:"validationErrors,omitempty"`
+	fixture          *userBackupFixtureResult
 }
 
 const backupSetManifestName = "backup-set.json"
@@ -95,8 +96,16 @@ type clusterBackupStatusBlocker struct {
 }
 
 type clusterBackupValidateResponse struct {
-	Valid  bool     `json:"valid"`
-	Errors []string `json:"errors"`
+	Valid      bool     `json:"valid"`
+	Errors     []string `json:"errors"`
+	Validation struct {
+		Errors   []string `json:"errors"`
+		Blockers []struct {
+			Reason    string `json:"reason"`
+			Detail    string `json:"detail"`
+			FieldPath string `json:"field_path"`
+		} `json:"blockers"`
+	} `json:"validation"`
 }
 
 func executeSystemBackupEvent(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, resources *provision.ScenarioResources, eventType string, target map[string]any, state map[string]SystemBackupOperationResult) (SystemBackupOperationResult, error) {
@@ -268,12 +277,53 @@ func executeClusterBackupValidate(ctx context.Context, driver env.EnvironmentDri
 	if err := json.Unmarshal([]byte(execResult.Stdout), &response); err != nil {
 		return result, fmt.Errorf("decode cluster backup validate response: %w", err)
 	}
+	result.ValidationErrors = clusterBackupValidationErrors(response)
+	expectValid := boolTarget(target, "expectValid", true)
 	if !response.Valid {
-		return result, fmt.Errorf("cluster backup set invalid: %s", strings.Join(response.Errors, "; "))
+		if !expectValid {
+			result.BackupSetID = backup.BackupSetID
+			result.Artifacts = backup.Artifacts
+			return result, nil
+		}
+		return result, fmt.Errorf("cluster backup set invalid: %s", strings.Join(result.ValidationErrors, "; "))
+	}
+	if !expectValid {
+		return result, errors.New("cluster backup set unexpectedly validated successfully")
 	}
 	result.BackupSetID = backup.BackupSetID
 	result.Artifacts = backup.Artifacts
 	return result, nil
+}
+
+func clusterBackupValidationErrors(response clusterBackupValidateResponse) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	appendError := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	for _, err := range response.Errors {
+		appendError(err)
+	}
+	for _, err := range response.Validation.Errors {
+		appendError(err)
+	}
+	for _, blocker := range response.Validation.Blockers {
+		detail := firstNonEmpty(blocker.Detail, blocker.FieldPath, blocker.Reason)
+		if blocker.Reason != "" && detail != blocker.Reason {
+			appendError(blocker.Reason + ": " + detail)
+			continue
+		}
+		appendError(detail)
+	}
+	return out
 }
 
 func stageClusterBackupForValidation(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, backup SystemBackupOperationResult, node env.NodeRef) error {
@@ -290,6 +340,14 @@ func stageClusterBackupForValidation(ctx context.Context, driver env.Environment
 	backupSetPath := filepath.Join(backup.HostDir, "backup-set.json")
 	if _, err := stager.CopyToNode(ctx, environment, node, backupSetPath, filepath.Join(backup.BackupDir, "backup-set.json")); err != nil {
 		return fmt.Errorf("stage backup-set.json for validation: %w", err)
+	}
+	completePath := filepath.Join(backup.HostDir, "COMPLETE")
+	if _, err := os.Stat(completePath); err == nil {
+		if _, err := stager.CopyToNode(ctx, environment, node, completePath, filepath.Join(backup.BackupDir, "COMPLETE")); err != nil {
+			return fmt.Errorf("stage COMPLETE marker for validation: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat COMPLETE marker for validation: %w", err)
 	}
 	for _, artifact := range backup.Artifacts {
 		if artifact.LocalArchive != "" && artifact.ArchiveName != "" {
