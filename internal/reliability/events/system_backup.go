@@ -46,6 +46,7 @@ type SystemBackupOperationResult struct {
 	OldPVCUIDs                map[string]string                    `json:"oldPvcUids,omitempty"`
 	NewPVCUIDs                map[string]string                    `json:"newPvcUids,omitempty"`
 	RestorePlan               string                               `json:"restorePlan,omitempty"`
+	RestoreOperationID        string                               `json:"restoreOperationId,omitempty"`
 	RestoreResults            []SystemBackupRestoreResult          `json:"restoreResults,omitempty"`
 	VerifiedPods              int                                  `json:"verifiedPods,omitempty"`
 	FixtureNodes              int64                                `json:"fixtureNodes,omitempty"`
@@ -186,6 +187,10 @@ func executeSystemBackupEvent(ctx context.Context, driver env.EnvironmentDriver,
 		return executeClusterBackupRepositoryAssert(ctx, driver, environment, resources, state, target, result)
 	case "cluster-restore-plan":
 		return executeClusterRestorePlanEvent(ctx, driver, environment, state, target, result)
+	case "cluster-restore-start":
+		previous := state[systemBackupKey(target)]
+		copyRepositoryEvidence(&result, previous)
+		return executeClusterRestoreStart(ctx, driver, environment, resources, state, target, result)
 	case "cluster-restore-apply":
 		return executeClusterRestoreApply(ctx, driver, environment, scenario, state, target, result)
 	case "cluster-restore-verify":
@@ -583,6 +588,105 @@ func executeClusterRestorePlanEvent(ctx context.Context, driver env.EnvironmentD
 	plan, err := executeClusterRestorePlan(ctx, driver, environment, backup, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)})
 	result.RestorePlan = plan
 	return result, err
+}
+
+func executeClusterRestoreStart(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, resources *provision.ScenarioResources, state map[string]SystemBackupOperationResult, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {
+	backup := state[systemBackupKey(target)]
+	copyRepositoryEvidence(&result, backup)
+	result.BackupSetID = firstNonEmpty(stringTarget(target, "backupSetId"), stringTarget(target, "backupSetID"), backup.BackupSetID)
+	result.RepositoryID = firstNonEmpty(stringTarget(target, "repositoryId"), stringTarget(target, "repositoryID"), result.RepositoryID)
+	if result.RepositoryID == "" || result.BackupSetID == "" {
+		return result, errors.New("repository_id and backup_set_id are required for repository restore start")
+	}
+	if len(backup.Artifacts) == 0 {
+		return result, errors.New("repository restore start requires backup artifact evidence from cluster-backup-create")
+	}
+	executor := env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}
+	targetRoot := expandTargetPath(firstNonEmpty(stringTarget(target, "targetRoot"), "/tmp/mycel-lab-restore-target/{runID}"), environment, resources)
+	stagingRoot := expandTargetPath(firstNonEmpty(stringTarget(target, "stagingRoot"), "/tmp/mycel-lab-restore-staging/{runID}"), environment, resources)
+	if targetRoot == "" || stagingRoot == "" {
+		return result, errors.New("restore targetRoot and stagingRoot are required")
+	}
+	if _, err := driver.Exec(ctx, environment, executor, env.ExecRequest{Command: []string{"sh", "-ec", "rm -rf " + shellQuote(targetRoot) + " " + shellQuote(stagingRoot) + " && mkdir -p " + shellQuote(targetRoot) + " " + shellQuote(stagingRoot)}}); err != nil {
+		return result, fmt.Errorf("prepare restore target/staging dirs: %w", err)
+	}
+	artifacts := append([]SystemBackupArtifact(nil), backup.Artifacts...)
+	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Ordinal < artifacts[j].Ordinal })
+	restoreTarget := &adminv1.ClusterRestoreTarget{ExpectedNodeCount: int32(len(artifacts))}
+	for _, artifact := range artifacts {
+		dir := filepath.Join(targetRoot, fmt.Sprintf("ordinal-%d", artifact.Ordinal))
+		restoreTarget.Nodes = append(restoreTarget.Nodes, &adminv1.ClusterRestoreNodeMapping{Ordinal: int32(artifact.Ordinal), SourcePodName: artifact.PodName, TargetPodName: artifact.PodName, TargetDataDir: dir})
+	}
+	restoreStaging := &adminv1.ClusterRestoreStagingLocation{StagingUri: stagingRoot, CleanBeforeUse: true}
+	admin, err := dialBackupAdmin(ctx, resources, "mycel-lab-cluster-restore-start")
+	if err != nil {
+		return result, err
+	}
+	defer admin.Close()
+	plan, err := admin.Backup.PlanClusterRestore(ctx, &adminv1.PlanClusterRestoreRequest{RepositoryId: result.RepositoryID, BackupSetId: result.BackupSetID, TargetMode: adminv1.ClusterRestoreTargetMode_CLUSTER_RESTORE_TARGET_MODE_NEW_CLUSTER_BOOTSTRAP, IdentityMode: adminv1.ClusterRestoreIdentityMode_CLUSTER_RESTORE_IDENTITY_MODE_PRESERVE_BACKUP_ID, AuthSessionPolicy: adminv1.ClusterRestoreAuthSessionPolicy_CLUSTER_RESTORE_AUTH_SESSION_POLICY_PRESERVE_RESTORED_SESSIONS, Target: restoreTarget, Staging: restoreStaging})
+	if err != nil {
+		return result, fmt.Errorf("plan repository restore with execution target: %w", err)
+	}
+	if !plan.GetPlan().GetRestorable() {
+		return result, fmt.Errorf("repository restore plan %q is not restorable", plan.GetPlan().GetRestorePlanId())
+	}
+	result.RestorePlan = plan.GetPlan().GetRestorePlanId()
+	preconditions := &adminv1.ClusterRestorePreconditionEvidence{CleanTarget: &adminv1.ClusterRestoreCleanTargetProof{ProofId: firstNonEmpty(stringTarget(target, "cleanTargetProofId"), "mycel-lab-clean-target"), CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), TargetEmpty: true, CheckedNodes: restoreTarget.Nodes, OperatorAttestation: firstNonEmpty(stringTarget(target, "operatorAttestation"), "mycel-lab temp target dirs were removed and recreated before restore start")}, SourceFencing: &adminv1.ClusterRestoreSourceFencingEvidence{SourceClusterFenced: boolTarget(target, "sourceClusterFenced", false), FencedAt: time.Now().UTC().Format(time.RFC3339Nano), FenceTokenRef: stringTarget(target, "fenceTokenRef")}}
+	start, err := admin.Backup.StartClusterRestore(ctx, &adminv1.StartClusterRestoreRequest{RestorePlanId: plan.GetPlan().GetRestorePlanId(), PlanFreshnessToken: plan.GetPlan().GetRestorePlanId(), RepositoryId: result.RepositoryID, BackupSetId: result.BackupSetID, TargetMode: adminv1.ClusterRestoreTargetMode_CLUSTER_RESTORE_TARGET_MODE_NEW_CLUSTER_BOOTSTRAP, IdentityMode: adminv1.ClusterRestoreIdentityMode_CLUSTER_RESTORE_IDENTITY_MODE_PRESERVE_BACKUP_ID, AuthSessionPolicy: adminv1.ClusterRestoreAuthSessionPolicy_CLUSTER_RESTORE_AUTH_SESSION_POLICY_PRESERVE_RESTORED_SESSIONS, IdempotencyKey: firstNonEmpty(stringTarget(target, "idempotencyKey"), "mycel-lab-repository-restore-start-v1"), Target: restoreTarget, Staging: restoreStaging, Preconditions: preconditions})
+	if err != nil {
+		return result, fmt.Errorf("start repository restore: %w", err)
+	}
+	op := start.GetOperation()
+	if op == nil {
+		return result, errors.New("start repository restore returned no operation")
+	}
+	result.RestoreOperationID = op.GetRestoreOperationId()
+	deadline := time.Now().Add(durationTarget(target, "waitTimeout", 5*time.Minute))
+	poll := durationTarget(target, "pollInterval", 2*time.Second)
+	if poll <= 0 {
+		poll = 2 * time.Second
+	}
+	for {
+		if op.GetState() == adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_SUCCEEDED {
+			break
+		}
+		if clusterRestoreStateTerminal(op.GetState()) {
+			return result, fmt.Errorf("repository restore operation %s ended in %s: %s", op.GetRestoreOperationId(), op.GetState().String(), op.GetError())
+		}
+		if time.Now().After(deadline) {
+			return result, fmt.Errorf("repository restore operation %s did not finish before timeout; last state %s", op.GetRestoreOperationId(), op.GetState().String())
+		}
+		timer := time.NewTimer(poll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, ctx.Err()
+		case <-timer.C:
+		}
+		status, err := admin.Backup.GetClusterRestoreStatus(ctx, &adminv1.GetClusterRestoreStatusRequest{RestoreOperationId: op.GetRestoreOperationId()})
+		if err != nil {
+			return result, fmt.Errorf("get repository restore status: %w", err)
+		}
+		op = status.GetOperation()
+		if op == nil {
+			return result, errors.New("repository restore status returned no operation")
+		}
+	}
+	progress := op.GetProgress()
+	if progress == nil || int(progress.GetVerifiedNodes()) != len(artifacts) {
+		return result, fmt.Errorf("repository restore verified_nodes=%d want %d", progress.GetVerifiedNodes(), len(artifacts))
+	}
+	result.Stdout = fmt.Sprintf("restore_operation_id=%s state=%s verified_nodes=%d", op.GetRestoreOperationId(), op.GetState().String(), progress.GetVerifiedNodes())
+	return result, nil
+}
+
+func clusterRestoreStateTerminal(state adminv1.ClusterRestoreState) bool {
+	switch state {
+	case adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_SUCCEEDED, adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_CANCELED, adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_FAILED, adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_FAILED_REQUIRES_OPERATOR:
+		return true
+	default:
+		return false
+	}
 }
 
 func repositoryBackupSetListed(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, repositoryID, backupSetID string, ordinal int) (bool, string, error) {
