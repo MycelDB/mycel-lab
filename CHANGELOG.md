@@ -12,6 +12,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - Extended the Compose MinIO repository backup scenario with a clean-target `NEW_CLUSTER_BOOTSTRAP` restore start, polling the asynchronous restore status API until all repository artifacts are staged, applied, and verified.
 - Hardened the k3d PVC restore helper to fail closed unless the freshly-created target PVC mount is empty before applying the offline cluster backup archive.
 - Added k3d MinIO object-store fixture rendering, repository-backed PVC restore helpers, and a `k3d-cluster-repository-restore` suite that captures a repository-backed backup, recreates fresh PVCs without deleting the MinIO repository, restores repository artifacts through helper pods, boots the restored cluster, and verifies the workload.
+- Added the k3d repository-backed PVC restore scenario to `cluster-release-gate` and the draft release-execution bundle.
 - Added Phase 4 cluster backup validation harness support for expected-invalid backup-set fixtures, including normalized validation error capture for missing `COMPLETE`, manifest checksum mismatch, corrupt required artifact, unsupported required feature, topology mismatch, and raw-secret artifact evidence cases.
 - Staged `COMPLETE` markers alongside `backup-set.json` and node artifacts when validating host-captured cluster backup sets.
 

@@ -50,7 +50,7 @@ func hermeticCandidateSuite(name string) bool {
 
 func hermeticCandidateScenario(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "compose-procedure-inference-control-emulator", "k3d-procedure-inference-recovery", "k3d-procedure-inference-backup-restore", "compose-cluster-validation", "compose-cluster-repository-backup", "k3d-cluster-validation", "k3d-system-backup-restore", "compose-semantic-live-provider":
+	case "compose-procedure-inference-control-emulator", "k3d-procedure-inference-recovery", "k3d-procedure-inference-backup-restore", "compose-cluster-validation", "compose-cluster-repository-backup", "k3d-cluster-validation", "k3d-system-backup-restore", "k3d-cluster-repository-restore", "compose-semantic-live-provider":
 		return true
 	default:
 		return false

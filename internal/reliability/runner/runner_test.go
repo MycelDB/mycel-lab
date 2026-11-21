@@ -819,8 +819,9 @@ func TestClusterReleaseGateDigestOverrideUsesNodePullForEveryK3DScenario(t *test
 		t.Fatalf("RunSuiteFile() error=%v", err)
 	}
 	remaining := map[string]struct{}{
-		"k3d-cluster-validation":    {},
-		"k3d-system-backup-restore": {},
+		"k3d-cluster-validation":         {},
+		"k3d-system-backup-restore":      {},
+		"k3d-cluster-repository-restore": {},
 	}
 	for _, scenarioResult := range result.Results {
 		if _, ok := remaining[scenarioResult.ScenarioName]; !ok {

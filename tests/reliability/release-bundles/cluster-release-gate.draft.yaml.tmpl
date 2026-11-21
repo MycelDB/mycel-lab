@@ -19,6 +19,7 @@ files:
   - {source: lab, role: scenario, path: tests/reliability/scenarios/compose-cluster-repository-backup/compose-cluster-repository-backup.yaml}
   - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-cluster-validation/k3d-cluster-validation.yaml}
   - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-system-backup-restore/k3d-system-backup-restore.yaml}
+  - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-cluster-repository-restore/k3d-cluster-repository-restore.yaml}
   - {source: lab, role: runtime-config, path: tests/compose/ports.yml}
   - {source: daemon, role: runtime-config, path: tests/compose/cluster/compose.yml}
   - {source: lab, role: source, path: tests/reliability/clusters/raft-3-node.yaml}
@@ -119,5 +120,20 @@ scenarios:
         digestPinnedImagePolicy: node-pull
         createArguments: [--agents, "3", --timeout, 180s]
         consolePortBase: 29191
+    outerTimeout: 90m
+    finalization: *finalization
+  - name: k3d-cluster-repository-restore
+    source: lab
+    scenarioPath: tests/reliability/scenarios/k3d-cluster-repository-restore/k3d-cluster-repository-restore.yaml
+    suitePath: tests/reliability/suites/cluster-release-gate.yaml
+    environment:
+      driver: k3d
+      namespace: draft
+      options:
+        clusterNamePrefix: draft
+        digestPinnedImagePolicy: node-pull
+        createArguments: [--agents, "3", --timeout, 180s]
+        consolePortBase: 39191
+        objectStoreFixture: minio
     outerTimeout: 90m
     finalization: *finalization
