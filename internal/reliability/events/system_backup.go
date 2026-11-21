@@ -971,13 +971,13 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 		if err := vr.ResetNamespace(ctx, environment); err != nil {
 			return result, err
 		}
-		if _, err := vr.ApplyYAML(ctx, environment, manifests.YAML); err != nil {
+		// Create only replacement PVCs before restore. Applying the StatefulSet
+		// here would start fresh daemons, initialize the new volumes, and trip the
+		// fail-closed empty-PVC restore proof before archives are applied.
+		if _, err := vr.ApplyYAML(ctx, environment, renderRestorePVCs(environment.Namespace, statefulSet, scenario)); err != nil {
 			return result, err
 		}
 		if err := vr.WaitPVCs(ctx, environment, statefulSet, scenario.Cluster.Nodes); err != nil {
-			return result, err
-		}
-		if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, 0); err != nil {
 			return result, err
 		}
 		newUIDs, err := vr.PVCUIDs(ctx, environment, statefulSet, scenario.Cluster.Nodes)
@@ -996,6 +996,9 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 			if err != nil {
 				return result, err
 			}
+		}
+		if _, err := vr.ApplyYAML(ctx, environment, manifests.YAML); err != nil {
+			return result, err
 		}
 		if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, scenario.Cluster.Nodes); err != nil {
 			return result, err

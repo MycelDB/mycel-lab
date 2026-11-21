@@ -248,7 +248,6 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 		"reset-namespace",
 		"apply-yaml",
 		"wait-pvcs:myceld:2",
-		"scale:myceld:0",
 		"restore-local:data-myceld-0:0:myceldb/mycel:latest:2",
 		"restore-local:data-myceld-1:1:myceldb/mycel:latest:2",
 		"scale:myceld:2",
@@ -257,8 +256,13 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 			t.Fatalf("restore operations missing %q\n%s", want, joined)
 		}
 	}
-	if strings.Index(joined, "wait-pvcs:myceld:2") > strings.Index(joined, "scale:myceld:0") {
-		t.Fatalf("replacement PVC wait must happen before scale-down:\n%s", joined)
+	if strings.Contains(joined, "scale:myceld:0") {
+		t.Fatalf("reset-namespace restore should not create then scale down a fresh StatefulSet before PVC restore:\n%s", joined)
+	}
+	firstRestore := strings.Index(joined, "restore-local:data-myceld-0")
+	lastApply := strings.LastIndex(joined, "apply-yaml")
+	if firstRestore < 0 || lastApply < 0 || firstRestore > lastApply {
+		t.Fatalf("full manifest apply must happen after PVC restore so fresh daemons cannot initialize clean PVCs first:\n%s", joined)
 	}
 }
 
