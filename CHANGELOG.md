@@ -12,6 +12,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - Added Phase 4 cluster backup validation harness support for expected-invalid backup-set fixtures, including normalized validation error capture for missing `COMPLETE`, manifest checksum mismatch, corrupt required artifact, unsupported required feature, topology mismatch, and raw-secret artifact evidence cases.
 - Staged `COMPLETE` markers alongside `backup-set.json` and node artifacts when validating host-captured cluster backup sets.
 
+### Fixed
+
+- Fixed the cluster release-gate execution-bundle draft to bind the standard Compose cluster port overlay so bundled Compose endpoints match the declared admin gRPC ports.
+
 ## [v0.23.0] - 2026-11-17
 
 ### Added
