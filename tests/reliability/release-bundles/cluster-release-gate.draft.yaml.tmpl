@@ -16,6 +16,7 @@ files:
   - {source: lab, role: source, path: tests/reliability/release-bundles/cluster-release-gate.draft.yaml.tmpl}
   - {source: lab, role: suite, path: tests/reliability/suites/cluster-release-gate.yaml}
   - {source: lab, role: scenario, path: tests/reliability/scenarios/compose-cluster-validation/compose-cluster-validation.yaml}
+  - {source: lab, role: scenario, path: tests/reliability/scenarios/compose-cluster-repository-backup/compose-cluster-repository-backup.yaml}
   - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-cluster-validation/k3d-cluster-validation.yaml}
   - {source: lab, role: scenario, path: tests/reliability/scenarios/k3d-system-backup-restore/k3d-system-backup-restore.yaml}
   - {source: lab, role: runtime-config, path: tests/compose/semantic-protocol-ports.yml}
@@ -76,6 +77,23 @@ scenarios:
       scenarioCleanup: 5m
       environmentDelete: 5m
       deletionVerification: 5m
+  - name: compose-cluster-repository-backup
+    source: lab
+    scenarioPath: tests/reliability/scenarios/compose-cluster-repository-backup/compose-cluster-repository-backup.yaml
+    suitePath: tests/reliability/suites/cluster-release-gate.yaml
+    environment:
+      driver: compose
+      namespace: draft
+      options:
+        projectNamePrefix: draft
+        serviceNames: [myceld-a, myceld-b, myceld-c]
+        grpcPorts: [19091, 19092, 19093]
+        objectStoreFixture: minio
+      runtimeFiles:
+        - {option: composeFiles, source: daemon, path: tests/compose/cluster/compose.yml}
+        - {option: composeFiles, source: lab, path: tests/compose/semantic-protocol-ports.yml}
+    outerTimeout: 45m
+    finalization: *finalization
   - name: k3d-cluster-validation
     source: lab
     scenarioPath: tests/reliability/scenarios/k3d-cluster-validation/k3d-cluster-validation.yaml
