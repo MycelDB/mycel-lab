@@ -64,10 +64,16 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	if err := renderProviderEmulator(&b, scenario, namespace); err != nil {
 		return ManifestSet{}, err
 	}
+	if err := renderObjectStoreCredentials(&b, scenario, namespace); err != nil {
+		return ManifestSet{}, err
+	}
 	if err := renderObjectStoreFixture(&b, scenario, namespace); err != nil {
 		return ManifestSet{}, err
 	}
 	fmt.Fprintf(&b, "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: myceld\n  namespace: %s\nspec:\n  serviceName: myceld\n  replicas: %d\n  selector:\n    matchLabels:\n      app: myceld\n  template:\n    metadata:\n      labels:\n        app: myceld\n    spec:\n      containers:\n        - name: myceld\n          image: %s\n          imagePullPolicy: IfNotPresent\n          command:\n            - /bin/sh\n            - -ec\n            - |\n              ordinal=\"${HOSTNAME##*-}\"\n              export MYCELD_NODE_NAME=\"$HOSTNAME\"\n              export MYCELD_CLUSTER_RAFT_LOCAL_NODE_ID=\"$((ordinal + 1))\"\n              export MYCELD_CLUSTER_BACKEND_ADVERTISE_ADDR=\"$HOSTNAME.myceld.%s.svc.cluster.local:9091\"\n              exec myceld\n          envFrom:\n            - configMapRef:\n                name: myceld-config\n", namespace, cluster.Nodes, cluster.Image, namespace)
+	if objectStoreFixture(scenario) == "minio" {
+		b.WriteString("            - secretRef:\n                name: mycel-object-store-credentials\n")
+	}
 	if len(cluster.Resources.Requests) > 0 || len(cluster.Resources.Limits) > 0 {
 		b.WriteString("          resources:\n")
 		if len(cluster.Resources.Requests) > 0 {
@@ -95,8 +101,24 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	return ManifestSet{Namespace: namespace, StatefulSet: "myceld", YAML: b.String()}, nil
 }
 
+func objectStoreFixture(scenario spec.ResolvedScenario) string {
+	return strings.TrimSpace(optionString(scenario.Environment.Options, "objectStoreFixture", ""))
+}
+
+func renderObjectStoreCredentials(b *bytes.Buffer, scenario spec.ResolvedScenario, namespace string) error {
+	fixture := objectStoreFixture(scenario)
+	if fixture == "" {
+		return nil
+	}
+	if fixture != "minio" {
+		return fmt.Errorf("objectStoreFixture %q is not supported", fixture)
+	}
+	fmt.Fprintf(b, "apiVersion: v1\nkind: Secret\nmetadata:\n  name: mycel-object-store-credentials\n  namespace: %s\ntype: Opaque\nstringData:\n  AWS_ACCESS_KEY_ID: %q\n  AWS_SECRET_ACCESS_KEY: %q\n---\n", namespace, "mycelminio", "mycelminiosecret")
+	return nil
+}
+
 func renderObjectStoreFixture(b *bytes.Buffer, scenario spec.ResolvedScenario, namespace string) error {
-	fixture := strings.TrimSpace(optionString(scenario.Environment.Options, "objectStoreFixture", ""))
+	fixture := objectStoreFixture(scenario)
 	if fixture == "" {
 		return nil
 	}
