@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-cluster-repository-restore
+  description: Repository-backed MinIO backup restored into fresh k3d PVCs.
+scenarios:
+  - path: ../scenarios/k3d-cluster-repository-restore/k3d-cluster-repository-restore.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

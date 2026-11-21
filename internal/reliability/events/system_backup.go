@@ -81,9 +81,11 @@ type SystemBackupArtifact struct {
 	PodName        string `json:"podName"`
 	Ordinal        int    `json:"ordinal"`
 	ArchiveName    string `json:"archiveName"`
+	ArchiveURI     string `json:"archiveUri,omitempty"`
 	ManifestName   string `json:"manifestName,omitempty"`
+	ManifestURI    string `json:"manifestUri,omitempty"`
 	ChecksumSHA256 string `json:"checksumSha256,omitempty"`
-	LocalArchive   string `json:"localArchive"`
+	LocalArchive   string `json:"localArchive,omitempty"`
 	LocalManifest  string `json:"localManifest,omitempty"`
 }
 
@@ -426,7 +428,7 @@ func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDrive
 		if !ok {
 			envNode = env.Node{Name: pod, Ordinal: node.Ordinal}
 		}
-		artifact := SystemBackupArtifact{PodName: pod, Ordinal: node.Ordinal, ArchiveName: node.ArchiveName, ManifestName: node.ManifestName, ChecksumSHA256: node.ChecksumSHA256}
+		artifact := SystemBackupArtifact{PodName: pod, Ordinal: node.Ordinal, ArchiveName: node.ArchiveName, ArchiveURI: node.ArchiveURI, ManifestName: node.ManifestName, ManifestURI: node.ManifestURI, ChecksumSHA256: node.ChecksumSHA256}
 		if !repositoryMode {
 			podDir := filepath.Join(result.HostDir, pod)
 			archivePath := filepath.Join(podDir, node.ArchiveName)
@@ -936,6 +938,7 @@ func stageClusterBackupForValidation(ctx context.Context, driver env.Environment
 func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, state map[string]SystemBackupOperationResult, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {
 	backup := state[systemBackupKey(target)]
 	result.BackupDir, result.HostDir, result.fixture = backup.BackupDir, backup.HostDir, backup.fixture
+	copyRepositoryEvidence(&result, backup)
 	if len(backup.Artifacts) == 0 {
 		return result, fmt.Errorf("no cluster backup artifacts recorded for %q", systemBackupKey(target))
 	}
@@ -943,36 +946,86 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 	if !ok {
 		return result, fmt.Errorf("driver %q does not support volume replacement", driver.Name())
 	}
-	clusterRestore, ok := driver.(env.ClusterRestoreDriver)
-	if !ok {
-		return result, fmt.Errorf("driver %q does not support cluster restore CLI primitives", driver.Name())
-	}
 	statefulSet := firstNonEmpty(stringTarget(target, "statefulSet"), "myceld")
-	planNode := env.NodeRef{Ordinal: intTarget(target, "planOrdinal", intTarget(target, "ordinal", 0))}
-	if plan, err := executeClusterRestorePlan(ctx, driver, environment, backup, planNode); err != nil {
-		return result, err
-	} else {
-		result.RestorePlan = plan
+	repositoryMode := strings.TrimSpace(backup.RepositoryID) != "" || strings.TrimSpace(result.RepositoryID) != ""
+	if !repositoryMode {
+		clusterRestore, ok := driver.(env.ClusterRestoreDriver)
+		if !ok {
+			return result, fmt.Errorf("driver %q does not support cluster restore CLI primitives", driver.Name())
+		}
+		planNode := env.NodeRef{Ordinal: intTarget(target, "planOrdinal", intTarget(target, "ordinal", 0))}
+		if plan, err := executeClusterRestorePlan(ctx, driver, environment, backup, planNode); err != nil {
+			return result, err
+		} else {
+			result.RestorePlan = plan
+		}
+		oldUIDs, err := vr.PVCUIDs(ctx, environment, statefulSet, scenario.Cluster.Nodes)
+		if err != nil {
+			return result, err
+		}
+		result.OldPVCUIDs = oldUIDs
+		manifests, err := deploy.RenderKubernetesManifests(scenario)
+		if err != nil {
+			return result, err
+		}
+		if err := vr.ResetNamespace(ctx, environment); err != nil {
+			return result, err
+		}
+		if _, err := vr.ApplyYAML(ctx, environment, manifests.YAML); err != nil {
+			return result, err
+		}
+		if err := vr.WaitPVCs(ctx, environment, statefulSet, scenario.Cluster.Nodes); err != nil {
+			return result, err
+		}
+		if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, 0); err != nil {
+			return result, err
+		}
+		newUIDs, err := vr.PVCUIDs(ctx, environment, statefulSet, scenario.Cluster.Nodes)
+		if err != nil {
+			return result, err
+		}
+		result.NewPVCUIDs = newUIDs
+		if err := verifyPVCReplacement(oldUIDs, newUIDs); err != nil {
+			return result, err
+		}
+		backupSetPath := filepath.Join(backup.HostDir, backupSetManifestName)
+		for _, artifact := range backup.Artifacts {
+			pvcName := fmt.Sprintf("data-%s-%d", statefulSet, artifact.Ordinal)
+			restoreResult, err := clusterRestore.RestoreBackupSetOrdinalToPVC(ctx, environment, env.RestoreBackupSetRequest{PVCName: pvcName, BackupSetPath: backupSetPath, Artifacts: restoreArtifactsForEnv(backup.Artifacts), Ordinal: artifact.Ordinal, Image: scenario.Cluster.Image})
+			result.RestoreResults = append(result.RestoreResults, SystemBackupRestoreResult{Ordinal: artifact.Ordinal, PVCName: pvcName, Stdout: bounded(restoreResult.Stdout, 8192), Stderr: bounded(restoreResult.Stderr, 8192)})
+			if err != nil {
+				return result, err
+			}
+		}
+		if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, scenario.Cluster.Nodes); err != nil {
+			return result, err
+		}
+		result.BackupSetID = backup.BackupSetID
+		result.Artifacts = backup.Artifacts
+		return result, nil
+	}
+
+	repositoryRestore, ok := driver.(env.RepositoryClusterRestoreDriver)
+	if !ok {
+		return result, fmt.Errorf("driver %q does not support repository cluster restore PVC helpers", driver.Name())
 	}
 	oldUIDs, err := vr.PVCUIDs(ctx, environment, statefulSet, scenario.Cluster.Nodes)
 	if err != nil {
 		return result, err
 	}
 	result.OldPVCUIDs = oldUIDs
-	manifests, err := deploy.RenderKubernetesManifests(scenario)
-	if err != nil {
+	if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, 0); err != nil {
 		return result, err
 	}
-	if err := vr.ResetNamespace(ctx, environment); err != nil {
-		return result, err
+	for ordinal := 0; ordinal < scenario.Cluster.Nodes; ordinal++ {
+		if err := vr.DeletePVC(ctx, environment, fmt.Sprintf("data-%s-%d", statefulSet, ordinal)); err != nil {
+			return result, err
+		}
 	}
-	if _, err := vr.ApplyYAML(ctx, environment, manifests.YAML); err != nil {
+	if _, err := vr.ApplyYAML(ctx, environment, renderRestorePVCs(environment.Namespace, statefulSet, scenario)); err != nil {
 		return result, err
 	}
 	if err := vr.WaitPVCs(ctx, environment, statefulSet, scenario.Cluster.Nodes); err != nil {
-		return result, err
-	}
-	if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, 0); err != nil {
 		return result, err
 	}
 	newUIDs, err := vr.PVCUIDs(ctx, environment, statefulSet, scenario.Cluster.Nodes)
@@ -983,14 +1036,16 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 	if err := verifyPVCReplacement(oldUIDs, newUIDs); err != nil {
 		return result, err
 	}
-	backupSetPath := filepath.Join(backup.HostDir, backupSetManifestName)
-	for _, artifact := range backup.Artifacts {
-		pvcName := fmt.Sprintf("data-%s-%d", statefulSet, artifact.Ordinal)
-		restoreResult, err := clusterRestore.RestoreBackupSetOrdinalToPVC(ctx, environment, env.RestoreBackupSetRequest{PVCName: pvcName, BackupSetPath: backupSetPath, Artifacts: restoreArtifactsForEnv(backup.Artifacts), Ordinal: artifact.Ordinal, Image: scenario.Cluster.Image})
-		result.RestoreResults = append(result.RestoreResults, SystemBackupRestoreResult{Ordinal: artifact.Ordinal, PVCName: pvcName, Stdout: bounded(restoreResult.Stdout, 8192), Stderr: bounded(restoreResult.Stderr, 8192)})
-		if err != nil {
-			return result, err
+	restoreResults, err := repositoryRestore.RestoreRepositoryBackupSetToPVCs(ctx, environment, env.RestoreRepositoryBackupSetRequest{StatefulSet: statefulSet, Bucket: firstNonEmpty(stringTarget(target, "bucket"), result.RepositoryBucket), RepositoryPrefix: result.RepositoryPrefix, BackupSetPrefix: result.RepositoryBackupSetPrefix, BackupSetID: backup.BackupSetID, EndpointURI: firstNonEmpty(stringTarget(target, "endpoint"), "http://minio:9000"), Region: firstNonEmpty(stringTarget(target, "region"), "us-east-1"), AccessKeyEnv: "AWS_ACCESS_KEY_ID", SecretKeyEnv: "AWS_SECRET_ACCESS_KEY", AccessKeyValue: firstNonEmpty(stringTarget(target, "accessKey"), "mycelminio"), SecretKeyValue: firstNonEmpty(stringTarget(target, "secretKey"), "mycelminiosecret"), Artifacts: restoreArtifactsForEnv(backup.Artifacts), Image: scenario.Cluster.Image})
+	for i, restoreResult := range restoreResults {
+		ordinal := i
+		if i < len(backup.Artifacts) {
+			ordinal = backup.Artifacts[i].Ordinal
 		}
+		result.RestoreResults = append(result.RestoreResults, SystemBackupRestoreResult{Ordinal: ordinal, PVCName: fmt.Sprintf("data-%s-%d", statefulSet, ordinal), Stdout: bounded(restoreResult.Stdout, 8192), Stderr: bounded(restoreResult.Stderr, 8192)})
+	}
+	if err != nil {
+		return result, err
 	}
 	if err := vr.ScaleStatefulSet(ctx, environment, statefulSet, scenario.Cluster.Nodes); err != nil {
 		return result, err
@@ -998,6 +1053,31 @@ func executeClusterRestoreApply(ctx context.Context, driver env.EnvironmentDrive
 	result.BackupSetID = backup.BackupSetID
 	result.Artifacts = backup.Artifacts
 	return result, nil
+}
+
+func renderRestorePVCs(namespace, statefulSet string, scenario spec.ResolvedScenario) string {
+	if namespace == "" {
+		namespace = "mycel-lab"
+	}
+	if statefulSet == "" {
+		statefulSet = "myceld"
+	}
+	storageSize := scenario.Cluster.Storage.Size
+	if strings.TrimSpace(storageSize) == "" {
+		storageSize = "10Gi"
+	}
+	var b strings.Builder
+	for ordinal := 0; ordinal < scenario.Cluster.Nodes; ordinal++ {
+		if ordinal > 0 {
+			b.WriteString("---\n")
+		}
+		fmt.Fprintf(&b, "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: data-%s-%d\n  namespace: %s\n  labels:\n    app: myceld\nspec:\n  accessModes: [\"ReadWriteOnce\"]\n", statefulSet, ordinal, namespace)
+		if scenario.Cluster.Storage.ClassName != "" {
+			fmt.Fprintf(&b, "  storageClassName: %s\n", scenario.Cluster.Storage.ClassName)
+		}
+		fmt.Fprintf(&b, "  resources:\n    requests:\n      storage: %s\n", storageSize)
+	}
+	return b.String()
 }
 
 func executeClusterRestorePlan(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, backup SystemBackupOperationResult, node env.NodeRef) (string, error) {
@@ -1026,7 +1106,7 @@ func restoreCLICompatibilityError(err error, execResult env.ExecResult) error {
 func restoreArtifactsForEnv(artifacts []SystemBackupArtifact) []env.RestoreArtifact {
 	out := make([]env.RestoreArtifact, 0, len(artifacts))
 	for _, artifact := range artifacts {
-		out = append(out, env.RestoreArtifact{Ordinal: artifact.Ordinal, PodName: artifact.PodName, ArchiveName: artifact.ArchiveName, ManifestName: artifact.ManifestName, LocalArchive: artifact.LocalArchive, LocalManifest: artifact.LocalManifest})
+		out = append(out, env.RestoreArtifact{Ordinal: artifact.Ordinal, PodName: artifact.PodName, ArchiveName: artifact.ArchiveName, ArchiveURI: artifact.ArchiveURI, ManifestName: artifact.ManifestName, ManifestURI: artifact.ManifestURI, ChecksumSHA256: artifact.ChecksumSHA256, LocalArchive: artifact.LocalArchive, LocalManifest: artifact.LocalManifest})
 	}
 	return out
 }

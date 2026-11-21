@@ -156,12 +156,15 @@ type NodeFileStager interface {
 }
 
 type RestoreArtifact struct {
-	Ordinal       int
-	PodName       string
-	ArchiveName   string
-	ManifestName  string
-	LocalArchive  string
-	LocalManifest string
+	Ordinal        int
+	PodName        string
+	ArchiveName    string
+	ArchiveURI     string
+	ManifestName   string
+	ManifestURI    string
+	ChecksumSHA256 string
+	LocalArchive   string
+	LocalManifest  string
 }
 
 type RestoreBackupSetRequest struct {
@@ -170,6 +173,22 @@ type RestoreBackupSetRequest struct {
 	Artifacts     []RestoreArtifact
 	Ordinal       int
 	Image         string
+}
+
+type RestoreRepositoryBackupSetRequest struct {
+	StatefulSet      string
+	Bucket           string
+	RepositoryPrefix string
+	BackupSetPrefix  string
+	BackupSetID      string
+	EndpointURI      string
+	Region           string
+	AccessKeyEnv     string
+	SecretKeyEnv     string
+	AccessKeyValue   string
+	SecretKeyValue   string
+	Artifacts        []RestoreArtifact
+	Image            string
 }
 
 type VolumeReplacementDriver interface {
@@ -195,6 +214,10 @@ type StatefulSetImageUpdater interface {
 
 type ClusterRestoreDriver interface {
 	RestoreBackupSetOrdinalToPVC(context.Context, Environment, RestoreBackupSetRequest) (ExecResult, error)
+}
+
+type RepositoryClusterRestoreDriver interface {
+	RestoreRepositoryBackupSetToPVCs(context.Context, Environment, RestoreRepositoryBackupSetRequest) ([]ExecResult, error)
 }
 
 type DeletionVerification struct {
@@ -378,11 +401,11 @@ type K3DDriver struct {
 func (d K3DDriver) Name() string { return "k3d" }
 
 func (d K3DDriver) Capabilities() CapabilitySet {
-	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityVolumeReplacement, CapabilityImageUpgrade, CapabilityProviderEmulator)
+	return NewCapabilitySet(CapabilityArtifacts, CapabilityPerNodeEndpoints, CapabilityNodeExec, CapabilityNodeRestart, CapabilityRollingRestart, CapabilityLogs, CapabilityObjectStoreFixture, CapabilityVolumeReplacement, CapabilityImageUpgrade, CapabilityProviderEmulator)
 }
 
 func (d K3DDriver) Validate(environment spec.EnvironmentSpec) error {
-	if err := rejectUnknownOptions(environment.Options, "clusterNamePrefix", "createArguments", "consolePortBase", "providerEmulatorImage", "digestPinnedImagePolicy"); err != nil {
+	if err := rejectUnknownOptions(environment.Options, "clusterNamePrefix", "createArguments", "consolePortBase", "providerEmulatorImage", "digestPinnedImagePolicy", "objectStoreFixture", "objectStoreImage", "objectStoreClientImage"); err != nil {
 		return err
 	}
 	switch stringOption(environment.Options, "digestPinnedImagePolicy", "local-import") {
@@ -423,6 +446,11 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario, e
 		namespace = "mycel-lab"
 	}
 	environment := Environment{Name: clusterName, Driver: "k3d", Namespace: namespace, Context: "k3d-" + clusterName, Metadata: map[string]string{"nodeCount": strconv.Itoa(scenario.Cluster.Nodes), "consolePortBase": strconv.Itoa(intOption(environmentSpec.Options, "consolePortBase", DefaultConsolePortBase)), "imageOverride": strings.TrimSpace(scenario.Cluster.Image), "digestPinnedImagePolicy": stringOption(environmentSpec.Options, "digestPinnedImagePolicy", "local-import")}}
+	if objectStore := strings.TrimSpace(stringOption(environmentSpec.Options, "objectStoreFixture", "")); objectStore != "" {
+		environment.Metadata["objectStoreFixture"] = objectStore
+		environment.Metadata["objectStoreImage"] = firstNonEmptyString(stringOption(environmentSpec.Options, "objectStoreImage", ""), os.Getenv("MINIO_IMAGE"), deploy.DefaultMinIOImage)
+		environment.Metadata["objectStoreClientImage"] = firstNonEmptyString(stringOption(environmentSpec.Options, "objectStoreClientImage", ""), os.Getenv("MINIO_MC_IMAGE"), deploy.DefaultMinIOMCImage)
+	}
 	args := []string{"cluster", "create", clusterName, "--wait"}
 	args = append(args, stringSliceOption(environmentSpec.Options, "createArguments")...)
 	args = append(args, d.CreateArguments...)
@@ -443,6 +471,16 @@ func (d K3DDriver) Create(ctx context.Context, scenario spec.ResolvedScenario, e
 	}
 	if emulatorImage := environment.Metadata["providerEmulatorImage"]; emulatorImage != "" {
 		if err := d.importLocalImageIfPresent(ctx, environment, emulatorImage); err != nil {
+			return environment, err
+		}
+	}
+	if objectStoreImage := environment.Metadata["objectStoreImage"]; objectStoreImage != "" {
+		if err := d.importLocalImageIfPresent(ctx, environment, objectStoreImage); err != nil {
+			return environment, err
+		}
+	}
+	if objectStoreClientImage := environment.Metadata["objectStoreClientImage"]; objectStoreClientImage != "" {
+		if err := d.importLocalImageIfPresent(ctx, environment, objectStoreClientImage); err != nil {
 			return environment, err
 		}
 	}
@@ -589,6 +627,14 @@ func (d K3DDriver) WaitReady(ctx context.Context, environment Environment) error
 	}
 	if environment.Metadata["providerEmulator"] == "true" {
 		if _, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "rollout", "status", "deployment/mycel-provider-emulator", timeoutArg); err != nil {
+			return err
+		}
+	}
+	if environment.Metadata["objectStoreFixture"] == "minio" {
+		if _, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "rollout", "status", "deployment/minio", timeoutArg); err != nil {
+			return err
+		}
+		if _, err := runner.Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "pods", "-l", "app=minio", "--for=condition=Ready", timeoutArg); err != nil {
 			return err
 		}
 	}
@@ -828,6 +874,18 @@ func (d K3DDriver) DeletePVC(ctx context.Context, environment Environment, pvcNa
 	return err
 }
 
+func (d K3DDriver) ExecObjectStore(ctx context.Context, environment Environment, command string) (ExecResult, error) {
+	if strings.TrimSpace(command) == "" {
+		return ExecResult{}, errors.New("object-store command is required")
+	}
+	if environment.Metadata["objectStoreFixture"] != "minio" {
+		return ExecResult{}, errors.New("minio object-store fixture is not configured")
+	}
+	image := firstNonEmptyString(environment.Metadata["objectStoreClientImage"], os.Getenv("MINIO_MC_IMAGE"), deploy.DefaultMinIOMCImage)
+	podName := "minio-bucket-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "run", podName, "--image", image, "--restart=Never", "--rm", "-i", "--command", "--", "sh", "-ec", command)
+}
+
 func (d K3DDriver) RestoreArchiveToPVC(ctx context.Context, environment Environment, pvcName, archivePath string) error {
 	if pvcName == "" || archivePath == "" {
 		return errors.New("pvc name and archive path are required")
@@ -942,6 +1000,108 @@ spec:
 	}
 	cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-local --backup-set %s --ordinal %d --data-dir /data/mycel", shellQuote(backupDir), req.Ordinal)
 	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
+}
+
+func (d K3DDriver) RestoreRepositoryBackupSetToPVCs(ctx context.Context, environment Environment, req RestoreRepositoryBackupSetRequest) ([]ExecResult, error) {
+	statefulSet := strings.TrimSpace(req.StatefulSet)
+	if statefulSet == "" {
+		statefulSet = "myceld"
+	}
+	if strings.TrimSpace(req.Bucket) == "" || strings.TrimSpace(req.EndpointURI) == "" || (strings.TrimSpace(req.BackupSetPrefix) == "" && strings.TrimSpace(req.BackupSetID) == "") {
+		return nil, errors.New("repository bucket, endpoint, and backup-set location are required")
+	}
+	if len(req.Artifacts) == 0 {
+		return nil, errors.New("repository restore requires artifact ordinal evidence")
+	}
+	image := strings.TrimSpace(req.Image)
+	if image == "" {
+		image = "myceldb/mycel:latest"
+	}
+	accessEnv := firstNonEmptyString(req.AccessKeyEnv, "AWS_ACCESS_KEY_ID")
+	secretEnv := firstNonEmptyString(req.SecretKeyEnv, "AWS_SECRET_ACCESS_KEY")
+	accessValue := strings.TrimSpace(req.AccessKeyValue)
+	secretValue := strings.TrimSpace(req.SecretKeyValue)
+	if accessValue == "" || secretValue == "" {
+		return nil, errors.New("repository restore credential values are required for helper pods")
+	}
+	secretName := "mycel-repository-restore-credentials"
+	secretYAML := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+  namespace: %s
+type: Opaque
+stringData:
+  access_key_id: %s
+  secret_access_key: %s
+`, secretName, environment.Namespace, strconv.Quote(accessValue), strconv.Quote(secretValue))
+	if _, err := d.ApplyYAML(ctx, environment, secretYAML); err != nil {
+		return nil, err
+	}
+	defer func() {
+		_, _ = d.runner().Run(context.Background(), "kubectl", "--context", environment.Context, "-n", environment.Namespace, "delete", "secret", secretName, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
+	}()
+	results := make([]ExecResult, 0, len(req.Artifacts))
+	for _, artifact := range req.Artifacts {
+		if artifact.Ordinal < 0 {
+			return results, fmt.Errorf("restore artifact ordinal %d is invalid", artifact.Ordinal)
+		}
+		pvcName := fmt.Sprintf("data-%s-%d", statefulSet, artifact.Ordinal)
+		restorePod := kubernetesSafeName("restore-repo-" + pvcName)
+		manifest := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  restartPolicy: Never
+  containers:
+    - name: restore
+      image: %s
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-ec", "sleep 3600"]
+      env:
+        - name: %s
+          valueFrom:
+            secretKeyRef:
+              name: %s
+              key: access_key_id
+        - name: %s
+          valueFrom:
+            secretKeyRef:
+              name: %s
+              key: secret_access_key
+      volumeMounts:
+        - name: data
+          mountPath: /data/mycel
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: %s
+`, restorePod, environment.Namespace, image, accessEnv, secretName, secretEnv, secretName, pvcName)
+		if _, err := d.ApplyYAML(ctx, environment, manifest); err != nil {
+			return results, err
+		}
+		func() {
+			defer func() {
+				_, _ = d.runner().Run(context.Background(), "kubectl", "--context", environment.Context, "-n", environment.Namespace, "delete", "pod", restorePod, "--ignore-not-found=true", "--wait=true", "--timeout=3m")
+			}()
+			if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "--for=condition=Ready", "pod/"+restorePod, "--timeout=5m"); err != nil {
+				results = append(results, ExecResult{Stderr: err.Error()})
+				return
+			}
+			cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-repository-local --bucket %s --backup-set-id %s --backup-set-prefix %s --repository-prefix %s --endpoint-uri %s --region %s --access-key-env %s --secret-key-env %s --ordinal %d --data-dir /data/mycel --target-pvc-name %s", shellQuote(req.Bucket), shellQuote(req.BackupSetID), shellQuote(req.BackupSetPrefix), shellQuote(req.RepositoryPrefix), shellQuote(req.EndpointURI), shellQuote(firstNonEmptyString(req.Region, "us-east-1")), shellQuote(accessEnv), shellQuote(secretEnv), artifact.Ordinal, shellQuote(pvcName))
+			result, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
+			results = append(results, result)
+			if err != nil {
+				results[len(results)-1].Stderr = strings.TrimSpace(results[len(results)-1].Stderr + "\n" + err.Error())
+			}
+		}()
+		if len(results) > 0 && strings.TrimSpace(results[len(results)-1].Stderr) != "" {
+			return results, errors.New("repository restore helper failed")
+		}
+	}
+	return results, nil
 }
 
 func (d K3DDriver) ProviderEmulatorObservations(ctx context.Context, environment Environment) (ExecResult, error) {
@@ -2521,4 +2681,39 @@ func formatCommandResult(result executil.Result, err error) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func kubernetesSafeName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		out = "restore"
+	}
+	if len(out) > 63 {
+		out = strings.Trim(out[:63], "-")
+	}
+	return out
 }
