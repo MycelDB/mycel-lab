@@ -1,0 +1,101 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-cluster-repository-backup
+  description: Compose MinIO repository-backed cluster backup, repository-truth validation, and restore planning coverage.
+seed: 46464
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/ports.yml
+    projectNamePrefix: mycel-lab
+    serviceNames:
+      - myceld-a
+      - myceld-b
+      - myceld-c
+    grpcPorts:
+      - 19091
+      - 19092
+      - 19093
+    objectStoreFixture: minio
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - object-store-fixture
+      - logs
+clusterRef: raft-3-node
+clusterOverrides:
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: backup-writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 0.0001
+phases:
+  - name: create-source-fixture
+    duration: 1s
+    events:
+      - type: system-backup-fixture
+        target:
+          actorId: backup-writers-0
+          label: repository-backup-fixture
+          blobPayload: mycel-lab repository backup fixture blob payload
+          ordinal: 0
+  - name: configure-minio-repository
+    duration: 1s
+    events:
+      - type: cluster-backup-repository-create
+        target:
+          name: repository-minio
+          repositoryId: mycel-lab-minio
+          bucket: mycel-compose-backups
+          prefix: mycel-lab/{runID}
+          endpoint: http://minio:9000
+          region: us-east-1
+          devOnly: true
+          disableTLS: true
+          forcePathStyle: true
+  - name: capture-repository-backup
+    duration: 1s
+    events:
+      - type: cluster-backup-create
+        target:
+          name: repository-minio
+          repositoryId: mycel-lab-minio
+          archiveFormat: tar
+          captureProvider: filesystem_immutable_copy
+          quiesceReadProfile: control_only
+          reason: mycel-lab compose MinIO repository-backed cluster backup
+          waitTimeout: 10m
+          convergenceTimeout: 5m
+          idempotencyKey: compose-minio-repository-backup-v1
+  - name: assert-repository-truth
+    duration: 1s
+    events:
+      - type: cluster-backup-repository-assert
+        target:
+          name: repository-minio
+          repositoryId: mycel-lab-minio
+          bucket: mycel-compose-backups
+          targetMode: new_cluster_bootstrap
+          identityMode: preserve_backup_id
+          authSessionPolicy: preserve_restored_sessions
+          negativeChecks: true
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 60s
+    healthConvergenceInterval: 2s
+    requireSharedClusterIdentity: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

@@ -45,6 +45,26 @@ func TestClusterBackupCreateUsesAsyncStartWait(t *testing.T) {
 	}
 }
 
+func TestClusterBackupCreateSupportsRepositoryBackedStart(t *testing.T) {
+	driver := &clusterBackupCreateDriver{}
+	result, err := executeClusterBackupCreate(context.Background(), driver, env.Environment{Name: "test", Driver: "compose"}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1}}, map[string]any{"repositoryId": "repo-minio", "archiveFormat": "tar", "captureProvider": "filesystem_immutable_copy", "quiesceReadProfile": "control_only", "waitTimeout": "15m"}, SystemBackupOperationResult{Operation: "cluster-backup-create", RepositoryID: "repo-minio", RepositoryBucket: "mycel-compose-backups", RepositoryPrefix: "runs/test"})
+	if err != nil {
+		t.Fatalf("executeClusterBackupCreate() error=%v", err)
+	}
+	if result.BackupSetID != "backup-set-test" || result.RepositoryID != "repo-minio" || result.RepositoryBackupSetPrefix != "runs/test/backup-sets/backup-set-test" {
+		t.Fatalf("result=%+v, want repository-backed backup evidence", result)
+	}
+	joinedExecs := strings.Join(driver.execs, "\n")
+	for _, want := range []string{"admin backup cluster start", "--repository-id repo-minio", "--capture-provider filesystem_immutable_copy", "--quiesce-read-profile control_only"} {
+		if !strings.Contains(joinedExecs, want) {
+			t.Fatalf("missing repository start fragment %q\n%s", want, joinedExecs)
+		}
+	}
+	if strings.Contains(joinedExecs, "--output-dir") || strings.Contains(joinedExecs, "rm -rf") {
+		t.Fatalf("repository-backed start must not require local output-dir staging:\n%s", joinedExecs)
+	}
+}
+
 func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) {
 	hostDir := t.TempDir()
 	writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"complete":true,"state":"succeeded","nodes":[{"applied_indexes":{"system":1}}]}`)
@@ -277,6 +297,9 @@ func (d *clusterBackupCreateDriver) Endpoints(context.Context, env.Environment) 
 func (d *clusterBackupCreateDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	cmd := strings.Join(req.Command, " ")
 	d.execs = append(d.execs, cmd)
+	if strings.Contains(cmd, "admin backup cluster start") && strings.Contains(cmd, "--repository-id") {
+		return executil.Result{Command: cmd, Stdout: `{"status":{"backup_set_id":"backup-set-test","state":"succeeded","expected_nodes":1,"repository_id":"repo-minio","manifest_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/backup-set.json","raft_barriers":{"system":1},"nodes":[{"pod_name":"myceld-0","ordinal":0,"archive_name":"node-0.tar","archive_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-0/node-0.tar","manifest_name":"node-0.manifest.json","manifest_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-0/node-0.manifest.json","applied_indexes":{"system":1}}]}}`}, nil
+	}
 	if strings.Contains(cmd, "admin backup cluster start") {
 		return executil.Result{Command: cmd, Stdout: `{"status":{"backup_set_id":"backup-set-test","state":"succeeded","expected_nodes":1,"manifest_uri":"file:///tmp/mycel-system-backups/backup-set.json","raft_barriers":{"system":1},"nodes":[{"pod_name":"myceld-0","ordinal":0,"archive_name":"node-0.tar","manifest_name":"node-0.manifest.json","applied_indexes":{"system":1}}]}}`}, nil
 	}
