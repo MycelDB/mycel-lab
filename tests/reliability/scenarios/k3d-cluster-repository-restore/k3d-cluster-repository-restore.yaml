@@ -38,6 +38,7 @@ phases:
     events:
       - type: system-backup-fixture
         target:
+          name: repository-minio
           actorId: repository-restore-writers-0
           label: nt3-repository-restore-fixture
           blobPayload: mycel-lab nt3 repository restore blob payload
