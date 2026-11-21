@@ -45,9 +45,30 @@ func TestClusterBackupCreateUsesAsyncStartWait(t *testing.T) {
 	}
 }
 
+func TestClusterBackupCreateSupportsRepositoryBackedStart(t *testing.T) {
+	driver := &clusterBackupCreateDriver{}
+	result, err := executeClusterBackupCreate(context.Background(), driver, env.Environment{Name: "test", Driver: "compose"}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1}}, map[string]any{"repositoryId": "repo-minio", "archiveFormat": "tar", "captureProvider": "filesystem_immutable_copy", "quiesceReadProfile": "control_only", "waitTimeout": "15m"}, SystemBackupOperationResult{Operation: "cluster-backup-create", RepositoryID: "repo-minio", RepositoryBucket: "mycel-compose-backups", RepositoryPrefix: "runs/test"})
+	if err != nil {
+		t.Fatalf("executeClusterBackupCreate() error=%v", err)
+	}
+	if result.BackupSetID != "backup-set-test" || result.RepositoryID != "repo-minio" || result.RepositoryBackupSetPrefix != "runs/test/backup-sets/backup-set-test" {
+		t.Fatalf("result=%+v, want repository-backed backup evidence", result)
+	}
+	joinedExecs := strings.Join(driver.execs, "\n")
+	for _, want := range []string{"admin backup cluster start", "--repository-id repo-minio", "--capture-provider filesystem_immutable_copy", "--quiesce-read-profile control_only"} {
+		if !strings.Contains(joinedExecs, want) {
+			t.Fatalf("missing repository start fragment %q\n%s", want, joinedExecs)
+		}
+	}
+	if strings.Contains(joinedExecs, "--output-dir") || strings.Contains(joinedExecs, "rm -rf") {
+		t.Fatalf("repository-backed start must not require local output-dir staging:\n%s", joinedExecs)
+	}
+}
+
 func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) {
 	hostDir := t.TempDir()
 	writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"complete":true,"state":"succeeded","nodes":[{"applied_indexes":{"system":1}}]}`)
+	writeFile(t, filepath.Join(hostDir, "COMPLETE"), `{"schema":"mycel.backup_complete","state":"COMPLETE"}`)
 	writeFile(t, filepath.Join(hostDir, "myceld-0", "node-0.tar"), "archive-0")
 	writeFile(t, filepath.Join(hostDir, "myceld-0", "node-0.manifest.json"), `{}`)
 	writeFile(t, filepath.Join(hostDir, "myceld-1", "node-1.tar"), "archive-1")
@@ -73,6 +94,7 @@ func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) 
 	joinedCopies := strings.Join(driver.copies, "\n")
 	for _, want := range []string{
 		filepath.Join(hostDir, "backup-set.json") + " -> /tmp/mycel-system-backups/backup-set.json",
+		filepath.Join(hostDir, "COMPLETE") + " -> /tmp/mycel-system-backups/COMPLETE",
 		filepath.Join(hostDir, "myceld-0", "node-0.tar") + " -> /tmp/mycel-system-backups/node-0.tar",
 		filepath.Join(hostDir, "myceld-0", "node-0.manifest.json") + " -> /tmp/mycel-system-backups/node-0.manifest.json",
 		filepath.Join(hostDir, "myceld-1", "node-1.tar") + " -> /tmp/mycel-system-backups/node-1.tar",
@@ -84,6 +106,49 @@ func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) 
 	joinedExecs := strings.Join(driver.execs, "\n")
 	if !strings.Contains(joinedExecs, "mkdir -p '/tmp/mycel-system-backups'") || !strings.Contains(joinedExecs, "admin backup cluster validate --backup-set /tmp/mycel-system-backups") {
 		t.Fatalf("missing expected execs:\n%s", joinedExecs)
+	}
+}
+
+func TestClusterBackupValidateSupportsNegativeFixtureExpectations(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing complete marker", body: `{"valid":false,"errors":["missing COMPLETE marker"]}`, want: "missing COMPLETE"},
+		{name: "manifest checksum mismatch", body: `{"valid":false,"validation":{"errors":["manifest checksum mismatch"]}}`, want: "manifest checksum"},
+		{name: "corrupt required artifact", body: `{"valid":false,"validation":{"blockers":[{"reason":"artifact_corrupt","detail":"required artifact checksum mismatch"}]}}`, want: "artifact_corrupt"},
+		{name: "unsupported required feature", body: `{"valid":false,"validation":{"blockers":[{"reason":"unsupported_required_feature","detail":"future feature missing"}]}}`, want: "unsupported_required_feature"},
+		{name: "topology mismatch", body: `{"valid":false,"validation":{"blockers":[{"reason":"topology_mismatch","detail":"expected 3 nodes got 2"}]}}`, want: "topology_mismatch"},
+		{name: "raw secret artifact evidence", body: `{"valid":false,"validation":{"errors":["raw secret-like material detected in artifact evidence"]}}`, want: "raw secret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hostDir := t.TempDir()
+			writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"schema":"mycel.backup_set","manifest_version":1}`)
+			writeFile(t, filepath.Join(hostDir, "myceld-0", "node-0.tar"), "archive-0")
+			driver := &backupValidationDriver{validateStdout: tc.body}
+			backup := SystemBackupOperationResult{Operation: "cluster-backup-create", BackupSetID: "backup-set-negative", BackupDir: "/tmp/mycel-system-backups", HostDir: hostDir, Artifacts: []SystemBackupArtifact{{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", LocalArchive: filepath.Join(hostDir, "myceld-0", "node-0.tar")}}}
+			result, err := executeClusterBackupValidate(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d"}, map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"ordinal": 0, "expectValid": false}, SystemBackupOperationResult{Operation: "cluster-backup-validate", BackupDir: "/tmp/mycel-system-backups"})
+			if err != nil {
+				t.Fatalf("executeClusterBackupValidate() error=%v", err)
+			}
+			if result.BackupSetID != "backup-set-negative" || len(result.ValidationErrors) == 0 || !strings.Contains(strings.Join(result.ValidationErrors, "; "), tc.want) {
+				t.Fatalf("result=%+v, want validation error containing %q", result, tc.want)
+			}
+		})
+	}
+}
+
+func TestClusterBackupValidateFailsWhenNegativeFixtureUnexpectedlyPasses(t *testing.T) {
+	hostDir := t.TempDir()
+	writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"complete":true,"state":"succeeded","nodes":[{"applied_indexes":{"system":1}}]}`)
+	writeFile(t, filepath.Join(hostDir, "myceld-0", "node-0.tar"), "archive-0")
+	driver := &backupValidationDriver{validateStdout: `{"valid":true,"errors":[]}`}
+	backup := SystemBackupOperationResult{Operation: "cluster-backup-create", BackupSetID: "backup-set-positive", BackupDir: "/tmp/mycel-system-backups", HostDir: hostDir, Artifacts: []SystemBackupArtifact{{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", LocalArchive: filepath.Join(hostDir, "myceld-0", "node-0.tar")}}}
+	_, err := executeClusterBackupValidate(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d"}, map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"expectValid": false}, SystemBackupOperationResult{Operation: "cluster-backup-validate", BackupDir: "/tmp/mycel-system-backups"})
+	if err == nil || !strings.Contains(err.Error(), "unexpectedly validated") {
+		t.Fatalf("error=%v, want unexpected pass rejection", err)
 	}
 }
 
@@ -183,7 +248,6 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 		"reset-namespace",
 		"apply-yaml",
 		"wait-pvcs:myceld:2",
-		"scale:myceld:0",
 		"restore-local:data-myceld-0:0:myceldb/mycel:latest:2",
 		"restore-local:data-myceld-1:1:myceldb/mycel:latest:2",
 		"scale:myceld:2",
@@ -192,8 +256,13 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 			t.Fatalf("restore operations missing %q\n%s", want, joined)
 		}
 	}
-	if strings.Index(joined, "wait-pvcs:myceld:2") > strings.Index(joined, "scale:myceld:0") {
-		t.Fatalf("replacement PVC wait must happen before scale-down:\n%s", joined)
+	if strings.Contains(joined, "scale:myceld:0") {
+		t.Fatalf("reset-namespace restore should not create then scale down a fresh StatefulSet before PVC restore:\n%s", joined)
+	}
+	firstRestore := strings.Index(joined, "restore-local:data-myceld-0")
+	lastApply := strings.LastIndex(joined, "apply-yaml")
+	if firstRestore < 0 || lastApply < 0 || firstRestore > lastApply {
+		t.Fatalf("full manifest apply must happen after PVC restore so fresh daemons cannot initialize clean PVCs first:\n%s", joined)
 	}
 }
 
@@ -232,6 +301,9 @@ func (d *clusterBackupCreateDriver) Endpoints(context.Context, env.Environment) 
 func (d *clusterBackupCreateDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	cmd := strings.Join(req.Command, " ")
 	d.execs = append(d.execs, cmd)
+	if strings.Contains(cmd, "admin backup cluster start") && strings.Contains(cmd, "--repository-id") {
+		return executil.Result{Command: cmd, Stdout: `{"status":{"backup_set_id":"backup-set-test","state":"succeeded","expected_nodes":1,"repository_id":"repo-minio","manifest_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/backup-set.json","raft_barriers":{"system":1},"nodes":[{"pod_name":"myceld-0","ordinal":0,"archive_name":"node-0.tar","archive_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-0/node-0.tar","manifest_name":"node-0.manifest.json","manifest_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-0/node-0.manifest.json","applied_indexes":{"system":1}}]}}`}, nil
+	}
 	if strings.Contains(cmd, "admin backup cluster start") {
 		return executil.Result{Command: cmd, Stdout: `{"status":{"backup_set_id":"backup-set-test","state":"succeeded","expected_nodes":1,"manifest_uri":"file:///tmp/mycel-system-backups/backup-set.json","raft_barriers":{"system":1},"nodes":[{"pod_name":"myceld-0","ordinal":0,"archive_name":"node-0.tar","manifest_name":"node-0.manifest.json","applied_indexes":{"system":1}}]}}`}, nil
 	}
@@ -392,8 +464,9 @@ func (d *restoreApplyDriver) RestoreBackupSetOrdinalToPVC(_ context.Context, _ e
 }
 
 type backupValidationDriver struct {
-	execs  []string
-	copies []string
+	execs          []string
+	copies         []string
+	validateStdout string
 }
 
 func (d *backupValidationDriver) Name() string { return "test" }
@@ -416,7 +489,11 @@ func (d *backupValidationDriver) Exec(_ context.Context, _ env.Environment, _ en
 	cmd := strings.Join(req.Command, " ")
 	d.execs = append(d.execs, cmd)
 	if strings.Contains(cmd, "admin backup cluster validate") {
-		return executil.Result{Command: cmd, Stdout: `{"valid":true,"errors":[]}`}, nil
+		stdout := d.validateStdout
+		if strings.TrimSpace(stdout) == "" {
+			stdout = `{"valid":true,"errors":[]}`
+		}
+		return executil.Result{Command: cmd, Stdout: stdout}, nil
 	}
 	return executil.Result{Command: cmd, Stdout: "ok"}, nil
 }

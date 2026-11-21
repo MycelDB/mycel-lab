@@ -1,0 +1,112 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-cluster-repository-restore
+  description: Repository-backed MinIO cluster backup restored into fresh k3d PVCs and boot-verified.
+seed: 29293
+environment:
+  driver: k3d
+  namespace: mycel-repository-restore
+  options:
+    clusterNamePrefix: mlab-rr
+    digestPinnedImagePolicy: node-pull
+    objectStoreFixture: minio
+    createArguments:
+      - --agents
+      - "3"
+      - --timeout
+      - 180s
+    consolePortBase: 19291
+  capabilities:
+    required:
+      - per-node-endpoints
+      - node-exec
+      - logs
+      - object-store-fixture
+      - volume-replacement
+clusterRef: raft-3-node
+actorGroups:
+  - name: repository-restore-writers
+    profileRef: graph-committer
+    count: 1
+    rate:
+      mode: group-total
+      commitsPerSecond: 0.0001
+phases:
+  - name: create-workload-fixture
+    duration: 1s
+    events:
+      - type: system-backup-fixture
+        target:
+          name: repository-minio
+          actorId: repository-restore-writers-0
+          label: nt3-repository-restore-fixture
+          blobPayload: mycel-lab nt3 repository restore blob payload
+          ordinal: 0
+  - name: configure-minio-repository
+    duration: 1s
+    events:
+      - type: cluster-backup-repository-create
+        target:
+          name: repository-minio
+          repositoryId: mycel-lab-k3d-minio
+          bucket: mycel-k3d-backups
+          prefix: mycel-lab/{runID}
+          endpoint: http://minio:9000
+          region: us-east-1
+          forcePathStyle: true
+          disableTLS: true
+          devOnly: true
+  - name: capture-repository-backup
+    duration: 1s
+    events:
+      - type: cluster-backup-create
+        target:
+          name: repository-minio
+          repositoryId: mycel-lab-k3d-minio
+          archiveFormat: tar
+          captureProvider: filesystem_immutable_copy
+          quiesceReadProfile: control_only
+          reason: native mycel-lab k3d repository backup restore test
+          convergenceTimeout: 10m
+          waitTimeout: 15m
+          idempotencyKey: k3d-minio-repository-backup-v1
+  - name: validate-repository-backup
+    duration: 1s
+    events:
+      - type: cluster-backup-validate
+        target:
+          name: repository-minio
+          repositoryId: mycel-lab-k3d-minio
+          expectValid: true
+  - name: restore-repository-into-fresh-pvcs
+    duration: 1s
+    events:
+      - type: cluster-restore-apply
+        target:
+          name: repository-minio
+          statefulSet: myceld
+          bucket: mycel-k3d-backups
+          endpoint: http://minio:9000
+          region: us-east-1
+  - name: verify-restored-cluster
+    duration: 1s
+    events:
+      - type: cluster-restore-verify
+        target:
+          name: repository-minio
+          actorId: repository-restore-writers-0
+          verifyTimeout: 5m
+          verifyInterval: 5s
+          execTimeout: 30s
+assertions:
+  final:
+    requireHealthyCluster: true
+    healthConvergenceTimeout: 10m
+    healthConvergenceInterval: 5s
+    requireSharedClusterIdentity: true
+    requireNoAcknowledgedGraphTransactionLoss: true
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectReadChecks: true

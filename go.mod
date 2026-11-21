@@ -12,6 +12,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+replace github.com/myceldb/mycel-go-sdk => github.com/myceldb/mycel-go-sdk v0.22.1-0.20261121050519-07674e2cbf35
+
 require github.com/opencontainers/go-digest v1.0.0 // indirect
 
 require (
