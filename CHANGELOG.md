@@ -10,6 +10,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - Added a Compose MinIO repository-backed cluster backup suite that creates a credential-reference-only S3-compatible backup repository, runs a repository-backed cluster backup, verifies repository-truth list/get/validate/restore-plan flows, checks `backup-set.json` and `COMPLETE` in object storage, and exercises fail-closed missing-`COMPLETE` and corrupt required-manifest negative cases.
 - Extended the Compose MinIO repository backup scenario with a clean-target `NEW_CLUSTER_BOOTSTRAP` restore start, polling the asynchronous restore status API until all repository artifacts are staged, applied, and verified.
+- Hardened the k3d PVC restore helper to fail closed unless the freshly-created target PVC mount is empty before applying the offline cluster backup archive.
 - Added Phase 4 cluster backup validation harness support for expected-invalid backup-set fixtures, including normalized validation error capture for missing `COMPLETE`, manifest checksum mismatch, corrupt required artifact, unsupported required feature, topology mismatch, and raw-secret artifact evidence cases.
 - Staged `COMPLETE` markers alongside `backup-set.json` and node artifacts when validating host-captured cluster backup sets.
 

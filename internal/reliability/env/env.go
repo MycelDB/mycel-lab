@@ -940,7 +940,7 @@ spec:
 			}
 		}
 	}
-	cmd := fmt.Sprintf("find /data/mycel -mindepth 1 -maxdepth 1 -exec rm -rf {} + && test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-local --backup-set %s --ordinal %d --data-dir /data/mycel", shellQuote(backupDir), req.Ordinal)
+	cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-local --backup-set %s --ordinal %d --data-dir /data/mycel", shellQuote(backupDir), req.Ordinal)
 	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
 }
 
