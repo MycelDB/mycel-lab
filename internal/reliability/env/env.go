@@ -189,6 +189,7 @@ type RestoreRepositoryBackupSetRequest struct {
 	SecretKeyValue   string
 	Artifacts        []RestoreArtifact
 	Image            string
+	HelperRetries    int
 }
 
 type VolumeReplacementDriver interface {
@@ -1042,13 +1043,37 @@ stringData:
 		_, _ = d.runner().Run(context.Background(), "kubectl", "--context", environment.Context, "-n", environment.Namespace, "delete", "secret", secretName, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
 	}()
 	results := make([]ExecResult, 0, len(req.Artifacts))
+	retries := req.HelperRetries
+	if retries < 0 {
+		retries = 0
+	}
 	for _, artifact := range req.Artifacts {
 		if artifact.Ordinal < 0 {
 			return results, fmt.Errorf("restore artifact ordinal %d is invalid", artifact.Ordinal)
 		}
-		pvcName := fmt.Sprintf("data-%s-%d", statefulSet, artifact.Ordinal)
-		restorePod := kubernetesSafeName("restore-repo-" + pvcName)
-		manifest := fmt.Sprintf(`apiVersion: v1
+		var last ExecResult
+		var lastErr error
+		for attempt := 0; attempt <= retries; attempt++ {
+			attemptResult, err := d.restoreRepositoryBackupSetArtifactToPVC(ctx, environment, req, artifact, statefulSet, image, secretName, accessEnv, secretEnv)
+			last = attemptResult
+			lastErr = err
+			if err == nil {
+				break
+			}
+			last.Stderr = strings.TrimSpace(last.Stderr + "\n" + fmt.Sprintf("helper_attempt=%d/%d: %v", attempt+1, retries+1, err))
+		}
+		results = append(results, last)
+		if lastErr != nil {
+			return results, errors.New("repository restore helper failed")
+		}
+	}
+	return results, nil
+}
+
+func (d K3DDriver) restoreRepositoryBackupSetArtifactToPVC(ctx context.Context, environment Environment, req RestoreRepositoryBackupSetRequest, artifact RestoreArtifact, statefulSet, image, secretName, accessEnv, secretEnv string) (ExecResult, error) {
+	pvcName := fmt.Sprintf("data-%s-%d", statefulSet, artifact.Ordinal)
+	restorePod := kubernetesSafeName("restore-repo-" + pvcName)
+	manifest := fmt.Sprintf(`apiVersion: v1
 kind: Pod
 metadata:
   name: %s
@@ -1079,29 +1104,25 @@ spec:
       persistentVolumeClaim:
         claimName: %s
 `, restorePod, environment.Namespace, image, accessEnv, secretName, secretEnv, secretName, pvcName)
-		if _, err := d.ApplyYAML(ctx, environment, manifest); err != nil {
-			return results, err
-		}
-		func() {
-			defer func() {
-				_, _ = d.runner().Run(context.Background(), "kubectl", "--context", environment.Context, "-n", environment.Namespace, "delete", "pod", restorePod, "--ignore-not-found=true", "--wait=true", "--timeout=3m")
-			}()
-			if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "--for=condition=Ready", "pod/"+restorePod, "--timeout=5m"); err != nil {
-				results = append(results, ExecResult{Stderr: err.Error()})
-				return
-			}
-			cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-repository-local --bucket %s --backup-set-id %s --backup-set-prefix %s --repository-prefix %s --endpoint-uri %s --region %s --access-key-env %s --secret-key-env %s --ordinal %d --data-dir /data/mycel --target-pvc-name %s", shellQuote(req.Bucket), shellQuote(req.BackupSetID), shellQuote(req.BackupSetPrefix), shellQuote(req.RepositoryPrefix), shellQuote(req.EndpointURI), shellQuote(firstNonEmptyString(req.Region, "us-east-1")), shellQuote(accessEnv), shellQuote(secretEnv), artifact.Ordinal, shellQuote(pvcName))
-			result, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
-			results = append(results, result)
-			if err != nil {
-				results[len(results)-1].Stderr = strings.TrimSpace(results[len(results)-1].Stderr + "\n" + err.Error())
-			}
-		}()
-		if len(results) > 0 && strings.TrimSpace(results[len(results)-1].Stderr) != "" {
-			return results, errors.New("repository restore helper failed")
-		}
+	if _, err := d.ApplyYAML(ctx, environment, manifest); err != nil {
+		return ExecResult{Stderr: err.Error()}, err
 	}
-	return results, nil
+	defer func() {
+		_, _ = d.runner().Run(context.Background(), "kubectl", "--context", environment.Context, "-n", environment.Namespace, "delete", "pod", restorePod, "--ignore-not-found=true", "--wait=true", "--timeout=3m")
+	}()
+	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "--for=condition=Ready", "pod/"+restorePod, "--timeout=5m"); err != nil {
+		return ExecResult{Stderr: err.Error()}, err
+	}
+	cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-repository-local --bucket %s --backup-set-id %s --backup-set-prefix %s --repository-prefix %s --endpoint-uri %s --region %s --access-key-env %s --secret-key-env %s --ordinal %d --data-dir /data/mycel --target-pvc-name %s", shellQuote(req.Bucket), shellQuote(req.BackupSetID), shellQuote(req.BackupSetPrefix), shellQuote(req.RepositoryPrefix), shellQuote(req.EndpointURI), shellQuote(firstNonEmptyString(req.Region, "us-east-1")), shellQuote(accessEnv), shellQuote(secretEnv), artifact.Ordinal, shellQuote(pvcName))
+	result, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
+	if err != nil {
+		result.Stderr = strings.TrimSpace(result.Stderr + "\n" + err.Error())
+		return result, err
+	}
+	if strings.TrimSpace(result.Stderr) != "" {
+		return result, errors.New("repository restore helper reported stderr")
+	}
+	return result, nil
 }
 
 func (d K3DDriver) ProviderEmulatorObservations(ctx context.Context, environment Environment) (ExecResult, error) {

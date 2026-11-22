@@ -11,7 +11,7 @@ Validates repository-backed cluster backup followed by full PVC replacement and 
 - A repository-backed backup publishes valid node artifacts, `backup-set.json`, and `COMPLETE` to the shared repository.
 - The source StatefulSet is stopped before preserved-identity restore.
 - Old PVCs are replaced with fresh PVCs and verified by UID change evidence.
-- Restore helper pods restore each ordinal from the repository into an empty target PVC and fail closed if target contents are present.
+- Restore helper pods restore each ordinal from the repository into an empty target PVC, retry once for transient helper failures, and fail closed if target contents are present.
 - The restored StatefulSet boots from restored PVCs and passes workload/fixture verification.
 
 ## Topology
@@ -37,10 +37,9 @@ flowchart LR
 1. **create-source-fixture**. Writes deterministic source data used for post-restore verification.
 2. **configure-minio-repository**. Registers the k3d MinIO-backed repository.
 3. **capture-repository-backup**. Starts and waits for repository-backed cluster backup completion.
-4. **assert-repository-truth**. Validates completed repository backup-set discovery and negative fixtures.
-5. **restore-into-fresh-pvcs**. Stops the source StatefulSet, replaces PVCs, restores each ordinal from repository artifacts, and restarts the restored StatefulSet.
-6. **verify-restored-workload**. Verifies the restored cluster still contains the deterministic fixture identity.
-7. **cleanup-repository-backup**. Deletes repository backup-set artifacts.
+4. **validate-repository-backup**. Validates completed repository backup-set discovery.
+5. **restore-repository-into-fresh-pvcs**. Stops the source StatefulSet, replaces PVCs, restores each ordinal from repository artifacts with one configured helper retry, and restarts the restored StatefulSet.
+6. **verify-restored-cluster**. Verifies the restored cluster still contains the deterministic fixture identity.
 
 ## Actors
 
@@ -58,13 +57,14 @@ flowchart LR
 | `repositoryId` | scenario target | Change only when testing repository catalog isolation. |
 | `prefix` | `mycel-lab/{runID}` | Keeps repository objects isolated per run. |
 | `statefulSet` | `myceld` | Identifies target PVC names and source fencing target. |
+| `helperRetries` | `1` | Allows one retry for transient helper pod/setup failures while preserving the empty-target proof before every restore attempt. |
 | `consolePortBase` | scenario/release-bundle option | Avoids port collisions across destructive scenarios. |
 
 ## Evidence and artifacts
 
 - `events.jsonl` records repository creation, backup capture, repository assertions, PVC replacement, restore helper output, and verification payloads.
 - `environment/kubernetes-resources.txt`, `pods-describe.txt`, `kubernetes-events.txt`, and pod logs capture Kubernetes state.
-- Restore evidence includes old/new PVC UIDs, repository prefix, backup-set ID, helper results, and restored workload verification.
+- Restore evidence includes old/new PVC UIDs, repository prefix, backup-set ID, helper attempt results, and restored workload verification.
 - `post-run-cleanup.json` records k3d cluster/container/network/volume absence checks.
 
 ## Common failure modes
