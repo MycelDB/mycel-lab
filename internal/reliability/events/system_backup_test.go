@@ -215,6 +215,50 @@ func TestRestoreCLICompatibilityErrorExplainsStaleImage(t *testing.T) {
 	}
 }
 
+func TestRepositoryNegativeChecksCoverRepositoryTruthChaos(t *testing.T) {
+	driver := &repositoryNegativeDriver{}
+	backup := SystemBackupOperationResult{
+		BackupSetID:               "backup-set-good",
+		RepositoryID:              "repo-minio",
+		RepositoryBucket:          "mycel-backups",
+		RepositoryPrefix:          "runs/test",
+		RepositoryBackupSetPrefix: "runs/test/backup-sets/backup-set-good",
+		Artifacts: []SystemBackupArtifact{
+			{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", ArchiveURI: "s3://mycel-backups/runs/test/backup-sets/backup-set-good/nodes/myceld-0/node-0.tar", ManifestName: "node-0.manifest.json", ManifestURI: "s3://mycel-backups/runs/test/backup-sets/backup-set-good/nodes/myceld-0/node-0.manifest.json"},
+			{PodName: "myceld-1", Ordinal: 1, ArchiveName: "node-1.tar", ArchiveURI: "s3://mycel-backups/runs/test/backup-sets/backup-set-good/nodes/myceld-1/node-1.tar", ManifestName: "node-1.manifest.json", ManifestURI: "s3://mycel-backups/runs/test/backup-sets/backup-set-good/nodes/myceld-1/node-1.manifest.json"},
+		},
+	}
+	checks, err := executeRepositoryNegativeChecks(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, backup, map[string]any{"ordinal": 0})
+	if err != nil {
+		t.Fatalf("executeRepositoryNegativeChecks() error=%v", err)
+	}
+	wantNames := map[string]bool{"missing-complete": true, "corrupt-required-manifest": true, "corrupt-complete-marker": true, "interrupted-publish-after-node-artifacts": true, "partial-node-upload": true}
+	if len(checks) != len(wantNames) {
+		t.Fatalf("checks=%+v, want %d checks", checks, len(wantNames))
+	}
+	for _, check := range checks {
+		if !wantNames[check.Name] {
+			t.Fatalf("unexpected check name %q in %+v", check.Name, checks)
+		}
+		delete(wantNames, check.Name)
+		if check.Listed || check.Valid || len(check.Errors) == 0 || check.FixturePrefix == "" || len(check.FixtureObjects) == 0 {
+			t.Fatalf("check=%+v, want unlisted invalid fixture with diagnostics", check)
+		}
+	}
+	if len(wantNames) != 0 {
+		t.Fatalf("missing checks: %+v", wantNames)
+	}
+	joinedObjects := strings.Join(driver.objectCommands, "\n")
+	for _, want := range []string{"missing-complete", "corrupt-manifest", "corrupt-complete", "interrupted-publish", "partial-node-upload", "mc rm --recursive --force"} {
+		if !strings.Contains(joinedObjects, want) {
+			t.Fatalf("object-store commands missing %q\n%s", want, joinedObjects)
+		}
+	}
+	if driver.listCalls != len(checks) || driver.validateCalls != len(checks) {
+		t.Fatalf("listCalls=%d validateCalls=%d checks=%d", driver.listCalls, driver.validateCalls, len(checks))
+	}
+}
+
 func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.T) {
 	driver := &restoreApplyDriver{}
 	hostDir := t.TempDir()
@@ -224,10 +268,7 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 		{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", ManifestName: "node-0.manifest.json", LocalArchive: "/tmp/node-0.tar", LocalManifest: "/tmp/node-0.manifest.json"},
 		{PodName: "myceld-1", Ordinal: 1, ArchiveName: "node-1.tar", ManifestName: "node-1.manifest.json", LocalArchive: "/tmp/node-1.tar", LocalManifest: "/tmp/node-1.manifest.json"},
 	}}
-	scenario := spec.ResolvedScenario{
-		Environment: spec.EnvironmentSpec{Namespace: "test-ns"},
-		Cluster:     spec.ClusterSpec{Nodes: 2, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 2, PartitionCount: 8, ReplicaFactor: 2}},
-	}
+	scenario := restoreApplyScenario()
 	result, err := executeClusterRestoreApply(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-test"}, scenario, map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"statefulSet": "myceld"}, SystemBackupOperationResult{Operation: "cluster-restore-apply"})
 	if err != nil {
 		t.Fatalf("executeClusterRestoreApply() error=%v", err)
@@ -263,6 +304,47 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 	lastApply := strings.LastIndex(joined, "apply-yaml")
 	if firstRestore < 0 || lastApply < 0 || firstRestore > lastApply {
 		t.Fatalf("full manifest apply must happen after PVC restore so fresh daemons cannot initialize clean PVCs first:\n%s", joined)
+	}
+}
+
+func TestClusterRestoreApplyCapturesRepositoryHelperFailureEvidence(t *testing.T) {
+	driver := &restoreApplyDriver{repositoryRestoreResults: []env.ExecResult{
+		{Stdout: `{"ordinal":0,"state":"restored"}`},
+		{Stdout: `{"ordinal":1,"state":"failed"}`, Stderr: "empty target proof failed: found lost+found"},
+	}, repositoryRestoreErr: errors.New("repository restore helper failed")}
+	backup := SystemBackupOperationResult{
+		BackupSetID:               "backup-set-test",
+		RepositoryID:              "repo-minio",
+		RepositoryBucket:          "mycel-backups",
+		RepositoryPrefix:          "runs/test",
+		RepositoryBackupSetPrefix: "runs/test/backup-sets/backup-set-test",
+		Artifacts: []SystemBackupArtifact{
+			{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", ManifestName: "node-0.manifest.json"},
+			{PodName: "myceld-1", Ordinal: 1, ArchiveName: "node-1.tar", ManifestName: "node-1.manifest.json"},
+		},
+	}
+	result, err := executeClusterRestoreApply(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-test"}, restoreApplyScenario(), map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"statefulSet": "myceld", "bucket": "mycel-backups", "endpoint": "http://minio:9000"}, SystemBackupOperationResult{Operation: "cluster-restore-apply"})
+	if err == nil || !strings.Contains(err.Error(), "repository restore helper failed") {
+		t.Fatalf("executeClusterRestoreApply() error=%v, want helper failure", err)
+	}
+	if len(result.RestoreResults) != 2 || !strings.Contains(result.RestoreResults[1].Stderr, "empty target proof failed") {
+		t.Fatalf("restore helper evidence=%+v, want bounded stderr for failed helper", result.RestoreResults)
+	}
+	joined := strings.Join(driver.ops, "\n")
+	for _, want := range []string{"scale:myceld:0", "delete-pvc:data-myceld-0", "delete-pvc:data-myceld-1", "restore-repository:backup-set-test:2"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("restore operations missing %q\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "scale:myceld:2") {
+		t.Fatalf("failed restore helper must not scale restored StatefulSet back up:\n%s", joined)
+	}
+}
+
+func restoreApplyScenario() spec.ResolvedScenario {
+	return spec.ResolvedScenario{
+		Environment: spec.EnvironmentSpec{Namespace: "test-ns"},
+		Cluster:     spec.ClusterSpec{Nodes: 2, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 2, PartitionCount: 8, ReplicaFactor: 2}},
 	}
 }
 
@@ -382,8 +464,10 @@ func (d *restoreVerifyDriver) CaptureState(context.Context, env.Environment, *ar
 }
 
 type restoreApplyDriver struct {
-	ops      []string
-	uidCalls int
+	ops                      []string
+	uidCalls                 int
+	repositoryRestoreResults []env.ExecResult
+	repositoryRestoreErr     error
 }
 
 func (d *restoreApplyDriver) Name() string { return "test" }
@@ -463,6 +547,14 @@ func (d *restoreApplyDriver) RestoreBackupSetOrdinalToPVC(_ context.Context, _ e
 	return env.ExecResult{Stdout: `{"data_dir":"/data/mycel"}`}, nil
 }
 
+func (d *restoreApplyDriver) RestoreRepositoryBackupSetToPVCs(_ context.Context, _ env.Environment, req env.RestoreRepositoryBackupSetRequest) ([]env.ExecResult, error) {
+	d.ops = append(d.ops, "restore-repository:"+req.BackupSetID+":"+strconv.Itoa(len(req.Artifacts)))
+	if d.repositoryRestoreResults != nil || d.repositoryRestoreErr != nil {
+		return d.repositoryRestoreResults, d.repositoryRestoreErr
+	}
+	return []env.ExecResult{{Stdout: `{"ordinal":0,"state":"restored"}`}, {Stdout: `{"ordinal":1,"state":"restored"}`}}, nil
+}
+
 type backupValidationDriver struct {
 	execs          []string
 	copies         []string
@@ -511,4 +603,53 @@ func (d *backupValidationDriver) CopyFromNode(context.Context, env.Environment, 
 func (d *backupValidationDriver) CopyToNode(_ context.Context, _ env.Environment, _ env.NodeRef, hostPath, containerPath string) (env.ExecResult, error) {
 	d.copies = append(d.copies, hostPath+" -> "+containerPath)
 	return env.ExecResult{Command: "copy"}, nil
+}
+
+type repositoryNegativeDriver struct {
+	objectCommands []string
+	listCalls      int
+	validateCalls  int
+}
+
+func (d *repositoryNegativeDriver) Name() string { return "test" }
+func (d *repositoryNegativeDriver) Capabilities() env.CapabilitySet {
+	return env.NewCapabilitySet(env.CapabilityNodeExec, env.CapabilityObjectStoreFixture)
+}
+func (d *repositoryNegativeDriver) Validate(spec.EnvironmentSpec) error                   { return nil }
+func (d *repositoryNegativeDriver) Preflight(context.Context, spec.EnvironmentSpec) error { return nil }
+func (d *repositoryNegativeDriver) Create(context.Context, spec.ResolvedScenario, spec.EnvironmentSpec) (env.Environment, error) {
+	return env.Environment{Name: "test", Driver: "test"}, nil
+}
+func (d *repositoryNegativeDriver) WaitReady(context.Context, env.Environment) error { return nil }
+func (d *repositoryNegativeDriver) Nodes(context.Context, env.Environment) ([]env.Node, error) {
+	return []env.Node{{Name: "myceld-0", Ordinal: 0}}, nil
+}
+func (d *repositoryNegativeDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
+	return nil, nil
+}
+func (d *repositoryNegativeDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
+	cmd := strings.Join(req.Command, " ")
+	if strings.Contains(cmd, "admin backup cluster list") {
+		d.listCalls++
+		return env.ExecResult{Command: cmd, Stdout: `{"backup_sets":[]}`}, nil
+	}
+	if strings.Contains(cmd, "admin backup cluster validate") {
+		d.validateCalls++
+		return env.ExecResult{Command: cmd, Stdout: `{"valid":false,"validation":{"errors":["injected repository chaos fixture is invalid"]}}`}, nil
+	}
+	return env.ExecResult{Command: cmd}, nil
+}
+func (d *repositoryNegativeDriver) RestartNode(context.Context, env.Environment, env.NodeRef) error {
+	return nil
+}
+func (d *repositoryNegativeDriver) RollingRestart(context.Context, env.Environment) error {
+	return nil
+}
+func (d *repositoryNegativeDriver) Delete(context.Context, env.Environment) error { return nil }
+func (d *repositoryNegativeDriver) CaptureState(context.Context, env.Environment, *artifacts.Sink) error {
+	return nil
+}
+func (d *repositoryNegativeDriver) ExecObjectStore(_ context.Context, _ env.Environment, command string) (env.ExecResult, error) {
+	d.objectCommands = append(d.objectCommands, command)
+	return env.ExecResult{Command: command, Stdout: "ok"}, nil
 }
