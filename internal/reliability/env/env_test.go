@@ -482,6 +482,33 @@ func TestK3DDriverWaitPVCsChecksEveryOrdinalPVC(t *testing.T) {
 	}
 }
 
+func TestK3DDriverRestoreBackupSetOrdinalToPVCProvesTargetEmpty(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test"}
+	_, err := driver.RestoreBackupSetOrdinalToPVC(context.Background(), environment, RestoreBackupSetRequest{
+		PVCName:       "data-myceld-0",
+		BackupSetPath: "/tmp/backup-set.json",
+		Ordinal:       0,
+		Image:         "myceldb/mycel:test",
+		Artifacts: []RestoreArtifact{
+			{Ordinal: 0, ArchiveName: "node-0.tar", LocalArchive: "/tmp/node-0.tar", ManifestName: "node-0.manifest.json", LocalManifest: "/tmp/node-0.manifest.json"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RestoreBackupSetOrdinalToPVC() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"kubectl --context k3d-mycel-lab-test apply -f", "kubectl --context k3d-mycel-lab-test -n test-ns cp /tmp/backup-set.json", "test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\"", "admin backup cluster restore-local", "--ordinal 0 --data-dir /data/mycel"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("RestoreBackupSetOrdinalToPVC commands missing %q\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "find /data/mycel -mindepth 1 -maxdepth 1 -exec rm -rf") {
+		t.Fatalf("restore-local helper must not clear non-empty target PVCs before proof:\n%s", joined)
+	}
+}
+
 func TestK3DDriverScaleStatefulSetWaitsOnlyDesiredOrdinals(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}

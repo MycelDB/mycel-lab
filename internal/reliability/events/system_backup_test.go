@@ -268,10 +268,7 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 		{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", ManifestName: "node-0.manifest.json", LocalArchive: "/tmp/node-0.tar", LocalManifest: "/tmp/node-0.manifest.json"},
 		{PodName: "myceld-1", Ordinal: 1, ArchiveName: "node-1.tar", ManifestName: "node-1.manifest.json", LocalArchive: "/tmp/node-1.tar", LocalManifest: "/tmp/node-1.manifest.json"},
 	}}
-	scenario := spec.ResolvedScenario{
-		Environment: spec.EnvironmentSpec{Namespace: "test-ns"},
-		Cluster:     spec.ClusterSpec{Nodes: 2, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 2, PartitionCount: 8, ReplicaFactor: 2}},
-	}
+	scenario := restoreApplyScenario()
 	result, err := executeClusterRestoreApply(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-test"}, scenario, map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"statefulSet": "myceld"}, SystemBackupOperationResult{Operation: "cluster-restore-apply"})
 	if err != nil {
 		t.Fatalf("executeClusterRestoreApply() error=%v", err)
@@ -307,6 +304,47 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 	lastApply := strings.LastIndex(joined, "apply-yaml")
 	if firstRestore < 0 || lastApply < 0 || firstRestore > lastApply {
 		t.Fatalf("full manifest apply must happen after PVC restore so fresh daemons cannot initialize clean PVCs first:\n%s", joined)
+	}
+}
+
+func TestClusterRestoreApplyCapturesRepositoryHelperFailureEvidence(t *testing.T) {
+	driver := &restoreApplyDriver{repositoryRestoreResults: []env.ExecResult{
+		{Stdout: `{"ordinal":0,"state":"restored"}`},
+		{Stdout: `{"ordinal":1,"state":"failed"}`, Stderr: "empty target proof failed: found lost+found"},
+	}, repositoryRestoreErr: errors.New("repository restore helper failed")}
+	backup := SystemBackupOperationResult{
+		BackupSetID:               "backup-set-test",
+		RepositoryID:              "repo-minio",
+		RepositoryBucket:          "mycel-backups",
+		RepositoryPrefix:          "runs/test",
+		RepositoryBackupSetPrefix: "runs/test/backup-sets/backup-set-test",
+		Artifacts: []SystemBackupArtifact{
+			{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", ManifestName: "node-0.manifest.json"},
+			{PodName: "myceld-1", Ordinal: 1, ArchiveName: "node-1.tar", ManifestName: "node-1.manifest.json"},
+		},
+	}
+	result, err := executeClusterRestoreApply(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-test"}, restoreApplyScenario(), map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"statefulSet": "myceld", "bucket": "mycel-backups", "endpoint": "http://minio:9000"}, SystemBackupOperationResult{Operation: "cluster-restore-apply"})
+	if err == nil || !strings.Contains(err.Error(), "repository restore helper failed") {
+		t.Fatalf("executeClusterRestoreApply() error=%v, want helper failure", err)
+	}
+	if len(result.RestoreResults) != 2 || !strings.Contains(result.RestoreResults[1].Stderr, "empty target proof failed") {
+		t.Fatalf("restore helper evidence=%+v, want bounded stderr for failed helper", result.RestoreResults)
+	}
+	joined := strings.Join(driver.ops, "\n")
+	for _, want := range []string{"scale:myceld:0", "delete-pvc:data-myceld-0", "delete-pvc:data-myceld-1", "restore-repository:backup-set-test:2"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("restore operations missing %q\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "scale:myceld:2") {
+		t.Fatalf("failed restore helper must not scale restored StatefulSet back up:\n%s", joined)
+	}
+}
+
+func restoreApplyScenario() spec.ResolvedScenario {
+	return spec.ResolvedScenario{
+		Environment: spec.EnvironmentSpec{Namespace: "test-ns"},
+		Cluster:     spec.ClusterSpec{Nodes: 2, Image: "myceldb/mycel:latest", Raft: spec.RaftSpec{NodeCount: 2, PartitionCount: 8, ReplicaFactor: 2}},
 	}
 }
 
@@ -426,8 +464,10 @@ func (d *restoreVerifyDriver) CaptureState(context.Context, env.Environment, *ar
 }
 
 type restoreApplyDriver struct {
-	ops      []string
-	uidCalls int
+	ops                      []string
+	uidCalls                 int
+	repositoryRestoreResults []env.ExecResult
+	repositoryRestoreErr     error
 }
 
 func (d *restoreApplyDriver) Name() string { return "test" }
@@ -505,6 +545,14 @@ func (d *restoreApplyDriver) RestoreArchiveToPVC(_ context.Context, _ env.Enviro
 func (d *restoreApplyDriver) RestoreBackupSetOrdinalToPVC(_ context.Context, _ env.Environment, req env.RestoreBackupSetRequest) (env.ExecResult, error) {
 	d.ops = append(d.ops, "restore-local:"+req.PVCName+":"+strconv.Itoa(req.Ordinal)+":"+req.Image+":"+strconv.Itoa(len(req.Artifacts)))
 	return env.ExecResult{Stdout: `{"data_dir":"/data/mycel"}`}, nil
+}
+
+func (d *restoreApplyDriver) RestoreRepositoryBackupSetToPVCs(_ context.Context, _ env.Environment, req env.RestoreRepositoryBackupSetRequest) ([]env.ExecResult, error) {
+	d.ops = append(d.ops, "restore-repository:"+req.BackupSetID+":"+strconv.Itoa(len(req.Artifacts)))
+	if d.repositoryRestoreResults != nil || d.repositoryRestoreErr != nil {
+		return d.repositoryRestoreResults, d.repositoryRestoreErr
+	}
+	return []env.ExecResult{{Stdout: `{"ordinal":0,"state":"restored"}`}, {Stdout: `{"ordinal":1,"state":"restored"}`}}, nil
 }
 
 type backupValidationDriver struct {
