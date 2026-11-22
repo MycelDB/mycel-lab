@@ -62,6 +62,36 @@ phases:
           devOnly: true
           disableTLS: true
           forcePathStyle: true
+  - name: assert-repository-permission-failure-chaos
+    duration: 1s
+    events:
+      - type: cluster-backup-repository-create
+        target:
+          name: repository-minio-denied
+          repositoryId: mycel-lab-minio-denied
+          bucket: mycel-compose-backups
+          prefix: mycel-lab/{runID}/denied
+          endpoint: http://minio:9000
+          region: us-east-1
+          accessKeyEnv: MYCEL_LAB_MISSING_BACKUP_ACCESS_KEY
+          secretKeyEnv: MYCEL_LAB_MISSING_BACKUP_SECRET_KEY
+          devOnly: true
+          disableTLS: true
+          forcePathStyle: true
+          expectValid: false
+      - type: cluster-backup-create
+        target:
+          name: repository-minio-denied
+          repositoryId: mycel-lab-minio-denied
+          archiveFormat: tar
+          captureProvider: filesystem_immutable_copy
+          quiesceReadProfile: control_only
+          reason: mycel-lab denied repository permission chaos
+          waitTimeout: 2m
+          convergenceTimeout: 1m
+          idempotencyKey: compose-minio-repository-denied-v1
+          expectFailure: true
+          expectedFailureContains: credential
   - name: capture-repository-backup
     duration: 1s
     events:
