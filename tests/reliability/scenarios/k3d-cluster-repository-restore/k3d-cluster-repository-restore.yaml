@@ -89,6 +89,7 @@ phases:
           bucket: mycel-k3d-backups
           endpoint: http://minio:9000
           region: us-east-1
+          helperRetries: 1
   - name: verify-restored-cluster
     duration: 1s
     events:
