@@ -92,6 +92,13 @@ phases:
           idempotencyKey: compose-minio-repository-denied-v1
           expectFailure: true
           expectedFailureContains: credential
+      - type: cluster-backup-repository-delete
+        target:
+          name: repository-minio-denied
+          repositoryId: mycel-lab-minio-denied
+          backupSetId: denied-delete-probe
+          reason: mycel-lab denied repository delete chaos
+          expectFailure: true
   - name: capture-repository-backup
     duration: 1s
     events:
@@ -133,6 +140,14 @@ phases:
           waitTimeout: 5m
           pollInterval: 2s
           idempotencyKey: compose-minio-repository-restore-start-v1
+  - name: delete-repository-backup
+    duration: 1s
+    events:
+      - type: cluster-backup-repository-delete
+        target:
+          name: repository-minio
+          repositoryId: mycel-lab-minio
+          reason: mycel-lab repository backup delete verification
 assertions:
   final:
     requireHealthyCluster: true

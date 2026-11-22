@@ -41,6 +41,8 @@ type SystemBackupOperationResult struct {
 	RepositoryKeys            []string                             `json:"repositoryKeys,omitempty"`
 	RepositoryListCount       int                                  `json:"repositoryListCount,omitempty"`
 	RepositoryGetVerified     bool                                 `json:"repositoryGetVerified,omitempty"`
+	RepositoryDeleted         bool                                 `json:"repositoryDeleted,omitempty"`
+	RepositoryDeleteVerified  bool                                 `json:"repositoryDeleteVerified,omitempty"`
 	RepositoryValidationState string                               `json:"repositoryValidationState,omitempty"`
 	RepositoryValidationError string                               `json:"repositoryValidationError,omitempty"`
 	RepositoryBlockers        []string                             `json:"repositoryBlockers,omitempty"`
@@ -192,6 +194,8 @@ func executeSystemBackupEvent(ctx context.Context, driver env.EnvironmentDriver,
 		return executeClusterBackupValidate(ctx, driver, environment, state, target, result)
 	case "cluster-backup-repository-assert":
 		return executeClusterBackupRepositoryAssert(ctx, driver, environment, resources, state, target, result)
+	case "cluster-backup-repository-delete":
+		return executeClusterBackupRepositoryDelete(ctx, driver, environment, state, target, result)
 	case "cluster-restore-plan":
 		return executeClusterRestorePlanEvent(ctx, driver, environment, state, target, result)
 	case "cluster-restore-start":
@@ -619,6 +623,46 @@ func executeClusterBackupRepositoryAssert(ctx context.Context, driver env.Enviro
 			return result, err
 		}
 	}
+	return result, nil
+}
+
+func executeClusterBackupRepositoryDelete(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, state map[string]SystemBackupOperationResult, target map[string]any, result SystemBackupOperationResult) (SystemBackupOperationResult, error) {
+	backup := state[systemBackupKey(target)]
+	copyRepositoryEvidence(&result, backup)
+	result.BackupSetID = firstNonEmpty(stringTarget(target, "backupSetId"), stringTarget(target, "backupSetID"), backup.BackupSetID)
+	result.RepositoryID = firstNonEmpty(stringTarget(target, "repositoryId"), stringTarget(target, "repositoryID"), result.RepositoryID)
+	if result.RepositoryID == "" || result.BackupSetID == "" {
+		return result, errors.New("repository delete requires repository_id and backup_set_id")
+	}
+	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "delete", result.BackupSetID, "--repository-id", result.RepositoryID)
+	if reason := stringTarget(target, "reason"); reason != "" {
+		cmd = append(cmd, "--reason", reason)
+	}
+	execResult, err := driver.Exec(ctx, environment, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}, env.ExecRequest{Command: cmd})
+	result.Stdout = bounded(execResult.Stdout, 8192)
+	result.Stderr = bounded(execResult.Stderr, 8192)
+	expectFailure := boolTarget(target, "expectFailure", false)
+	if err != nil {
+		if expectFailure && backupFailureMatchesExpectation(target, err.Error(), result.Stdout, result.Stderr) {
+			return result, nil
+		}
+		return result, err
+	}
+	if expectFailure {
+		return result, errors.New("repository backup-set delete unexpectedly succeeded")
+	}
+	result.RepositoryDeleted = true
+	listed, listStdout, err := repositoryBackupSetListed(ctx, driver, environment, result.RepositoryID, result.BackupSetID, intTarget(target, "ordinal", 0))
+	if err != nil {
+		return result, err
+	}
+	if strings.TrimSpace(result.Stdout) == "" {
+		result.Stdout = bounded(listStdout, 8192)
+	}
+	if listed {
+		return result, fmt.Errorf("repository backup set %s was still listed after delete", result.BackupSetID)
+	}
+	result.RepositoryDeleteVerified = true
 	return result, nil
 }
 

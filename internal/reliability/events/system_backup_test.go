@@ -242,6 +242,36 @@ func TestRepositoryValidationBlockersUseSanitizedReasons(t *testing.T) {
 	}
 }
 
+func TestClusterBackupRepositoryDeleteVerifiesRepositoryTruth(t *testing.T) {
+	driver := &repositoryNegativeDriver{}
+	backup := SystemBackupOperationResult{BackupSetID: "backup-set-good", RepositoryID: "repo-minio", RepositoryBucket: "mycel-backups", RepositoryBackupSetPrefix: "runs/test/backup-sets/backup-set-good"}
+	result, err := executeClusterBackupRepositoryDelete(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"reason": "test cleanup"}, SystemBackupOperationResult{Operation: "cluster-backup-repository-delete"})
+	if err != nil {
+		t.Fatalf("executeClusterBackupRepositoryDelete() error=%v", err)
+	}
+	if !result.RepositoryDeleted || !result.RepositoryDeleteVerified || driver.deleteCalls != 1 || driver.listCalls != 1 {
+		t.Fatalf("result=%+v deleteCalls=%d listCalls=%d, want deleted and verified", result, driver.deleteCalls, driver.listCalls)
+	}
+	joined := strings.Join(driver.execCommands, "\n")
+	for _, want := range []string{"admin backup cluster delete backup-set-good --repository-id repo-minio", "--reason test cleanup", "admin backup cluster list --repository-id repo-minio"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("delete commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
+func TestClusterBackupRepositoryDeleteCanExpectFailure(t *testing.T) {
+	driver := &repositoryNegativeDriver{deleteErr: errors.New("permission denied by repository fixture"), deleteStderr: "permission denied"}
+	backup := SystemBackupOperationResult{BackupSetID: "backup-set-good", RepositoryID: "repo-denied"}
+	result, err := executeClusterBackupRepositoryDelete(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, map[string]SystemBackupOperationResult{"default": backup}, map[string]any{"expectFailure": true, "expectedFailureContains": "permission denied"}, SystemBackupOperationResult{Operation: "cluster-backup-repository-delete"})
+	if err != nil {
+		t.Fatalf("executeClusterBackupRepositoryDelete() error=%v", err)
+	}
+	if result.RepositoryDeleted || result.RepositoryDeleteVerified || driver.deleteCalls != 1 || driver.listCalls != 0 || !strings.Contains(result.Stderr, "permission denied") {
+		t.Fatalf("result=%+v deleteCalls=%d listCalls=%d, want captured delete failure", result, driver.deleteCalls, driver.listCalls)
+	}
+}
+
 func TestRepositoryNegativeChecksCoverRepositoryTruthChaos(t *testing.T) {
 	driver := &repositoryNegativeDriver{}
 	backup := SystemBackupOperationResult{
@@ -639,8 +669,12 @@ func (d *backupValidationDriver) CopyToNode(_ context.Context, _ env.Environment
 
 type repositoryNegativeDriver struct {
 	objectCommands []string
+	execCommands   []string
 	listCalls      int
 	validateCalls  int
+	deleteCalls    int
+	deleteErr      error
+	deleteStderr   string
 }
 
 func (d *repositoryNegativeDriver) Name() string { return "test" }
@@ -661,6 +695,11 @@ func (d *repositoryNegativeDriver) Endpoints(context.Context, env.Environment) (
 }
 func (d *repositoryNegativeDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	cmd := strings.Join(req.Command, " ")
+	d.execCommands = append(d.execCommands, cmd)
+	if strings.Contains(cmd, "admin backup cluster delete") {
+		d.deleteCalls++
+		return env.ExecResult{Command: cmd, Stdout: `{"backup_set_id":"backup-set-good","repository_id":"repo-minio","state":"deleted"}`, Stderr: d.deleteStderr}, d.deleteErr
+	}
 	if strings.Contains(cmd, "admin backup cluster list") {
 		d.listCalls++
 		return env.ExecResult{Command: cmd, Stdout: `{"backup_sets":[]}`}, nil

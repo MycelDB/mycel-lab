@@ -9,7 +9,7 @@ Validates repository-backed cluster backup and restore-start behavior in the Com
 - A Compose raft cluster can register a MinIO-backed cluster backup repository using credential references rather than raw stored credentials.
 - A quiesced `FILESYSTEM_IMMUTABLE_COPY` cluster backup uploads node archives, node manifests, inventories, `backup-set.json`, and `COMPLETE` to the repository.
 - Repository-truth APIs list and validate only completed backup sets with valid manifests and complete markers.
-- A repository configured with missing dev-only credential env refs is rejected and backup creation against it fails as expected without exposing raw credentials.
+- A repository configured with missing dev-only credential env refs is rejected, and backup/delete operations against it fail as expected without exposing raw credentials.
 - Negative fixtures such as missing/corrupt `COMPLETE`, corrupt `backup-set.json`, interrupted publish, and partial node upload are rejected and not listed as restorable.
 - `NEW_CLUSTER_BOOTSTRAP` / `PRESERVE_BACKUP_ID` restore can stage, decrypt when needed, apply, and verify each node archive into clean target data directories.
 
@@ -34,11 +34,11 @@ flowchart LR
 
 1. **create-source-fixture**. Writes a deterministic graph fixture that must be present in the backup.
 2. **configure-minio-repository**. Creates a repository config pointing at the Compose MinIO fixture.
-3. **assert-repository-permission-failure-chaos**. Registers a second dev-only repository that references missing credential env vars, expects repository validation to fail, and proves backup creation against that repository fails without failing the scenario.
+3. **assert-repository-permission-failure-chaos**. Registers a second dev-only repository that references missing credential env vars, expects repository validation to fail, proves backup creation against that repository fails without failing the scenario, and probes expected repository-delete failure diagnostics.
 4. **capture-repository-backup**. Starts and waits for a repository-backed cluster backup.
 5. **assert-repository-truth**. Lists, gets, validates, and negatively probes repository backup-set discovery.
 6. **start-clean-target-restore**. Starts a clean-target `NEW_CLUSTER_BOOTSTRAP` restore and waits for verification.
-7. **cleanup-repository-backup**. Deletes repository artifacts created by the scenario.
+7. **delete-repository-backup**. Deletes the completed repository backup set through the public admin CLI and verifies repository-truth listing no longer returns it.
 
 ## Actors
 
@@ -60,7 +60,7 @@ flowchart LR
 
 ## Evidence and artifacts
 
-- `events.jsonl` records repository creation, expected denied-repository validation/backup failure, backup creation, validation, restore start, and cleanup payloads.
+- `events.jsonl` records repository creation, expected denied-repository validation/backup/delete failure, backup creation, validation, restore start, and delete-verification payloads.
 - `result.json` and `summary.md` show phase status and final outcome.
 - Repository evidence includes backup-set ID, repository prefix, manifest URI, node artifact URIs, checksums, and negative validation results.
 - Compose evidence under `environment/` captures resolved endpoints, container state, logs, and cleanup.
@@ -71,7 +71,7 @@ flowchart LR
 - Invalid credential references, TLS settings, or repository encryption policy fail repository validation.
 - Missing or corrupt `COMPLETE` / `backup-set.json`, interrupted-publish, and partial-upload fixtures must be rejected; if they list as restorable, repository-truth validation regressed.
 - Restore failures usually indicate archive staging/decryption/extraction issues, dirty target directories, or manifest/checksum mismatches.
-- Cleanup failures leave repository objects in the MinIO fixture and should be investigated before rerunning with the same prefix.
+- Delete failures leave repository objects in the MinIO fixture and should be investigated before rerunning with the same prefix.
 
 ## When to run
 
