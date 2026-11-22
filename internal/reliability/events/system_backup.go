@@ -41,6 +41,9 @@ type SystemBackupOperationResult struct {
 	RepositoryKeys            []string                             `json:"repositoryKeys,omitempty"`
 	RepositoryListCount       int                                  `json:"repositoryListCount,omitempty"`
 	RepositoryGetVerified     bool                                 `json:"repositoryGetVerified,omitempty"`
+	RepositoryValidationState string                               `json:"repositoryValidationState,omitempty"`
+	RepositoryValidationError string                               `json:"repositoryValidationError,omitempty"`
+	RepositoryBlockers        []string                             `json:"repositoryBlockers,omitempty"`
 	NegativeChecks            []SystemBackupRepositoryNegativeCase `json:"negativeChecks,omitempty"`
 	Artifacts                 []SystemBackupArtifact               `json:"artifacts,omitempty"`
 	OldPVCUIDs                map[string]string                    `json:"oldPvcUids,omitempty"`
@@ -313,10 +316,40 @@ func executeClusterBackupRepositoryCreate(ctx context.Context, driver env.Enviro
 	if err != nil {
 		return result, fmt.Errorf("validate backup repository: %w", err)
 	}
-	if validation.GetValidation().GetState() != adminv1.BackupValidationState_BACKUP_VALIDATION_STATE_VALID {
-		return result, fmt.Errorf("backup repository validation state %s", validation.GetValidation().GetState().String())
+	validationSummary := validation.GetValidation()
+	result.RepositoryValidationState = validationSummary.GetState().String()
+	result.RepositoryValidationError = bounded(validationSummary.GetSanitizedError(), 2048)
+	result.RepositoryBlockers = repositoryValidationBlockers(validationSummary)
+	expectValid := boolTarget(target, "expectValid", true)
+	if validationSummary.GetState() != adminv1.BackupValidationState_BACKUP_VALIDATION_STATE_VALID {
+		if !expectValid {
+			return result, nil
+		}
+		return result, fmt.Errorf("backup repository validation state %s", validationSummary.GetState().String())
+	}
+	if !expectValid {
+		return result, errors.New("backup repository unexpectedly validated successfully")
 	}
 	return result, nil
+}
+
+func repositoryValidationBlockers(validation *adminv1.BackupRepositoryValidationSummary) []string {
+	if validation == nil {
+		return nil
+	}
+	blockers := make([]string, 0, len(validation.GetBlockers()))
+	for _, blocker := range validation.GetBlockers() {
+		reason := strings.TrimSpace(blocker.GetReason())
+		if reason == "" {
+			reason = "unknown"
+		}
+		field := strings.TrimSpace(blocker.GetFieldPath())
+		if field != "" {
+			reason += ":" + field
+		}
+		blockers = append(blockers, reason)
+	}
+	return blockers
 }
 
 // executorDriver adapts a previously asserted ObjectStoreExecutor while preserving the EnvironmentDriver identity.
@@ -383,7 +416,11 @@ func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDrive
 	execResult, err := driver.Exec(ctx, environment, env.NodeRef{Name: nodes[0].Name, Ordinal: nodes[0].Ordinal}, env.ExecRequest{Command: cmd})
 	result.Stdout = bounded(execResult.Stdout, 8192)
 	result.Stderr = bounded(execResult.Stderr, 8192)
+	expectFailure := boolTarget(target, "expectFailure", false)
 	if err != nil {
+		if expectFailure && backupFailureMatchesExpectation(target, err.Error(), result.Stdout, result.Stderr) {
+			return result, nil
+		}
 		return result, err
 	}
 	var response clusterBackupStatusResponse
@@ -400,7 +437,13 @@ func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDrive
 		}
 	}
 	if strings.ToLower(status.State) != "succeeded" {
+		if expectFailure && backupFailureMatchesExpectation(target, status.State, status.FailedPhase, status.Error, formatClusterBackupBlockers(status.Blockers), result.Stdout, result.Stderr) {
+			return result, nil
+		}
 		return result, fmt.Errorf("cluster backup state %q phase=%s error=%s blockers=%s", status.State, status.FailedPhase, status.Error, formatClusterBackupBlockers(status.Blockers))
+	}
+	if expectFailure {
+		return result, errors.New("cluster backup unexpectedly succeeded")
 	}
 	if want := scenario.Cluster.Nodes; want > 0 && (status.ExpectedNodes != want || len(status.Nodes) != want) {
 		return result, fmt.Errorf("cluster backup expected %d nodes, status expected=%d artifacts=%d", want, status.ExpectedNodes, len(status.Nodes))
@@ -1440,6 +1483,15 @@ func formatClusterBackupBlockers(blockers []clusterBackupStatusBlocker) string {
 		parts = append(parts, firstNonEmpty(blocker.Detail, blocker.Reason, label))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func backupFailureMatchesExpectation(target map[string]any, fragments ...string) bool {
+	expected := strings.TrimSpace(firstNonEmpty(stringTarget(target, "expectedFailureContains"), stringTarget(target, "expectedErrorContains"), stringTarget(target, "expectedBlocker")))
+	if expected == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join(fragments, "\n"))
+	return strings.Contains(haystack, strings.ToLower(expected))
 }
 
 func validateBackupSetFile(path string) error {

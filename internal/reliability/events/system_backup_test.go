@@ -15,6 +15,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/executil"
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+	adminv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/admin/v1"
 	clientv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/client/v1"
 )
 
@@ -215,6 +216,32 @@ func TestRestoreCLICompatibilityErrorExplainsStaleImage(t *testing.T) {
 	}
 }
 
+func TestClusterBackupCreateCanExpectRepositoryFailure(t *testing.T) {
+	driver := &clusterBackupCreateDriver{backupStartStdout: `{"status":{"backup_set_id":"backup-set-denied","state":"failed","failed_phase":"repository_validation","error":"permission denied","repository_id":"repo-denied","blockers":[{"reason":"repository_permission_denied","detail":"sanitized"}]}}`}
+	result, err := executeClusterBackupCreate(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d"}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1}}, map[string]any{"repositoryId": "repo-denied", "expectFailure": true, "expectedFailureContains": "repository_permission_denied"}, SystemBackupOperationResult{Operation: "cluster-backup-create", RepositoryBucket: "mycel-backups"})
+	if err != nil {
+		t.Fatalf("executeClusterBackupCreate() error=%v", err)
+	}
+	if result.BackupSetID != "backup-set-denied" || result.RepositoryID != "repo-denied" || !strings.Contains(result.Stdout, "repository_permission_denied") {
+		t.Fatalf("result=%+v, want failed repository backup evidence", result)
+	}
+}
+
+func TestClusterBackupCreateExpectFailureRejectsUnexpectedSuccess(t *testing.T) {
+	driver := &clusterBackupCreateDriver{}
+	_, err := executeClusterBackupCreate(context.Background(), driver, env.Environment{Name: "test", Driver: "k3d"}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1}}, map[string]any{"repositoryId": "repo-minio", "expectFailure": true}, SystemBackupOperationResult{Operation: "cluster-backup-create", RepositoryBucket: "mycel-backups"})
+	if err == nil || !strings.Contains(err.Error(), "unexpectedly succeeded") {
+		t.Fatalf("executeClusterBackupCreate() error=%v, want unexpected success failure", err)
+	}
+}
+
+func TestRepositoryValidationBlockersUseSanitizedReasons(t *testing.T) {
+	blockers := repositoryValidationBlockers(&adminv1.BackupRepositoryValidationSummary{Blockers: []*adminv1.ValidationBlocker{{Reason: "repository_permission_denied", Detail: "raw detail omitted", FieldPath: "credential_ref"}, {Reason: "", FieldPath: ""}}})
+	if got, want := strings.Join(blockers, ","), "repository_permission_denied:credential_ref,unknown"; got != want {
+		t.Fatalf("repositoryValidationBlockers()=%q, want %q", got, want)
+	}
+}
+
 func TestRepositoryNegativeChecksCoverRepositoryTruthChaos(t *testing.T) {
 	driver := &repositoryNegativeDriver{}
 	backup := SystemBackupOperationResult{
@@ -359,7 +386,9 @@ func writeFile(t *testing.T, path string, content string) {
 }
 
 type clusterBackupCreateDriver struct {
-	execs []string
+	execs             []string
+	backupStartStdout string
+	backupStartErr    error
 }
 
 func (d *clusterBackupCreateDriver) Name() string { return "test" }
@@ -383,6 +412,9 @@ func (d *clusterBackupCreateDriver) Endpoints(context.Context, env.Environment) 
 func (d *clusterBackupCreateDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	cmd := strings.Join(req.Command, " ")
 	d.execs = append(d.execs, cmd)
+	if strings.Contains(cmd, "admin backup cluster start") && (d.backupStartStdout != "" || d.backupStartErr != nil) {
+		return executil.Result{Command: cmd, Stdout: d.backupStartStdout}, d.backupStartErr
+	}
 	if strings.Contains(cmd, "admin backup cluster start") && strings.Contains(cmd, "--repository-id") {
 		return executil.Result{Command: cmd, Stdout: `{"status":{"backup_set_id":"backup-set-test","state":"succeeded","expected_nodes":1,"repository_id":"repo-minio","manifest_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/backup-set.json","raft_barriers":{"system":1},"nodes":[{"pod_name":"myceld-0","ordinal":0,"archive_name":"node-0.tar","archive_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-0/node-0.tar","manifest_name":"node-0.manifest.json","manifest_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-0/node-0.manifest.json","applied_indexes":{"system":1}}]}}`}, nil
 	}
