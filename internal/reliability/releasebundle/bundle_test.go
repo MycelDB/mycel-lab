@@ -147,6 +147,32 @@ func TestValidateStructureAllowsImmutableHelperWithoutBuildMetadata(t *testing.T
 	}
 }
 
+func TestValidateStructureEnforcesLifecycleAndApprovalControls(t *testing.T) {
+	bundle := validBundle(t, t.TempDir())
+	bundle.Lifecycle = &LifecycleBinding{Phase: LifecyclePhaseQualification, CandidateNumbering: CandidateNumberingNumbered}
+	if err := bundle.ValidateStructure(); err == nil || !strings.Contains(err.Error(), "qualification bundles must remain unnumbered") {
+		t.Fatalf("ValidateStructure() error=%v, want unnumbered qualification rejection", err)
+	}
+
+	bundle = validBundle(t, t.TempDir())
+	bundle.Lifecycle = &LifecycleBinding{Phase: LifecyclePhaseProtectedAcceptance, CandidateNumbering: CandidateNumberingNumbered}
+	if err := bundle.ValidateStructure(); err == nil || !strings.Contains(err.Error(), "qualifiedBundleSHA256") {
+		t.Fatalf("ValidateStructure() error=%v, want missing qualified bundle rejection", err)
+	}
+
+	bundle = validBundle(t, t.TempDir())
+	bundle.Lifecycle = &LifecycleBinding{Phase: LifecyclePhaseProtectedAcceptance, CandidateNumbering: CandidateNumberingNumbered, QualifiedBundleSHA256: strings.Repeat("4", 64)}
+	bundle.Approval = &ApprovalBinding{RequiredScopes: []string{ApprovalScopeProtectedReleaseGate}, Consumption: ApprovalConsumptionOneShot}
+	if err := bundle.ValidateStructure(); err != nil {
+		t.Fatalf("ValidateStructure() error=%v", err)
+	}
+
+	bundle.Approval.RequiredScopes = []string{ApprovalScopeProtectedReleaseGate, ApprovalScopeProtectedReleaseGate}
+	if err := bundle.ValidateStructure(); err == nil || !strings.Contains(err.Error(), "must be unique") {
+		t.Fatalf("ValidateStructure() error=%v, want duplicate approval scope rejection", err)
+	}
+}
+
 func TestPreflightValidatesFilesHarnessToolsAndImages(t *testing.T) {
 	root := t.TempDir()
 	bundle := validBundle(t, root)

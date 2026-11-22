@@ -60,8 +60,8 @@ RELEASE_DESTRUCTIVE_RUN = re.compile(
 MINIO_HELPER_IMAGE = "docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff"
 MC_HELPER_IMAGE = "docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0"
 PROTECTED_WORKFLOW_SHA256 = {
-    "semantic-live.yml": "822e742206eaee5343e217f04384c9b4ec198eda1ceb32c805de1dd882487b4a",
-    "release-gate.yml": "cbd5267f13753955e8e157596640cab73154ffff9e7fcd6e9f4abc85bf997829",
+    "semantic-live.yml": "6886ee9df4f89514e057e911677247e65dcb8f83fac41b27aabbd33cb0a6f920",
+    "release-gate.yml": "9f7a7a10ba1484b4727730de09df2ec2b170b4fb95d61ca0bdba817f3f74e196",
 }
 
 
@@ -336,6 +336,15 @@ def main() -> int:
         require("verifyArtifactSafety.py" in text, f"{name}: artifact safety verification is required", failures)
         require("steps.safety.outputs.safe == 'true'" in text, f"{name}: uploads must be gated by artifact safety", failures)
         require("--confirm-destructive" in text, f"{name}: explicit destructive confirmation is required", failures)
+        require("qualification_bundle_sha256:" in text, f"{name}: protected execution requires the qualifying credential-free bundle SHA input", failures)
+        require('[[ "$QUALIFICATION_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]' in text, f"{name}: qualification bundle SHA must be validated before execution", failures)
+        require("--lifecycle-phase protected-acceptance" in text, f"{name}: protected bundles must stamp the lifecycle phase", failures)
+        require("--qualified-bundle-sha256" in text, f"{name}: protected bundles must bind the qualifying bundle SHA", failures)
+        require("--approval-id \"github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}\"" in text, f"{name}: protected bundles must record one-shot workflow approval identity", failures)
+        require("--approval-reason \"$RUN_REASON\"" in text, f"{name}: protected bundles must record the approved non-secret reason", failures)
+
+    require("--approval-scope protected-live-provider" in live, "semantic-live.yml: protected live bundle must require protected-live-provider approval", failures)
+    require("--approval-scope protected-release-gate" in release, "release-gate.yml: cluster release bundle must require protected-release-gate approval", failures)
 
     check_live_arm64_preflight(live, failures)
     check_release_amd64_preflight(release, failures)

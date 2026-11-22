@@ -40,9 +40,10 @@ Protected workflows accept:
 
 - a full 40-character daemon commit SHA;
 - a pullable daemon image reference containing `@sha256:<64 lowercase hex>`;
+- the SHA-256 of the unchanged unnumbered credential-free qualification bundle that permitted candidate numbering;
 - an operator-supplied approval reason.
 
-Before execution, the workflow verifies the checked-out daemon commit and the image's clean-source OCI labels. The semantic workflow selects and verifies the ARM64 image while the cluster release gate selects and verifies the AMD64 image from the same immutable multiarch index. A tag-only image, missing required platform, dirty build, revision mismatch, missing source label, or mutable daemon ref fails before the harness starts.
+Before execution, the workflow verifies the checked-out daemon commit, qualification bundle SHA-256 syntax, and the image's clean-source OCI labels. The semantic workflow selects and verifies the ARM64 image while the cluster release gate selects and verifies the AMD64 image from the same immutable multiarch index. A tag-only image, missing required platform, dirty build, revision mismatch, missing source label, mutable daemon ref, or missing qualification SHA fails before the harness starts.
 
 Both protected jobs also pull and preflight the exact object-store helper indexes before credential exposure or destructive execution:
 
@@ -85,18 +86,19 @@ If a credential may have appeared in output or artifacts:
 
 Do not assign a new release-candidate number immediately after changing Lab, workflow, daemon, or qualification infrastructure. First freeze the reviewed source and image identities and require all of the following:
 
-1. exact-head CI, including 100 consecutive deterministic committed-response-loss reconciliation tests;
-2. a credential-free dry-run of `k3d-graph-commit-restart-qualification`;
-3. three consecutive approved destructive executions of that suite against the same immutable daemon digest, supplied as a complete named `@sha256` reference, each using a fresh k3d cluster and a separate artifact root;
-4. zero unresolved ambiguous graph commits plus authoritative graph convergence, cleanup, redaction, and clean daemon/harness source-provenance success for every member; and
-5. independent review of the exact qualified heads.
+1. exact-head CI, including 100 consecutive deterministic committed-response-loss reconciliation tests where relevant to the release payload;
+2. a credential-free dry-run of every suite in the release acceptance set;
+3. an unnumbered release execution bundle with `lifecycle.phase: qualification`, `candidateNumbering: unnumbered`, and one-shot `credential-free-qualification` approval;
+4. approved destructive execution of the complete credential-free acceptance set against the same immutable daemon digest, supplied as a complete named `@sha256` reference, each using fresh disposable resources and separate artifact roots;
+5. zero unresolved ambiguous graph commits plus authoritative graph convergence, cleanup, redaction, and clean daemon/harness source-provenance success for every applicable member; and
+6. independent review of the exact qualified heads and retained evidence.
 
 The graph actor retries only the commit RPC after an ambiguous transport outcome. It reuses the original transaction ID and durable idempotency key; it never replays graph mutations as a new transaction. Exhaustion remains a failure and the final oracle remains authoritative.
 
-Any source, workflow, image, harness, or qualification-policy change resets the qualification sequence. Qualification evidence is only an entry criterion for candidate construction. It does not transfer a gate result, approval, or publication authorization to the later candidate identity.
+Any source, workflow, image, harness, or qualification-policy change resets the qualification sequence and produces a new unnumbered qualification bundle SHA-256. Qualification evidence is only an entry criterion for candidate construction. It does not transfer a gate result, approval, or publication authorization to the later candidate identity. Numbered protected workflows require that qualifying bundle SHA-256 and stamp it into the candidate bundle as `lifecycle.qualifiedBundleSHA256` with one-shot `protected-release-gate` or `protected-live-provider` approval.
 
 ## Promotion policy
 
-Tier 2 live execution is manual and non-gating by default. Promoting it to scheduled or required status needs a measured reliability window, documented provider quota, explicit maintainer approval, and unchanged hard ceilings. A provider outage remains a failure or separately classified infrastructure result; it must never be rewritten as product success.
+Tier 2 live execution is manual and non-gating by default. Promoting it to scheduled or required status needs a measured reliability window, documented provider quota, explicit maintainer approval, and unchanged hard ceilings. A provider outage remains a failure or separately classified infrastructure/protected-provider result; it must never be rewritten as product success.
 
-Stable release tags and publication are outside these workflows. Passing SGT10, the semantic graph-index release-gate aggregate, or the cluster release gate does not itself authorize tagging, publication, issue closure, or Homebrew updates.
+Stable release tags and publication are outside these workflows. Passing SGT10, the semantic graph-index release-gate aggregate, or the cluster release gate does not itself authorize tagging, publication, issue closure, or Homebrew updates. Publication must use one reviewed coordinated release manifest, and any risk-accepted release must record the failed gate, failure domain, retained evidence, exact digests, release-note limitations, and whether the one-shot action is Git-tag-only or full publication.
