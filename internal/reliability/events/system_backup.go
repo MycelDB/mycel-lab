@@ -60,11 +60,13 @@ type SystemBackupOperationResult struct {
 
 // SystemBackupRepositoryNegativeCase captures repository fail-closed checks without exposing object-store credentials.
 type SystemBackupRepositoryNegativeCase struct {
-	Name        string   `json:"name"`
-	BackupSetID string   `json:"backupSetId,omitempty"`
-	Listed      bool     `json:"listed"`
-	Valid       bool     `json:"valid"`
-	Errors      []string `json:"errors,omitempty"`
+	Name           string   `json:"name"`
+	BackupSetID    string   `json:"backupSetId,omitempty"`
+	FixturePrefix  string   `json:"fixturePrefix,omitempty"`
+	FixtureObjects []string `json:"fixtureObjects,omitempty"`
+	Listed         bool     `json:"listed"`
+	Valid          bool     `json:"valid"`
+	Errors         []string `json:"errors,omitempty"`
 }
 
 const backupSetManifestName = "backup-set.json"
@@ -764,49 +766,83 @@ func verifyRepositoryBackupObjects(ctx context.Context, driver env.EnvironmentDr
 
 func executeRepositoryNegativeChecks(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, backup SystemBackupOperationResult, target map[string]any) ([]SystemBackupRepositoryNegativeCase, error) {
 	checks := []SystemBackupRepositoryNegativeCase{}
-	missingID := backup.BackupSetID + "-missing-complete"
-	missingPrefix := siblingBackupSetPrefix(backup.RepositoryBackupSetPrefix, missingID)
-	defer cleanupRepositoryPrefix(context.Background(), driver, environment, backup.RepositoryBucket, missingPrefix)
-	if _, err := objectStoreCommand(ctx, driver, environment, fmt.Sprintf("mc cp %s %s", shellQuote("local/"+backup.RepositoryBucket+"/"+joinS3Key(backup.RepositoryBackupSetPrefix, "backup-set.json")), shellQuote("local/"+backup.RepositoryBucket+"/"+joinS3Key(missingPrefix, "backup-set.json")))); err != nil {
-		return checks, fmt.Errorf("create missing-COMPLETE negative fixture: %w", err)
+	if strings.TrimSpace(backup.RepositoryBucket) == "" || strings.TrimSpace(backup.RepositoryBackupSetPrefix) == "" || strings.TrimSpace(backup.RepositoryID) == "" || strings.TrimSpace(backup.BackupSetID) == "" {
+		return checks, errors.New("repository negative checks require repository_id, backup_set_id, bucket, and backup-set prefix evidence")
 	}
-	missingListed, _, err := repositoryBackupSetListed(ctx, driver, environment, backup.RepositoryID, missingID, intTarget(target, "ordinal", 0))
-	if err != nil {
-		return checks, err
-	}
-	missingValidation, err := validateRepositoryNegativeBackupSet(ctx, driver, environment, backup.RepositoryID, missingID, target)
-	missingValidation.Name = "missing-complete"
-	missingValidation.BackupSetID = missingID
-	missingValidation.Listed = missingListed
-	checks = append(checks, missingValidation)
-	if err != nil {
-		return checks, err
-	}
-	if missingListed || missingValidation.Valid {
-		return checks, fmt.Errorf("missing-COMPLETE repository fixture listed=%t valid=%t", missingListed, missingValidation.Valid)
+	ordinal := intTarget(target, "ordinal", 0)
+	addCheck := func(name, suffix string, create func(prefix string) ([]string, error)) error {
+		backupSetID := backup.BackupSetID + "-" + suffix
+		prefix := siblingBackupSetPrefix(backup.RepositoryBackupSetPrefix, backupSetID)
+		defer cleanupRepositoryPrefix(context.Background(), driver, environment, backup.RepositoryBucket, prefix)
+		objects, err := create(prefix)
+		if err != nil {
+			return fmt.Errorf("create %s negative fixture: %w", name, err)
+		}
+		listed, _, err := repositoryBackupSetListed(ctx, driver, environment, backup.RepositoryID, backupSetID, ordinal)
+		if err != nil {
+			return err
+		}
+		validation, err := validateRepositoryNegativeBackupSet(ctx, driver, environment, backup.RepositoryID, backupSetID, target)
+		validation.Name = name
+		validation.BackupSetID = backupSetID
+		validation.FixturePrefix = prefix
+		validation.FixtureObjects = append([]string(nil), objects...)
+		validation.Listed = listed
+		checks = append(checks, validation)
+		if err != nil {
+			return err
+		}
+		if listed || validation.Valid {
+			return fmt.Errorf("%s repository fixture listed=%t valid=%t", name, listed, validation.Valid)
+		}
+		return nil
 	}
 
-	corruptID := backup.BackupSetID + "-corrupt-manifest"
-	corruptPrefix := siblingBackupSetPrefix(backup.RepositoryBackupSetPrefix, corruptID)
-	defer cleanupRepositoryPrefix(context.Background(), driver, environment, backup.RepositoryBucket, corruptPrefix)
-	cmd := fmt.Sprintf("tmp=$(mktemp) && printf 'not-json' > $tmp && mc cp $tmp %s && mc cp %s %s && rm -f $tmp", shellQuote("local/"+backup.RepositoryBucket+"/"+joinS3Key(corruptPrefix, "backup-set.json")), shellQuote("local/"+backup.RepositoryBucket+"/"+joinS3Key(backup.RepositoryBackupSetPrefix, "COMPLETE")), shellQuote("local/"+backup.RepositoryBucket+"/"+joinS3Key(corruptPrefix, "COMPLETE")))
-	if _, err := objectStoreCommand(ctx, driver, environment, cmd); err != nil {
-		return checks, fmt.Errorf("create corrupt-manifest negative fixture: %w", err)
-	}
-	corruptListed, _, err := repositoryBackupSetListed(ctx, driver, environment, backup.RepositoryID, corruptID, intTarget(target, "ordinal", 0))
-	if err != nil {
+	if err := addCheck("missing-complete", "missing-complete", func(prefix string) ([]string, error) {
+		object := joinS3Key(prefix, "backup-set.json")
+		_, err := objectStoreCommand(ctx, driver, environment, fmt.Sprintf("mc cp %s %s", shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, joinS3Key(backup.RepositoryBackupSetPrefix, "backup-set.json"))), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, object))))
+		return []string{object}, err
+	}); err != nil {
 		return checks, err
 	}
-	corruptValidation, err := validateRepositoryNegativeBackupSet(ctx, driver, environment, backup.RepositoryID, corruptID, target)
-	corruptValidation.Name = "corrupt-required-manifest"
-	corruptValidation.BackupSetID = corruptID
-	corruptValidation.Listed = corruptListed
-	checks = append(checks, corruptValidation)
-	if err != nil {
+	if err := addCheck("corrupt-required-manifest", "corrupt-manifest", func(prefix string) ([]string, error) {
+		manifestObject := joinS3Key(prefix, "backup-set.json")
+		completeObject := joinS3Key(prefix, "COMPLETE")
+		cmd := fmt.Sprintf("tmp=$(mktemp) && printf 'not-json' > $tmp && mc cp $tmp %s && mc cp %s %s && rm -f $tmp", shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, manifestObject)), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, joinS3Key(backup.RepositoryBackupSetPrefix, "COMPLETE"))), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, completeObject)))
+		_, err := objectStoreCommand(ctx, driver, environment, cmd)
+		return []string{manifestObject, completeObject}, err
+	}); err != nil {
 		return checks, err
 	}
-	if corruptListed || corruptValidation.Valid {
-		return checks, fmt.Errorf("corrupt-manifest repository fixture listed=%t valid=%t", corruptListed, corruptValidation.Valid)
+	if err := addCheck("corrupt-complete-marker", "corrupt-complete", func(prefix string) ([]string, error) {
+		manifestObject := joinS3Key(prefix, "backup-set.json")
+		completeObject := joinS3Key(prefix, "COMPLETE")
+		cmd := fmt.Sprintf("tmp=$(mktemp) && printf 'not-json' > $tmp && mc cp %s %s && mc cp $tmp %s && rm -f $tmp", shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, joinS3Key(backup.RepositoryBackupSetPrefix, "backup-set.json"))), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, manifestObject)), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, completeObject)))
+		_, err := objectStoreCommand(ctx, driver, environment, cmd)
+		return []string{manifestObject, completeObject}, err
+	}); err != nil {
+		return checks, err
+	}
+	if len(backup.Artifacts) > 0 {
+		if err := addCheck("interrupted-publish-after-node-artifacts", "interrupted-publish", func(prefix string) ([]string, error) {
+			return copyRepositoryArtifactSubset(ctx, driver, environment, backup, prefix, backup.Artifacts[:1], false)
+		}); err != nil {
+			return checks, err
+		}
+		if err := addCheck("partial-node-upload", "partial-node-upload", func(prefix string) ([]string, error) {
+			objects := []string{joinS3Key(prefix, "backup-set.json"), joinS3Key(prefix, "COMPLETE")}
+			if _, err := objectStoreCommand(ctx, driver, environment, fmt.Sprintf("mc cp %s %s", shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, joinS3Key(backup.RepositoryBackupSetPrefix, "backup-set.json"))), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, objects[0])))); err != nil {
+				return objects, err
+			}
+			if _, err := objectStoreCommand(ctx, driver, environment, fmt.Sprintf("mc cp %s %s", shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, joinS3Key(backup.RepositoryBackupSetPrefix, "COMPLETE"))), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, objects[1])))); err != nil {
+				return objects, err
+			}
+			artifactObjects, err := copyRepositoryArtifactSubset(ctx, driver, environment, backup, prefix, backup.Artifacts[:1], true)
+			objects = append(objects, artifactObjects...)
+			return objects, err
+		}); err != nil {
+			return checks, err
+		}
 	}
 	return checks, nil
 }
@@ -815,6 +851,52 @@ func validateRepositoryNegativeBackupSet(ctx context.Context, driver env.Environ
 	result, err := executeClusterBackupValidate(ctx, driver, environment, map[string]SystemBackupOperationResult{systemBackupKey(target): {RepositoryID: repositoryID, BackupSetID: backupSetID}}, map[string]any{"repositoryId": repositoryID, "backupSetId": backupSetID, "expectValid": false, "ordinal": intTarget(target, "ordinal", 0)}, SystemBackupOperationResult{Operation: "cluster-backup-validate"})
 	check := SystemBackupRepositoryNegativeCase{BackupSetID: backupSetID, Valid: len(result.ValidationErrors) == 0, Errors: result.ValidationErrors}
 	return check, err
+}
+
+func copyRepositoryArtifactSubset(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, backup SystemBackupOperationResult, targetPrefix string, artifacts []SystemBackupArtifact, includeManifests bool) ([]string, error) {
+	objects := []string{}
+	for _, artifact := range artifacts {
+		pod := firstNonEmpty(artifact.PodName, fmt.Sprintf("myceld-%d", artifact.Ordinal))
+		if strings.TrimSpace(artifact.ArchiveName) != "" {
+			dest := joinS3Key(targetPrefix, "nodes", pod, artifact.ArchiveName)
+			source := repositoryArtifactLocalPath(backup, artifact.ArchiveURI, pod, artifact.ArchiveName)
+			if _, err := objectStoreCommand(ctx, driver, environment, fmt.Sprintf("mc cp %s %s", shellQuote(source), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, dest)))); err != nil {
+				return objects, err
+			}
+			objects = append(objects, dest)
+		}
+		if includeManifests && strings.TrimSpace(artifact.ManifestName) != "" {
+			dest := joinS3Key(targetPrefix, "nodes", pod, artifact.ManifestName)
+			source := repositoryArtifactLocalPath(backup, artifact.ManifestURI, pod, artifact.ManifestName)
+			if _, err := objectStoreCommand(ctx, driver, environment, fmt.Sprintf("mc cp %s %s", shellQuote(source), shellQuote(repositoryLocalObjectPath(backup.RepositoryBucket, dest)))); err != nil {
+				return objects, err
+			}
+			objects = append(objects, dest)
+		}
+	}
+	return objects, nil
+}
+
+func repositoryArtifactLocalPath(backup SystemBackupOperationResult, uri, podName, objectName string) string {
+	if key := repositoryObjectKeyFromURI(backup.RepositoryBucket, uri); key != "" {
+		return repositoryLocalObjectPath(backup.RepositoryBucket, key)
+	}
+	return repositoryLocalObjectPath(backup.RepositoryBucket, joinS3Key(backup.RepositoryBackupSetPrefix, "nodes", podName, objectName))
+}
+
+func repositoryObjectKeyFromURI(bucket, raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "s3" || strings.TrimSpace(u.Host) == "" {
+		return ""
+	}
+	if strings.TrimSpace(bucket) != "" && u.Host != strings.TrimSpace(bucket) {
+		return ""
+	}
+	return strings.Trim(u.Path, "/")
+}
+
+func repositoryLocalObjectPath(bucket, key string) string {
+	return "local/" + strings.Trim(strings.TrimSpace(bucket), "/") + "/" + strings.Trim(strings.TrimSpace(key), "/")
 }
 
 func cleanupRepositoryPrefix(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, bucket, prefix string) {

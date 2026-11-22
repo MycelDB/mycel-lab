@@ -215,6 +215,50 @@ func TestRestoreCLICompatibilityErrorExplainsStaleImage(t *testing.T) {
 	}
 }
 
+func TestRepositoryNegativeChecksCoverRepositoryTruthChaos(t *testing.T) {
+	driver := &repositoryNegativeDriver{}
+	backup := SystemBackupOperationResult{
+		BackupSetID:               "backup-set-good",
+		RepositoryID:              "repo-minio",
+		RepositoryBucket:          "mycel-backups",
+		RepositoryPrefix:          "runs/test",
+		RepositoryBackupSetPrefix: "runs/test/backup-sets/backup-set-good",
+		Artifacts: []SystemBackupArtifact{
+			{PodName: "myceld-0", Ordinal: 0, ArchiveName: "node-0.tar", ArchiveURI: "s3://mycel-backups/runs/test/backup-sets/backup-set-good/nodes/myceld-0/node-0.tar", ManifestName: "node-0.manifest.json", ManifestURI: "s3://mycel-backups/runs/test/backup-sets/backup-set-good/nodes/myceld-0/node-0.manifest.json"},
+			{PodName: "myceld-1", Ordinal: 1, ArchiveName: "node-1.tar", ArchiveURI: "s3://mycel-backups/runs/test/backup-sets/backup-set-good/nodes/myceld-1/node-1.tar", ManifestName: "node-1.manifest.json", ManifestURI: "s3://mycel-backups/runs/test/backup-sets/backup-set-good/nodes/myceld-1/node-1.manifest.json"},
+		},
+	}
+	checks, err := executeRepositoryNegativeChecks(context.Background(), driver, env.Environment{Name: "test", Driver: "test"}, backup, map[string]any{"ordinal": 0})
+	if err != nil {
+		t.Fatalf("executeRepositoryNegativeChecks() error=%v", err)
+	}
+	wantNames := map[string]bool{"missing-complete": true, "corrupt-required-manifest": true, "corrupt-complete-marker": true, "interrupted-publish-after-node-artifacts": true, "partial-node-upload": true}
+	if len(checks) != len(wantNames) {
+		t.Fatalf("checks=%+v, want %d checks", checks, len(wantNames))
+	}
+	for _, check := range checks {
+		if !wantNames[check.Name] {
+			t.Fatalf("unexpected check name %q in %+v", check.Name, checks)
+		}
+		delete(wantNames, check.Name)
+		if check.Listed || check.Valid || len(check.Errors) == 0 || check.FixturePrefix == "" || len(check.FixtureObjects) == 0 {
+			t.Fatalf("check=%+v, want unlisted invalid fixture with diagnostics", check)
+		}
+	}
+	if len(wantNames) != 0 {
+		t.Fatalf("missing checks: %+v", wantNames)
+	}
+	joinedObjects := strings.Join(driver.objectCommands, "\n")
+	for _, want := range []string{"missing-complete", "corrupt-manifest", "corrupt-complete", "interrupted-publish", "partial-node-upload", "mc rm --recursive --force"} {
+		if !strings.Contains(joinedObjects, want) {
+			t.Fatalf("object-store commands missing %q\n%s", want, joinedObjects)
+		}
+	}
+	if driver.listCalls != len(checks) || driver.validateCalls != len(checks) {
+		t.Fatalf("listCalls=%d validateCalls=%d checks=%d", driver.listCalls, driver.validateCalls, len(checks))
+	}
+}
+
 func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.T) {
 	driver := &restoreApplyDriver{}
 	hostDir := t.TempDir()
@@ -511,4 +555,53 @@ func (d *backupValidationDriver) CopyFromNode(context.Context, env.Environment, 
 func (d *backupValidationDriver) CopyToNode(_ context.Context, _ env.Environment, _ env.NodeRef, hostPath, containerPath string) (env.ExecResult, error) {
 	d.copies = append(d.copies, hostPath+" -> "+containerPath)
 	return env.ExecResult{Command: "copy"}, nil
+}
+
+type repositoryNegativeDriver struct {
+	objectCommands []string
+	listCalls      int
+	validateCalls  int
+}
+
+func (d *repositoryNegativeDriver) Name() string { return "test" }
+func (d *repositoryNegativeDriver) Capabilities() env.CapabilitySet {
+	return env.NewCapabilitySet(env.CapabilityNodeExec, env.CapabilityObjectStoreFixture)
+}
+func (d *repositoryNegativeDriver) Validate(spec.EnvironmentSpec) error                   { return nil }
+func (d *repositoryNegativeDriver) Preflight(context.Context, spec.EnvironmentSpec) error { return nil }
+func (d *repositoryNegativeDriver) Create(context.Context, spec.ResolvedScenario, spec.EnvironmentSpec) (env.Environment, error) {
+	return env.Environment{Name: "test", Driver: "test"}, nil
+}
+func (d *repositoryNegativeDriver) WaitReady(context.Context, env.Environment) error { return nil }
+func (d *repositoryNegativeDriver) Nodes(context.Context, env.Environment) ([]env.Node, error) {
+	return []env.Node{{Name: "myceld-0", Ordinal: 0}}, nil
+}
+func (d *repositoryNegativeDriver) Endpoints(context.Context, env.Environment) ([]env.Endpoint, error) {
+	return nil, nil
+}
+func (d *repositoryNegativeDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
+	cmd := strings.Join(req.Command, " ")
+	if strings.Contains(cmd, "admin backup cluster list") {
+		d.listCalls++
+		return env.ExecResult{Command: cmd, Stdout: `{"backup_sets":[]}`}, nil
+	}
+	if strings.Contains(cmd, "admin backup cluster validate") {
+		d.validateCalls++
+		return env.ExecResult{Command: cmd, Stdout: `{"valid":false,"validation":{"errors":["injected repository chaos fixture is invalid"]}}`}, nil
+	}
+	return env.ExecResult{Command: cmd}, nil
+}
+func (d *repositoryNegativeDriver) RestartNode(context.Context, env.Environment, env.NodeRef) error {
+	return nil
+}
+func (d *repositoryNegativeDriver) RollingRestart(context.Context, env.Environment) error {
+	return nil
+}
+func (d *repositoryNegativeDriver) Delete(context.Context, env.Environment) error { return nil }
+func (d *repositoryNegativeDriver) CaptureState(context.Context, env.Environment, *artifacts.Sink) error {
+	return nil
+}
+func (d *repositoryNegativeDriver) ExecObjectStore(_ context.Context, _ env.Environment, command string) (env.ExecResult, error) {
+	d.objectCommands = append(d.objectCommands, command)
+	return env.ExecResult{Command: command, Stdout: "ok"}, nil
 }
