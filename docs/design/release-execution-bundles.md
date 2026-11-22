@@ -1,8 +1,8 @@
 # Hermetic release execution bundles
 
-A release execution bundle is the single authoritative input to a release-candidate gate. It binds the candidate identity, harness binary and source tree, every runtime image, configuration files, tools, resource allocation, and execution/finalization bounds before any environment is created.
+A release execution bundle is the single authoritative input to a release-candidate gate. It binds the candidate identity, harness binary and source tree, every runtime image, configuration files, tools, resource allocation, lifecycle phase, approval scope, and execution/finalization bounds before any environment is created.
 
-The v1 schema is [`tests/reliability/release-bundles/v1.schema.json`](../../tests/reliability/release-bundles/v1.schema.json). The Go decoder is strict: unknown fields, duplicate identities, incomplete provenance, paths outside `sourceRoot`, and mutable defaults such as `:dev` or `:latest` are rejected.
+The v1 schema is [`tests/reliability/release-bundles/v1.schema.json`](../../tests/reliability/release-bundles/v1.schema.json). The Go decoder is strict: unknown fields, duplicate identities, incomplete provenance, invalid lifecycle/approval controls, paths outside `sourceRoot`, and mutable defaults such as `:dev` or `:latest` are rejected.
 
 ## Lifecycle
 
@@ -11,7 +11,9 @@ The v1 schema is [`tests/reliability/release-bundles/v1.schema.json`](../../test
 3. Place the bundle above the clean source checkouts. Set `sourceRoot` to the relative workspace and enumerate each exact repository under `sources` with its path, revision, tree, and clean state. The harness identifies its source by name.
 4. Hash every selected suite, scenario, cluster, actor profile, provider profile, workflow, runtime configuration, and provenance evidence file. Every file and provenance evidence path names its owning source tree. Bind each scenario's canonical resolved identity from the credential-free dry-run `resolved-scenario.sha256` artifact; this prevents an alternate profile search path from substituting different resolved cluster, actor, provider, phase, or assertion content.
 5. Bind tool executable hashes and normalized (trimmed combined-output) version-command hashes, including the Docker Buildx plugin that produces registry evidence.
-6. Copy a maintained draft template above the clean `mycel-lab` and `mycel` checkouts, then capture the exact running identities. For example:
+6. Copy a maintained draft template above the clean `mycel-lab` and `mycel` checkouts, then capture the exact running identities. Build the harness outside every bound source checkout so its output cannot dirty a source identity. `build` accepts a lowercase DNS-label execution identity of at most 32 characters and resolves clean Git revisions/trees, file hashes, driver-specific allocation names, harness/tool identities, anonymous OCI identities, canonical resolved-scenario hashes, and optional lifecycle/approval controls. K3d names preserve a stable hash of the complete candidate/scenario allocation inside the length-limited prefix so truncation cannot collapse ordinary candidate identities. It never provisions an environment.
+
+   Pre-candidate machinery qualification uses an unnumbered identity and one-shot credential-free approval scope:
 
    ```sh
    cp mycel-lab/tests/reliability/release-bundles/cluster-release-gate.draft.yaml.tmpl /candidate/release-bundle-draft.yaml
@@ -19,11 +21,30 @@ The v1 schema is [`tests/reliability/release-bundles/v1.schema.json`](../../test
    /candidate/bin/mycel-lab release-bundle build \
      /candidate/release-bundle-draft.yaml /candidate/release-execution-bundle.yaml \
      --daemon-image 'docker.io/myceldb/mycel@sha256:<64-hex-digest>' \
-     --candidate-id '<approved-candidate-id>'
-   mycel-lab/bin/mycel-lab release-bundle validate /candidate/release-execution-bundle.yaml
+     --candidate-id 'qual-<short-identity>' \
+     --lifecycle-phase qualification \
+     --approval-scope credential-free-qualification \
+     --approval-id '<operator-or-ticket-id>' \
+     --approval-reason '<non-secret approval reason>'
+   /candidate/bin/mycel-lab release-bundle validate /candidate/release-execution-bundle.yaml
    ```
 
-   Build the harness outside every bound source checkout so its output cannot dirty a source identity. `build` accepts a lowercase DNS-label candidate ID of at most 32 characters and resolves clean Git revisions/trees, file hashes, driver-specific allocation names, harness/tool identities, anonymous OCI identities, and canonical resolved-scenario hashes. K3d names preserve a stable hash of the complete candidate/scenario allocation inside the length-limited prefix so truncation cannot collapse ordinary candidate identities. It never provisions an environment. The semantic protected workflow uses the adjacent `semantic-live-provider.draft.yaml.tmpl` template.
+   Numbered product-candidate/protected-acceptance bundles are constructed only after the credential-free qualification bundle passes unchanged. They must reference the exact qualifying bundle SHA-256 and a one-shot approval scope:
+
+   ```sh
+   /candidate/bin/mycel-lab release-bundle build \
+     /candidate/release-bundle-draft.yaml /candidate/release-execution-bundle.yaml \
+     --daemon-image 'docker.io/myceldb/mycel@sha256:<64-hex-digest>' \
+     --candidate-id '<approved-candidate-id>' \
+     --lifecycle-phase protected-acceptance \
+     --qualified-bundle-sha256 '<64-hex-qualified-bundle-sha256>' \
+     --approval-scope protected-release-gate \
+     --approval-id '<protected-run-id>' \
+     --approval-reason '<non-secret approval reason>'
+   /candidate/bin/mycel-lab release-bundle validate /candidate/release-execution-bundle.yaml
+   ```
+
+   The semantic protected workflow uses the adjacent `semantic-live-provider.draft.yaml.tmpl` template and the `protected-live-provider` approval scope.
 7. Pass only the bundle—not independent image, provider-profile, environment, port, or retention overrides—to each candidate run:
 
    ```sh
@@ -62,6 +83,10 @@ Daemon and helper images must be anonymously pullable registry indexes containin
 
 The daemon and provider-emulator identities additionally bind build method and build-context SHA-256; every image binds clean source/revision labels and a hashed provenance evidence file. Legacy immutable helper images may omit build-method/context labels, but if either is declared both must be exact and match every platform. Local provider-emulator images bind an exact `sha256:` image/config ID and exact platform; tags ending in `dev`, `latest`, `head`, `main`, `master`, `edge`, or `snapshot` are forbidden.
 
-## Identity and retry semantics
+## Lifecycle, approval, and retry semantics
 
-The bundle's `metadata.candidateId` is evidence only for that exact identity. Validation and gate results do not transfer to another bundle or candidate. The preflight is evaluated once per loaded bundle. A preflight failure is terminal for that invocation and does not trigger provisioning, mutation, or an automatic retry.
+The bundle's `metadata.candidateId` is evidence only for that exact execution identity. Validation and gate results do not transfer to another bundle or candidate. The preflight is evaluated once per loaded bundle. A preflight failure is terminal for that invocation and does not trigger provisioning, mutation, or an automatic retry.
+
+`lifecycle.phase` distinguishes `qualification`, `candidate`, `protected-acceptance`, and `publication`. `qualification` bundles must be `candidateNumbering: unnumbered`; every later numbered phase must include `qualifiedBundleSHA256` naming the unchanged credential-free qualification bundle that allowed candidate numbering to begin. `lifecycle.failureDomain` records terminal diagnosis without minting a new product candidate for harness, identity, infrastructure, protected-provider, or publication failures.
+
+`approval.requiredScopes` is machine-readable and always pairs with `approval.consumption: one-shot`. Current scopes are `credential-free-qualification`, `product-candidate-construction`, `protected-release-gate`, `protected-live-provider`, `publication-git-tags`, `publication-full`, and `risk-accepted-publication`. A consumed approval authorizes only the exact bundle SHA-256, exact lifecycle phase, exact candidate ID, and exact protected workflow/run recorded in the bundle evidence; retries after approval-consuming failures need fresh approval unless the release process records a separate risk acceptance.

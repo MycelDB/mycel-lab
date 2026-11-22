@@ -46,6 +46,29 @@ func TestApplyCandidateAllocationsUsesDriverSpecificOptions(t *testing.T) {
 	}
 }
 
+func TestApplyReleaseLifecycleOptionsRecordsApprovalControls(t *testing.T) {
+	bundle := &releasebundle.Bundle{}
+	qualified := strings.Repeat("a", 64)
+	if err := applyReleaseLifecycleOptions(bundle, []string{
+		"--lifecycle-phase", releasebundle.LifecyclePhaseProtectedAcceptance,
+		"--qualified-bundle-sha256", qualified,
+		"--approval-scope", releasebundle.ApprovalScopeProtectedReleaseGate,
+		"--approval-id", "github-run-123",
+		"--approval-reason", "maintainer approved exact digest",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Lifecycle == nil || bundle.Lifecycle.Phase != releasebundle.LifecyclePhaseProtectedAcceptance || bundle.Lifecycle.CandidateNumbering != releasebundle.CandidateNumberingNumbered || bundle.Lifecycle.QualifiedBundleSHA256 != qualified {
+		t.Fatalf("lifecycle=%+v", bundle.Lifecycle)
+	}
+	if bundle.Approval == nil || bundle.Approval.Consumption != releasebundle.ApprovalConsumptionOneShot || bundle.Approval.ExternalApprovalID != "github-run-123" || bundle.Approval.Reason == "" {
+		t.Fatalf("approval=%+v", bundle.Approval)
+	}
+	if len(bundle.Approval.RequiredScopes) != 1 || bundle.Approval.RequiredScopes[0] != releasebundle.ApprovalScopeProtectedReleaseGate {
+		t.Fatalf("approval scopes=%v", bundle.Approval.RequiredScopes)
+	}
+}
+
 func TestRunUnknownCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"wat"}, &stdout, &stderr)

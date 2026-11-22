@@ -82,6 +82,8 @@ func (b *Bundle) Preflight(ctx context.Context, harness HarnessIdentity, inspect
 			Kind:        "ReleaseExecutionBundlePreflight",
 			BundleName:  b.Metadata.Name,
 			CandidateID: b.Metadata.CandidateID,
+			Lifecycle:   cloneLifecycleBinding(b.Lifecycle),
+			Approval:    cloneApprovalBinding(b.Approval),
 			BundlePath:  b.path,
 			SourceRoot:  b.sourcePath,
 			CheckedAt:   time.Now().UTC(),

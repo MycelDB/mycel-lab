@@ -22,12 +22,35 @@ const (
 	Kind                     = "ReleaseExecutionBundle"
 	MaximumOuterBound        = 6 * time.Hour
 	MaximumFinalizationBound = 15 * time.Minute
+
+	LifecyclePhaseQualification        = "qualification"
+	LifecyclePhaseCandidate            = "candidate"
+	LifecyclePhaseProtectedAcceptance  = "protected-acceptance"
+	LifecyclePhasePublication          = "publication"
+	CandidateNumberingUnnumbered       = "unnumbered"
+	CandidateNumberingNumbered         = "numbered"
+	FailureDomainProductCorrectness    = "product-correctness"
+	FailureDomainReleaseHarness        = "release-harness"
+	FailureDomainExecutionIdentity     = "execution-identity-provenance"
+	FailureDomainInfrastructure        = "infrastructure"
+	FailureDomainProtectedProvider     = "protected-provider"
+	FailureDomainPublication           = "publication"
+	ApprovalScopeCredentialFree        = "credential-free-qualification"
+	ApprovalScopeProductCandidate      = "product-candidate-construction"
+	ApprovalScopeProtectedReleaseGate  = "protected-release-gate"
+	ApprovalScopeProtectedLiveProvider = "protected-live-provider"
+	ApprovalScopePublicationGitTags    = "publication-git-tags"
+	ApprovalScopePublicationFull       = "publication-full"
+	ApprovalScopeRiskAccepted          = "risk-accepted-publication"
+	ApprovalConsumptionOneShot         = "one-shot"
 )
 
 type Bundle struct {
 	APIVersion string            `json:"apiVersion" yaml:"apiVersion"`
 	Kind       string            `json:"kind" yaml:"kind"`
 	Metadata   Metadata          `json:"metadata" yaml:"metadata"`
+	Lifecycle  *LifecycleBinding `json:"lifecycle,omitempty" yaml:"lifecycle,omitempty"`
+	Approval   *ApprovalBinding  `json:"approval,omitempty" yaml:"approval,omitempty"`
 	SourceRoot string            `json:"sourceRoot" yaml:"sourceRoot"`
 	Sources    []SourceIdentity  `json:"sources" yaml:"sources"`
 	Harness    HarnessIdentity   `json:"harness" yaml:"harness"`
@@ -57,6 +80,20 @@ type Metadata struct {
 	Name        string `json:"name" yaml:"name"`
 	CandidateID string `json:"candidateId" yaml:"candidateId"`
 	CreatedAt   string `json:"createdAt" yaml:"createdAt"`
+}
+
+type LifecycleBinding struct {
+	Phase                 string `json:"phase" yaml:"phase"`
+	CandidateNumbering    string `json:"candidateNumbering" yaml:"candidateNumbering"`
+	QualifiedBundleSHA256 string `json:"qualifiedBundleSHA256,omitempty" yaml:"qualifiedBundleSHA256,omitempty"`
+	FailureDomain         string `json:"failureDomain,omitempty" yaml:"failureDomain,omitempty"`
+}
+
+type ApprovalBinding struct {
+	RequiredScopes     []string `json:"requiredScopes" yaml:"requiredScopes"`
+	Consumption        string   `json:"consumption" yaml:"consumption"`
+	ExternalApprovalID string   `json:"externalApprovalId,omitempty" yaml:"externalApprovalId,omitempty"`
+	Reason             string   `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
 
 type SourceIdentity struct {
@@ -196,6 +233,8 @@ type PreflightRecord struct {
 	Kind           string              `json:"kind"`
 	BundleName     string              `json:"bundleName"`
 	CandidateID    string              `json:"candidateId"`
+	Lifecycle      *LifecycleBinding   `json:"lifecycle,omitempty"`
+	Approval       *ApprovalBinding    `json:"approval,omitempty"`
 	BundlePath     string              `json:"bundlePath"`
 	BundleSHA256   string              `json:"bundleSHA256"`
 	SourceRoot     string              `json:"sourceRoot"`
@@ -410,6 +449,66 @@ func (b *Bundle) ValidateStructure() error {
 	}
 	if _, err := time.Parse(time.RFC3339, b.Metadata.CreatedAt); err != nil {
 		add("metadata.createdAt", "must be RFC3339")
+	}
+	if b.Lifecycle != nil {
+		phase := strings.TrimSpace(b.Lifecycle.Phase)
+		numbering := strings.TrimSpace(b.Lifecycle.CandidateNumbering)
+		if !validLifecyclePhase(phase) {
+			add("lifecycle.phase", "must be one of qualification, candidate, protected-acceptance, or publication")
+		}
+		if !validCandidateNumbering(numbering) {
+			add("lifecycle.candidateNumbering", "must be unnumbered or numbered")
+		}
+		if phase == LifecyclePhaseQualification && numbering != CandidateNumberingUnnumbered {
+			add("lifecycle.candidateNumbering", "qualification bundles must remain unnumbered")
+		}
+		if phase != "" && phase != LifecyclePhaseQualification && numbering != CandidateNumberingNumbered {
+			add("lifecycle.candidateNumbering", "candidate, protected-acceptance, and publication bundles must be numbered")
+		}
+		if phase != "" && phase != LifecyclePhaseQualification && !validSHA256(b.Lifecycle.QualifiedBundleSHA256) {
+			add("lifecycle.qualifiedBundleSHA256", "numbered release phases must reference the qualifying credential-free bundle SHA-256")
+		}
+		if b.Lifecycle.QualifiedBundleSHA256 != "" && !validSHA256(b.Lifecycle.QualifiedBundleSHA256) {
+			add("lifecycle.qualifiedBundleSHA256", "must be a lowercase 64-character SHA-256")
+		}
+		if b.Lifecycle.FailureDomain != "" && !validFailureDomain(b.Lifecycle.FailureDomain) {
+			add("lifecycle.failureDomain", "must be a recognized release failure domain")
+		}
+	}
+	if b.Approval != nil {
+		if len(b.Approval.RequiredScopes) == 0 {
+			add("approval.requiredScopes", "at least one approval scope is required")
+		}
+		seenScopes := map[string]struct{}{}
+		for index, scope := range b.Approval.RequiredScopes {
+			subject := fmt.Sprintf("approval.requiredScopes[%d]", index)
+			if !validApprovalScope(scope) {
+				add(subject, "must be a recognized approval scope")
+			}
+			if _, exists := seenScopes[scope]; exists {
+				add(subject, "must be unique")
+			}
+			seenScopes[scope] = struct{}{}
+		}
+		if b.Approval.Consumption != ApprovalConsumptionOneShot {
+			add("approval.consumption", "must be one-shot")
+		}
+		if b.Lifecycle != nil {
+			switch b.Lifecycle.Phase {
+			case LifecyclePhaseQualification:
+				if !approvalHasScope(b.Approval, ApprovalScopeCredentialFree) {
+					add("approval.requiredScopes", "qualification bundles require credential-free-qualification approval")
+				}
+			case LifecyclePhaseProtectedAcceptance:
+				if !approvalHasScope(b.Approval, ApprovalScopeProtectedReleaseGate) && !approvalHasScope(b.Approval, ApprovalScopeProtectedLiveProvider) {
+					add("approval.requiredScopes", "protected acceptance bundles require a protected release-gate or live-provider approval scope")
+				}
+			case LifecyclePhasePublication:
+				if !approvalHasScope(b.Approval, ApprovalScopePublicationGitTags) && !approvalHasScope(b.Approval, ApprovalScopePublicationFull) && !approvalHasScope(b.Approval, ApprovalScopeRiskAccepted) {
+					add("approval.requiredScopes", "publication bundles require publication or risk-accepted approval scope")
+				}
+			}
+		}
 	}
 	validateDigest := func(subject, value string) {
 		if !validSHA256(value) {
@@ -799,6 +898,23 @@ func helperImageNamed(helpers []ImageIdentity, name string) bool {
 	return false
 }
 
+func cloneLifecycleBinding(value *LifecycleBinding) *LifecycleBinding {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneApprovalBinding(value *ApprovalBinding) *ApprovalBinding {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.RequiredScopes = append([]string(nil), value.RequiredScopes...)
+	return &copy
+}
+
 func validEnvironmentVariableName(value string) bool {
 	if value == "" {
 		return false
@@ -810,6 +926,54 @@ func validEnvironmentVariableName(value string) bool {
 		return false
 	}
 	return true
+}
+
+func validLifecyclePhase(phase string) bool {
+	switch phase {
+	case LifecyclePhaseQualification, LifecyclePhaseCandidate, LifecyclePhaseProtectedAcceptance, LifecyclePhasePublication:
+		return true
+	default:
+		return false
+	}
+}
+
+func validCandidateNumbering(numbering string) bool {
+	switch numbering {
+	case CandidateNumberingUnnumbered, CandidateNumberingNumbered:
+		return true
+	default:
+		return false
+	}
+}
+
+func validFailureDomain(domain string) bool {
+	switch domain {
+	case FailureDomainProductCorrectness, FailureDomainReleaseHarness, FailureDomainExecutionIdentity, FailureDomainInfrastructure, FailureDomainProtectedProvider, FailureDomainPublication:
+		return true
+	default:
+		return false
+	}
+}
+
+func validApprovalScope(scope string) bool {
+	switch scope {
+	case ApprovalScopeCredentialFree, ApprovalScopeProductCandidate, ApprovalScopeProtectedReleaseGate, ApprovalScopeProtectedLiveProvider, ApprovalScopePublicationGitTags, ApprovalScopePublicationFull, ApprovalScopeRiskAccepted:
+		return true
+	default:
+		return false
+	}
+}
+
+func approvalHasScope(approval *ApprovalBinding, scope string) bool {
+	if approval == nil {
+		return false
+	}
+	for _, candidate := range approval.RequiredScopes {
+		if candidate == scope {
+			return true
+		}
+	}
+	return false
 }
 
 func validFileRole(role string) bool {

@@ -8,6 +8,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added machine-readable release lifecycle and one-shot approval controls to release execution bundles, protected workflow bundle construction, and coordinated release-manifest documentation so pre-candidate qualification, candidate acceptance, risk acceptance, and publication remain distinct (MycelDB/mycel#286).
 - Added a Compose MinIO repository-backed cluster backup suite that creates a credential-reference-only S3-compatible backup repository, runs a repository-backed cluster backup, verifies repository-truth list/get/validate/restore-plan flows, checks `backup-set.json` and `COMPLETE` in object storage, and exercises fail-closed missing-`COMPLETE` and corrupt required-manifest negative cases.
 - Extended the Compose MinIO repository backup scenario with a clean-target `NEW_CLUSTER_BOOTSTRAP` restore start, polling the asynchronous restore status API until all repository artifacts are staged, applied, and verified.
 - Hardened the k3d PVC restore helper to fail closed unless the freshly-created target PVC mount is empty before applying the offline cluster backup archive.
