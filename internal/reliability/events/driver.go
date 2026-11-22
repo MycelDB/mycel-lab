@@ -293,7 +293,7 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 			r.userBackups[userBackupKey(event.Target)] = result
 		}
 		return map[string]any{"userBackup": result}, err
-	case "system-backup-fixture", "cluster-backup-repository-create", "cluster-backup-create", "cluster-backup-validate", "cluster-backup-repository-assert", "cluster-restore-plan", "cluster-restore-start", "cluster-restore-apply", "cluster-restore-verify", "cluster-backup-cleanup":
+	case "system-backup-fixture", "cluster-backup-repository-create", "cluster-backup-create", "cluster-backup-validate", "cluster-backup-repository-assert", "cluster-backup-repository-delete", "cluster-restore-plan", "cluster-restore-start", "cluster-restore-apply", "cluster-restore-verify", "cluster-backup-cleanup":
 		var snapshots []env.EndpointForwardSnapshot
 		if event.Type == "cluster-restore-apply" {
 			snapshots = r.managedEndpointSnapshots()
