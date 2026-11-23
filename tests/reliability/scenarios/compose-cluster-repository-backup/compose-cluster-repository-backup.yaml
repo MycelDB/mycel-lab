@@ -91,7 +91,7 @@ phases:
           convergenceTimeout: 1m
           idempotencyKey: compose-minio-repository-denied-v1
           expectFailure: true
-          expectedFailureContains: credential
+          expectedFailureContains: validation state is invalid
       - type: cluster-backup-repository-delete
         target:
           name: repository-minio-denied
