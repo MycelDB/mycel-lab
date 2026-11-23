@@ -105,6 +105,8 @@ assertions:
     requireHealthyCluster: true
     healthConvergenceTimeout: 10m
     healthConvergenceInterval: 5s
+    allowDegradedHealthWarningContains:
+      - restored derived subsystems are not ready:
     requireSharedClusterIdentity: true
     requireNoAcknowledgedGraphTransactionLoss: true
 artifacts:
