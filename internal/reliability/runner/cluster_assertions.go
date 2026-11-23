@@ -15,10 +15,11 @@ import (
 )
 
 type clusterAssertionOptions struct {
-	RequireHealthyCluster        bool          `json:"requireHealthyCluster"`
-	RequireSharedClusterIdentity bool          `json:"requireSharedClusterIdentity"`
-	HealthConvergenceTimeout     spec.Duration `json:"healthConvergenceTimeout,omitempty"`
-	HealthConvergenceInterval    spec.Duration `json:"healthConvergenceInterval,omitempty"`
+	RequireHealthyCluster              bool          `json:"requireHealthyCluster"`
+	RequireSharedClusterIdentity       bool          `json:"requireSharedClusterIdentity"`
+	HealthConvergenceTimeout           spec.Duration `json:"healthConvergenceTimeout,omitempty"`
+	HealthConvergenceInterval          spec.Duration `json:"healthConvergenceInterval,omitempty"`
+	AllowDegradedHealthWarningContains []string      `json:"allowDegradedHealthWarningContains,omitempty"`
 }
 
 type clusterAssertionReport struct {
@@ -142,7 +143,7 @@ func evaluateClusterAssertions(ctx context.Context, required clusterAssertionOpt
 	report := clusterAssertionReport{Required: required, ExpectedNodes: expectedNodes}
 	clusterIDs := map[string]struct{}{}
 	for _, node := range nodes {
-		nodeReport := runClusterNodeAssertion(ctx, driver, environment, node, report.ExpectedNodes)
+		nodeReport := runClusterNodeAssertion(ctx, required, driver, environment, node, report.ExpectedNodes)
 		report.Nodes = append(report.Nodes, nodeReport)
 		if nodeReport.ClusterID != "" {
 			clusterIDs[nodeReport.ClusterID] = struct{}{}
@@ -170,8 +171,28 @@ func finalClusterAssertionOptions(assertions map[string]any) clusterAssertionOpt
 	if opts.RequireHealthyCluster {
 		opts.HealthConvergenceTimeout = spec.Duration{Duration: durationFromMap(final, "healthConvergenceTimeout", 60*time.Second)}
 		opts.HealthConvergenceInterval = spec.Duration{Duration: durationFromMap(final, "healthConvergenceInterval", 2*time.Second)}
+		opts.AllowDegradedHealthWarningContains = stringSliceFromMap(final, "allowDegradedHealthWarningContains")
 	}
 	return opts
+}
+
+func degradedHealthAllowed(report clusterAssertionNodeReport, required clusterAssertionOptions) bool {
+	if report.HealthStatus != "degraded" || len(report.Warnings) == 0 || len(required.AllowDegradedHealthWarningContains) == 0 {
+		return false
+	}
+	for _, warning := range report.Warnings {
+		matched := false
+		for _, allowed := range required.AllowDegradedHealthWarningContains {
+			if allowed != "" && strings.Contains(warning, allowed) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func boolFromMap(values map[string]any, key string) bool {
@@ -187,6 +208,39 @@ func boolFromMap(values map[string]any, key string) bool {
 	default:
 		return false
 	}
+}
+
+func stringSliceFromMap(values map[string]any, key string) []string {
+	if values == nil {
+		return nil
+	}
+	value, ok := values[key]
+	if !ok {
+		return nil
+	}
+	switch v := value.(type) {
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if trimmed := strings.TrimSpace(fmt.Sprint(item)); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	case string:
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return []string{trimmed}
+		}
+	}
+	return nil
 }
 
 func durationFromMap(values map[string]any, key string, defaultValue time.Duration) time.Duration {
@@ -222,7 +276,7 @@ func durationFromMap(values map[string]any, key string, defaultValue time.Durati
 	}
 }
 
-func runClusterNodeAssertion(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, node env.Node, expectedNodes int) clusterAssertionNodeReport {
+func runClusterNodeAssertion(ctx context.Context, required clusterAssertionOptions, driver env.EnvironmentDriver, environment env.Environment, node env.Node, expectedNodes int) clusterAssertionNodeReport {
 	report := clusterAssertionNodeReport{NodeName: node.Name, Resource: node.Resource}
 	statusCtx, statusCancel := context.WithTimeout(ctx, 15*time.Second)
 	statusOut, err := driver.Exec(statusCtx, environment, env.NodeRef{Name: node.Name, Ordinal: node.Ordinal}, env.ExecRequest{Command: []string{"mycel", "--daemon-addr", "127.0.0.1:9091", "--username", provision.DefaultAdminUsername, "--password", provision.DefaultAdminPassword, "--output", "json", "cluster", "status"}})
@@ -255,7 +309,7 @@ func runClusterNodeAssertion(ctx context.Context, driver env.EnvironmentDriver, 
 	if report.PeerCount < expectedNodes {
 		report.Errors = append(report.Errors, fmt.Sprintf("peer count %d below expected %d", report.PeerCount, expectedNodes))
 	}
-	if report.HealthStatus != "healthy" {
+	if report.HealthStatus != "healthy" && !degradedHealthAllowed(report, required) {
 		message := fmt.Sprintf("health status is %s", report.HealthStatus)
 		if len(report.Warnings) > 0 {
 			message += fmt.Sprintf(" (warnings: %s)", strings.Join(report.Warnings, "; "))
