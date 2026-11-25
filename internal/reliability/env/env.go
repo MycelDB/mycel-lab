@@ -999,7 +999,7 @@ spec:
 			}
 		}
 	}
-	cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-local --backup-set %s --ordinal %d --data-dir /data/mycel", shellQuote(backupDir), req.Ordinal)
+	cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup restore-local --backup-set %s --ordinal %d --data-dir /data/mycel", shellQuote(backupDir), req.Ordinal)
 	return d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
 }
 
@@ -1113,7 +1113,7 @@ spec:
 	if _, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "wait", "--for=condition=Ready", "pod/"+restorePod, "--timeout=5m"); err != nil {
 		return ExecResult{Stderr: err.Error()}, err
 	}
-	cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup cluster restore-repository-local --bucket %s --backup-set-id %s --backup-set-prefix %s --repository-prefix %s --endpoint-uri %s --region %s --access-key-env %s --secret-key-env %s --ordinal %d --data-dir /data/mycel --target-pvc-name %s", shellQuote(req.Bucket), shellQuote(req.BackupSetID), shellQuote(req.BackupSetPrefix), shellQuote(req.RepositoryPrefix), shellQuote(req.EndpointURI), shellQuote(firstNonEmptyString(req.Region, "us-east-1")), shellQuote(accessEnv), shellQuote(secretEnv), artifact.Ordinal, shellQuote(pvcName))
+	cmd := fmt.Sprintf("test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\" && mycel --output json admin backup restore-repository-local --bucket %s --backup-set-id %s --backup-set-prefix %s --repository-prefix %s --endpoint-uri %s --region %s --access-key-env %s --secret-key-env %s --ordinal %d --data-dir /data/mycel --target-pvc-name %s", shellQuote(req.Bucket), shellQuote(req.BackupSetID), shellQuote(req.BackupSetPrefix), shellQuote(req.RepositoryPrefix), shellQuote(req.EndpointURI), shellQuote(firstNonEmptyString(req.Region, "us-east-1")), shellQuote(accessEnv), shellQuote(secretEnv), artifact.Ordinal, shellQuote(pvcName))
 	result, err := d.runner().Run(ctx, "kubectl", "--context", environment.Context, "-n", environment.Namespace, "exec", restorePod, "--", "sh", "-ec", cmd)
 	if err != nil {
 		result.Stderr = strings.TrimSpace(result.Stderr + "\n" + err.Error())

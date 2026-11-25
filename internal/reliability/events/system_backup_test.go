@@ -30,12 +30,12 @@ func TestClusterBackupCreateUsesAsyncStartWait(t *testing.T) {
 		t.Fatalf("result=%+v, want backup-set-test with one artifact", result)
 	}
 	joinedExecs := strings.Join(driver.execs, "\n")
-	for _, want := range []string{"admin backup cluster start", "--wait", "--timeout 15m0s", "--convergence-timeout 10m0s", "--idempotency-key retry-key"} {
+	for _, want := range []string{"admin backup start", "--wait", "--timeout 15m0s", "--convergence-timeout 10m0s", "--idempotency-key retry-key"} {
 		if !strings.Contains(joinedExecs, want) {
 			t.Fatalf("missing async start command fragment %q\n%s", want, joinedExecs)
 		}
 	}
-	if strings.Contains(joinedExecs, "admin backup cluster trigger") {
+	if strings.Contains(joinedExecs, "admin backup trigger") {
 		t.Fatalf("must not use removed trigger command:\n%s", joinedExecs)
 	}
 	if _, err := os.Stat(filepath.Join(hostDir, "backup-set.json")); err != nil {
@@ -55,8 +55,11 @@ func TestClusterBackupCreateSupportsRepositoryBackedStart(t *testing.T) {
 	if result.BackupSetID != "backup-set-test" || result.RepositoryID != "repo-minio" || result.RepositoryBackupSetPrefix != "runs/test/backup-sets/backup-set-test" {
 		t.Fatalf("result=%+v, want repository-backed backup evidence", result)
 	}
+	if result.BackupDir != "" || result.HostDir != "" {
+		t.Fatalf("repository-backed backup leaked local path evidence: backupDir=%q hostDir=%q", result.BackupDir, result.HostDir)
+	}
 	joinedExecs := strings.Join(driver.execs, "\n")
-	for _, want := range []string{"admin backup cluster start", "--repository-id repo-minio", "--capture-provider filesystem_immutable_copy", "--quiesce-read-profile control_only"} {
+	for _, want := range []string{"admin backup start", "--repository-id repo-minio", "--capture-provider filesystem_immutable_copy", "--quiesce-read-profile control_only"} {
 		if !strings.Contains(joinedExecs, want) {
 			t.Fatalf("missing repository start fragment %q\n%s", want, joinedExecs)
 		}
@@ -105,7 +108,7 @@ func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) 
 		}
 	}
 	joinedExecs := strings.Join(driver.execs, "\n")
-	if !strings.Contains(joinedExecs, "mkdir -p '/tmp/mycel-system-backups'") || !strings.Contains(joinedExecs, "admin backup cluster validate --backup-set /tmp/mycel-system-backups") {
+	if !strings.Contains(joinedExecs, "mkdir -p '/tmp/mycel-system-backups'") || !strings.Contains(joinedExecs, "admin backup validate --backup-set /tmp/mycel-system-backups") {
 		t.Fatalf("missing expected execs:\n%s", joinedExecs)
 	}
 }
@@ -253,7 +256,7 @@ func TestClusterBackupRepositoryDeleteVerifiesRepositoryTruth(t *testing.T) {
 		t.Fatalf("result=%+v deleteCalls=%d listCalls=%d, want deleted and verified", result, driver.deleteCalls, driver.listCalls)
 	}
 	joined := strings.Join(driver.execCommands, "\n")
-	for _, want := range []string{"admin backup cluster delete backup-set-good --repository-id repo-minio", "--reason test cleanup", "admin backup cluster list --repository-id repo-minio"} {
+	for _, want := range []string{"admin backup delete backup-set-good --repository-id repo-minio", "--reason test cleanup", "admin backup list --repository-id repo-minio"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("delete commands missing %q\n%s", want, joined)
 		}
@@ -341,7 +344,7 @@ func TestClusterRestoreApplyUsesRestorePlanAndRestoreLocalPrimitives(t *testing.
 	}
 	joined := strings.Join(driver.ops, "\n")
 	for _, want := range []string{
-		"exec:mycel --output json admin backup cluster restore-plan --backup-set /tmp/mycel-system-backups",
+		"exec:mycel --output json admin backup restore-plan --backup-set /tmp/mycel-system-backups",
 		"pvcuids:myceld:2",
 		"reset-namespace",
 		"apply-yaml",
@@ -442,13 +445,13 @@ func (d *clusterBackupCreateDriver) Endpoints(context.Context, env.Environment) 
 func (d *clusterBackupCreateDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	cmd := strings.Join(req.Command, " ")
 	d.execs = append(d.execs, cmd)
-	if strings.Contains(cmd, "admin backup cluster start") && (d.backupStartStdout != "" || d.backupStartErr != nil) {
+	if strings.Contains(cmd, "admin backup start") && (d.backupStartStdout != "" || d.backupStartErr != nil) {
 		return executil.Result{Command: cmd, Stdout: d.backupStartStdout}, d.backupStartErr
 	}
-	if strings.Contains(cmd, "admin backup cluster start") && strings.Contains(cmd, "--repository-id") {
+	if strings.Contains(cmd, "admin backup start") && strings.Contains(cmd, "--repository-id") {
 		return executil.Result{Command: cmd, Stdout: `{"status":{"backup_set_id":"backup-set-test","state":"succeeded","expected_nodes":1,"repository_id":"repo-minio","manifest_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/backup-set.json","raft_barriers":{"system":1},"nodes":[{"pod_name":"myceld-0","ordinal":0,"archive_name":"node-0.tar","archive_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-0/node-0.tar","manifest_name":"node-0.manifest.json","manifest_uri":"s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-0/node-0.manifest.json","applied_indexes":{"system":1}}]}}`}, nil
 	}
-	if strings.Contains(cmd, "admin backup cluster start") {
+	if strings.Contains(cmd, "admin backup start") {
 		return executil.Result{Command: cmd, Stdout: `{"status":{"backup_set_id":"backup-set-test","state":"succeeded","expected_nodes":1,"manifest_uri":"file:///tmp/mycel-system-backups/backup-set.json","raft_barriers":{"system":1},"nodes":[{"pod_name":"myceld-0","ordinal":0,"archive_name":"node-0.tar","manifest_name":"node-0.manifest.json","applied_indexes":{"system":1}}]}}`}, nil
 	}
 	return executil.Result{Command: cmd, Stdout: "ok"}, nil
@@ -551,7 +554,7 @@ func (d *restoreApplyDriver) Endpoints(context.Context, env.Environment) ([]env.
 func (d *restoreApplyDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	cmd := strings.Join(req.Command, " ")
 	d.ops = append(d.ops, "exec:"+cmd)
-	if strings.Contains(cmd, "admin backup cluster restore-plan") {
+	if strings.Contains(cmd, "admin backup restore-plan") {
 		return env.ExecResult{Command: cmd, Stdout: `{"backup_set_id":"backup-set-test","warnings":["restore plan"],"nodes":[]}`}, nil
 	}
 	return env.ExecResult{Command: cmd}, nil
@@ -642,7 +645,7 @@ func (d *backupValidationDriver) Endpoints(context.Context, env.Environment) ([]
 func (d *backupValidationDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	cmd := strings.Join(req.Command, " ")
 	d.execs = append(d.execs, cmd)
-	if strings.Contains(cmd, "admin backup cluster validate") {
+	if strings.Contains(cmd, "admin backup validate") {
 		stdout := d.validateStdout
 		if strings.TrimSpace(stdout) == "" {
 			stdout = `{"valid":true,"errors":[]}`
@@ -696,15 +699,15 @@ func (d *repositoryNegativeDriver) Endpoints(context.Context, env.Environment) (
 func (d *repositoryNegativeDriver) Exec(_ context.Context, _ env.Environment, _ env.NodeRef, req env.ExecRequest) (env.ExecResult, error) {
 	cmd := strings.Join(req.Command, " ")
 	d.execCommands = append(d.execCommands, cmd)
-	if strings.Contains(cmd, "admin backup cluster delete") {
+	if strings.Contains(cmd, "admin backup delete") {
 		d.deleteCalls++
 		return env.ExecResult{Command: cmd, Stdout: `{"backup_set_id":"backup-set-good","repository_id":"repo-minio","state":"deleted"}`, Stderr: d.deleteStderr}, d.deleteErr
 	}
-	if strings.Contains(cmd, "admin backup cluster list") {
+	if strings.Contains(cmd, "admin backup list") {
 		d.listCalls++
 		return env.ExecResult{Command: cmd, Stdout: `{"backup_sets":[]}`}, nil
 	}
-	if strings.Contains(cmd, "admin backup cluster validate") {
+	if strings.Contains(cmd, "admin backup validate") {
 		d.validateCalls++
 		return env.ExecResult{Command: cmd, Stdout: `{"valid":false,"validation":{"errors":["injected repository chaos fixture is invalid"]}}`}, nil
 	}

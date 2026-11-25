@@ -120,6 +120,7 @@ scenarios:
         digestPinnedImagePolicy: node-pull
         createArguments: [--agents, "3", --timeout, 180s]
         consolePortBase: 29191
+        objectStoreFixture: minio
     outerTimeout: 90m
     finalization: *finalization
   - name: k3d-cluster-repository-restore
