@@ -175,7 +175,21 @@ type clusterBackupValidateResponse struct {
 }
 
 func executeSystemBackupEvent(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, scenario spec.ResolvedScenario, resources *provision.ScenarioResources, eventType string, target map[string]any, state map[string]SystemBackupOperationResult) (SystemBackupOperationResult, error) {
-	result := SystemBackupOperationResult{Operation: eventType, BackupDir: firstNonEmpty(stringTarget(target, "backupDir"), "/tmp/mycel-system-backups"), HostDir: expandTargetPath(firstNonEmpty(stringTarget(target, "hostDir"), filepath.Join(os.TempDir(), "{runID}-system-backup")), environment, resources)}
+	result := SystemBackupOperationResult{Operation: eventType}
+	if backupDir := stringTarget(target, "backupDir"); backupDir != "" {
+		result.BackupDir = backupDir
+	}
+	if hostDir := stringTarget(target, "hostDir"); hostDir != "" {
+		result.HostDir = expandTargetPath(hostDir, environment, resources)
+	}
+	if eventType == "cluster-backup-create" && firstNonEmpty(stringTarget(target, "repositoryId"), stringTarget(target, "repositoryID")) == "" {
+		if result.BackupDir == "" {
+			result.BackupDir = "/tmp/mycel-system-backups"
+		}
+		if result.HostDir == "" {
+			result.HostDir = expandTargetPath(filepath.Join(os.TempDir(), "{runID}-system-backup"), environment, resources)
+		}
+	}
 	switch eventType {
 	case "system-backup-fixture":
 		fixture, _, _, err := executeUserBackupFixture(ctx, driver, environment, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}, resources, target)
@@ -396,7 +410,7 @@ func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDrive
 	}
 	reason := firstNonEmpty(stringTarget(target, "reason"), "native mycel-lab system backup/restore test")
 	format := firstNonEmpty(stringTarget(target, "archiveFormat"), "tar")
-	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "start", "--archive-format", format, "--reason", reason, "--wait")
+	cmd := append(adminCLIBase(), "admin", "backup", "start", "--archive-format", format, "--reason", reason, "--wait")
 	if repositoryMode {
 		cmd = append(cmd, "--repository-id", repositoryID)
 		if captureProvider := stringTarget(target, "captureProvider"); captureProvider != "" {
@@ -521,7 +535,7 @@ func executeClusterBackupValidate(ctx context.Context, driver env.EnvironmentDri
 			return result, err
 		}
 	}
-	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "validate")
+	cmd := append(adminCLIBase(), "admin", "backup", "validate")
 	if repositoryMode {
 		if repositoryID == "" || backupSetID == "" {
 			return result, errors.New("repository_id and backup_set_id are required for repository validation")
@@ -588,7 +602,7 @@ func executeClusterBackupRepositoryAssert(ctx context.Context, driver env.Enviro
 		return result, err
 	}
 	defer admin.Close()
-	getResponse, err := admin.Backup.GetClusterBackupSet(ctx, &adminv1.GetClusterBackupSetRequest{RepositoryId: result.RepositoryID, BackupSetId: result.BackupSetID})
+	getResponse, err := admin.Backup.GetBackupSet(ctx, &adminv1.GetBackupSetRequest{RepositoryId: result.RepositoryID, BackupSetId: result.BackupSetID})
 	if err != nil {
 		return result, fmt.Errorf("get repository backup set: %w", err)
 	}
@@ -634,7 +648,7 @@ func executeClusterBackupRepositoryDelete(ctx context.Context, driver env.Enviro
 	if result.RepositoryID == "" || result.BackupSetID == "" {
 		return result, errors.New("repository delete requires repository_id and backup_set_id")
 	}
-	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "delete", result.BackupSetID, "--repository-id", result.RepositoryID)
+	cmd := append(adminCLIBase(), "admin", "backup", "delete", result.BackupSetID, "--repository-id", result.RepositoryID)
 	if reason := stringTarget(target, "reason"); reason != "" {
 		cmd = append(cmd, "--reason", reason)
 	}
@@ -703,18 +717,18 @@ func executeClusterRestoreStart(ctx context.Context, driver env.EnvironmentDrive
 	}
 	artifacts := append([]SystemBackupArtifact(nil), backup.Artifacts...)
 	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Ordinal < artifacts[j].Ordinal })
-	restoreTarget := &adminv1.ClusterRestoreTarget{ExpectedNodeCount: int32(len(artifacts))}
+	restoreTarget := &adminv1.RestoreTarget{ExpectedNodeCount: int32(len(artifacts))}
 	for _, artifact := range artifacts {
 		dir := filepath.Join(targetRoot, fmt.Sprintf("ordinal-%d", artifact.Ordinal))
-		restoreTarget.Nodes = append(restoreTarget.Nodes, &adminv1.ClusterRestoreNodeMapping{Ordinal: int32(artifact.Ordinal), SourcePodName: artifact.PodName, TargetPodName: artifact.PodName, TargetDataDir: dir})
+		restoreTarget.Nodes = append(restoreTarget.Nodes, &adminv1.RestoreNodeMapping{Ordinal: int32(artifact.Ordinal), SourcePodName: artifact.PodName, TargetPodName: artifact.PodName, TargetDataDir: dir})
 	}
-	restoreStaging := &adminv1.ClusterRestoreStagingLocation{StagingUri: stagingRoot, CleanBeforeUse: true}
+	restoreStaging := &adminv1.RestoreStagingLocation{StagingUri: stagingRoot, CleanBeforeUse: true}
 	admin, err := dialBackupAdmin(ctx, resources, "mycel-lab-cluster-restore-start")
 	if err != nil {
 		return result, err
 	}
 	defer admin.Close()
-	plan, err := admin.Backup.PlanClusterRestore(ctx, &adminv1.PlanClusterRestoreRequest{RepositoryId: result.RepositoryID, BackupSetId: result.BackupSetID, TargetMode: adminv1.ClusterRestoreTargetMode_CLUSTER_RESTORE_TARGET_MODE_NEW_CLUSTER_BOOTSTRAP, IdentityMode: adminv1.ClusterRestoreIdentityMode_CLUSTER_RESTORE_IDENTITY_MODE_PRESERVE_BACKUP_ID, AuthSessionPolicy: adminv1.ClusterRestoreAuthSessionPolicy_CLUSTER_RESTORE_AUTH_SESSION_POLICY_PRESERVE_RESTORED_SESSIONS, Target: restoreTarget, Staging: restoreStaging})
+	plan, err := admin.Backup.PlanRestore(ctx, &adminv1.PlanRestoreRequest{RepositoryId: result.RepositoryID, BackupSetId: result.BackupSetID, TargetMode: adminv1.RestoreTargetMode_RESTORE_TARGET_MODE_NEW_DEPLOYMENT_BOOTSTRAP, IdentityMode: adminv1.RestoreIdentityMode_RESTORE_IDENTITY_MODE_PRESERVE_BACKUP_ID, AuthSessionPolicy: adminv1.RestoreAuthSessionPolicy_RESTORE_AUTH_SESSION_POLICY_PRESERVE_RESTORED_SESSIONS, Target: restoreTarget, Staging: restoreStaging})
 	if err != nil {
 		return result, fmt.Errorf("plan repository restore with execution target: %w", err)
 	}
@@ -722,8 +736,8 @@ func executeClusterRestoreStart(ctx context.Context, driver env.EnvironmentDrive
 		return result, fmt.Errorf("repository restore plan %q is not restorable", plan.GetPlan().GetRestorePlanId())
 	}
 	result.RestorePlan = plan.GetPlan().GetRestorePlanId()
-	preconditions := &adminv1.ClusterRestorePreconditionEvidence{CleanTarget: &adminv1.ClusterRestoreCleanTargetProof{ProofId: firstNonEmpty(stringTarget(target, "cleanTargetProofId"), "mycel-lab-clean-target"), CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), TargetEmpty: true, CheckedNodes: restoreTarget.Nodes, OperatorAttestation: firstNonEmpty(stringTarget(target, "operatorAttestation"), "mycel-lab temp target dirs were removed and recreated before restore start")}, SourceFencing: &adminv1.ClusterRestoreSourceFencingEvidence{SourceClusterFenced: boolTarget(target, "sourceClusterFenced", false), FencedAt: time.Now().UTC().Format(time.RFC3339Nano), FenceTokenRef: stringTarget(target, "fenceTokenRef")}}
-	start, err := admin.Backup.StartClusterRestore(ctx, &adminv1.StartClusterRestoreRequest{RestorePlanId: plan.GetPlan().GetRestorePlanId(), PlanFreshnessToken: plan.GetPlan().GetRestorePlanId(), RepositoryId: result.RepositoryID, BackupSetId: result.BackupSetID, TargetMode: adminv1.ClusterRestoreTargetMode_CLUSTER_RESTORE_TARGET_MODE_NEW_CLUSTER_BOOTSTRAP, IdentityMode: adminv1.ClusterRestoreIdentityMode_CLUSTER_RESTORE_IDENTITY_MODE_PRESERVE_BACKUP_ID, AuthSessionPolicy: adminv1.ClusterRestoreAuthSessionPolicy_CLUSTER_RESTORE_AUTH_SESSION_POLICY_PRESERVE_RESTORED_SESSIONS, IdempotencyKey: firstNonEmpty(stringTarget(target, "idempotencyKey"), "mycel-lab-repository-restore-start-v1"), Target: restoreTarget, Staging: restoreStaging, Preconditions: preconditions})
+	preconditions := &adminv1.RestorePreconditionEvidence{CleanTarget: &adminv1.RestoreCleanTargetProof{ProofId: firstNonEmpty(stringTarget(target, "cleanTargetProofId"), "mycel-lab-clean-target"), CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), TargetEmpty: true, CheckedNodes: restoreTarget.Nodes, OperatorAttestation: firstNonEmpty(stringTarget(target, "operatorAttestation"), "mycel-lab temp target dirs were removed and recreated before restore start")}, SourceFencing: &adminv1.RestoreSourceFencingEvidence{SourceDeploymentFenced: boolTarget(target, "sourceClusterFenced", false), FencedAt: time.Now().UTC().Format(time.RFC3339Nano), FenceTokenRef: stringTarget(target, "fenceTokenRef")}}
+	start, err := admin.Backup.StartRestore(ctx, &adminv1.StartRestoreRequest{RestorePlanId: plan.GetPlan().GetRestorePlanId(), PlanFreshnessToken: plan.GetPlan().GetRestorePlanId(), RepositoryId: result.RepositoryID, BackupSetId: result.BackupSetID, TargetMode: adminv1.RestoreTargetMode_RESTORE_TARGET_MODE_NEW_DEPLOYMENT_BOOTSTRAP, IdentityMode: adminv1.RestoreIdentityMode_RESTORE_IDENTITY_MODE_PRESERVE_BACKUP_ID, AuthSessionPolicy: adminv1.RestoreAuthSessionPolicy_RESTORE_AUTH_SESSION_POLICY_PRESERVE_RESTORED_SESSIONS, IdempotencyKey: firstNonEmpty(stringTarget(target, "idempotencyKey"), "mycel-lab-repository-restore-start-v1"), Target: restoreTarget, Staging: restoreStaging, Preconditions: preconditions})
 	if err != nil {
 		return result, fmt.Errorf("start repository restore: %w", err)
 	}
@@ -738,7 +752,7 @@ func executeClusterRestoreStart(ctx context.Context, driver env.EnvironmentDrive
 		poll = 2 * time.Second
 	}
 	for {
-		if op.GetState() == adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_SUCCEEDED {
+		if op.GetState() == adminv1.RestoreOperationState_RESTORE_OPERATION_STATE_SUCCEEDED {
 			break
 		}
 		if clusterRestoreStateTerminal(op.GetState()) {
@@ -754,7 +768,7 @@ func executeClusterRestoreStart(ctx context.Context, driver env.EnvironmentDrive
 			return result, ctx.Err()
 		case <-timer.C:
 		}
-		status, err := admin.Backup.GetClusterRestoreStatus(ctx, &adminv1.GetClusterRestoreStatusRequest{RestoreOperationId: op.GetRestoreOperationId()})
+		status, err := admin.Backup.GetRestoreOperation(ctx, &adminv1.GetRestoreOperationRequest{RestoreOperationId: op.GetRestoreOperationId()})
 		if err != nil {
 			return result, fmt.Errorf("get repository restore status: %w", err)
 		}
@@ -771,9 +785,9 @@ func executeClusterRestoreStart(ctx context.Context, driver env.EnvironmentDrive
 	return result, nil
 }
 
-func clusterRestoreStateTerminal(state adminv1.ClusterRestoreState) bool {
+func clusterRestoreStateTerminal(state adminv1.RestoreOperationState) bool {
 	switch state {
-	case adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_SUCCEEDED, adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_CANCELED, adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_FAILED, adminv1.ClusterRestoreState_CLUSTER_RESTORE_STATE_FAILED_REQUIRES_OPERATOR:
+	case adminv1.RestoreOperationState_RESTORE_OPERATION_STATE_SUCCEEDED, adminv1.RestoreOperationState_RESTORE_OPERATION_STATE_CANCELED, adminv1.RestoreOperationState_RESTORE_OPERATION_STATE_FAILED, adminv1.RestoreOperationState_RESTORE_OPERATION_STATE_FAILED_REQUIRES_OPERATOR:
 		return true
 	default:
 		return false
@@ -781,7 +795,7 @@ func clusterRestoreStateTerminal(state adminv1.ClusterRestoreState) bool {
 }
 
 func repositoryBackupSetListed(ctx context.Context, driver env.EnvironmentDriver, environment env.Environment, repositoryID, backupSetID string, ordinal int) (bool, string, error) {
-	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "list", "--repository-id", repositoryID)
+	cmd := append(adminCLIBase(), "admin", "backup", "list", "--repository-id", repositoryID)
 	execResult, err := driver.Exec(ctx, environment, env.NodeRef{Ordinal: ordinal}, env.ExecRequest{Command: cmd})
 	if err != nil {
 		return false, execResult.Stdout, err
@@ -802,10 +816,10 @@ func executeRepositoryClusterRestorePlan(ctx context.Context, driver env.Environ
 	if repositoryID == "" || backupSetID == "" {
 		return "", errors.New("repository_id and backup_set_id are required for repository restore planning")
 	}
-	cmd := append(adminCLIBase(), "admin", "backup", "cluster", "restore-plan", "--repository-id", repositoryID, "--backup-set-id", backupSetID)
-	cmd = append(cmd, "--target-mode", firstNonEmpty(stringTarget(target, "targetMode"), "new_cluster_bootstrap"))
-	cmd = append(cmd, "--identity-mode", firstNonEmpty(stringTarget(target, "identityMode"), "preserve_backup_id"))
-	cmd = append(cmd, "--auth-session-policy", firstNonEmpty(stringTarget(target, "authSessionPolicy"), "preserve_restored_sessions"))
+	cmd := append(adminCLIBase(), "admin", "backup", "restore-plan", "--repository-id", repositoryID, "--backup-set-id", backupSetID)
+	cmd = append(cmd, "--target-mode", firstNonEmpty(stringTarget(target, "targetMode"), "new-deployment-bootstrap"))
+	cmd = append(cmd, "--identity-mode", firstNonEmpty(stringTarget(target, "identityMode"), "preserve-backup-id"))
+	cmd = append(cmd, "--auth-session-policy", firstNonEmpty(stringTarget(target, "authSessionPolicy"), "preserve-restored-sessions"))
 	execResult, err := driver.Exec(ctx, environment, env.NodeRef{Ordinal: intTarget(target, "ordinal", 0)}, env.ExecRequest{Command: cmd})
 	if err != nil {
 		return bounded(execResult.Stdout, 8192), err
@@ -1259,7 +1273,7 @@ func executeClusterRestorePlan(ctx context.Context, driver env.EnvironmentDriver
 	if err := stageClusterBackupForValidation(ctx, driver, environment, backup, node); err != nil {
 		return "", err
 	}
-	cmd := append(offlineCLIBase(), "admin", "backup", "cluster", "restore-plan", "--backup-set", backup.BackupDir)
+	cmd := append(offlineCLIBase(), "admin", "backup", "restore-plan", "--backup-set", backup.BackupDir)
 	execResult, err := driver.Exec(ctx, environment, node, env.ExecRequest{Command: cmd})
 	if err != nil {
 		return bounded(execResult.Stdout, 8192), restoreCLICompatibilityError(err, execResult)

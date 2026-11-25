@@ -224,7 +224,9 @@ mycel-lab run suite k3d-raft-sensitive-gate --dry-run
 mycel-lab run suite k3d-graph-commit-restart-qualification --dry-run
 mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
+mycel-lab run suite compose-cluster-repository-backup --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
+mycel-lab run suite k3d-cluster-repository-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite k3d-semantic-graph-index-recovery --dry-run
@@ -312,9 +314,9 @@ is a native Compose smoke suite for `user-backup-export`,
 environment driver. `compose-user-backup-restore` is the full native Compose
 backup/restore suite with fixture creation, archive staging across a fresh reset,
 restored-data checks, and safety assertions. `k3d-system-backup-restore` is the
-native k3d full-system backup/restore suite with cluster backup metadata checks,
-offline `restore-plan` evidence, PVC replacement evidence, per-ordinal
-`restore-local` execution, and restored workload verification.
+native k3d repository-backed full-system backup/restore suite with external
+repository metadata checks, PVC replacement evidence, per-ordinal
+`restore-repository-local` helper execution, and restored workload verification.
 `k3d-raft-snapshot-pvc-rejoin` is the native k3d forced-snapshot
 same-raft-ID PVC replacement drill: it forces raft snapshots on active quorum
 nodes, deletes and recreates the highest ordinal PVC, validates graph/data-plane

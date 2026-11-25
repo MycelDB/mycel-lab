@@ -562,16 +562,21 @@ type: user-backup-import
 type: user-backup-verify-restored
 type: user-backup-assert-safety
 type: system-backup-fixture
+type: cluster-backup-repository-create
 type: cluster-backup-create
 type: cluster-backup-validate
+type: cluster-backup-repository-assert
 type: cluster-restore-apply
 type: cluster-restore-verify
+type: cluster-backup-repository-delete
 ```
 
-`cluster-backup-create` uses the daemon async cluster backup API through
-`mycel admin backup cluster start --wait`. Targets may set `backupDir`,
-`hostDir`, `archiveFormat`, `reason`, `convergenceTimeout`, `waitTimeout`, and
-`idempotencyKey`.
+`cluster-backup-create` uses the daemon repository-backed deployment backup API through
+`mycel admin backup start --wait`. Release scenarios must set `repositoryId` and
+create that repository with `cluster-backup-repository-create`; durable backup
+artifacts are external repository objects, not daemon-local backup directories.
+Targets may set `archiveFormat`, `captureProvider`, `quiesceReadProfile`,
+`reason`, `convergenceTimeout`, `waitTimeout`, and `idempotencyKey`.
 
 Pod and node events use deterministic pod/name/ordinal targeting:
 

@@ -61,7 +61,9 @@ mycel-lab run suite k3d-graph-commit-restart-qualification --dry-run
 mycel-lab run suite k3d-raft-disruption --dry-run
 mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
+mycel-lab run suite compose-cluster-repository-backup --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
+mycel-lab run suite k3d-cluster-repository-restore --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite k3d-commonfolio-procedure-replay-recovery --dry-run

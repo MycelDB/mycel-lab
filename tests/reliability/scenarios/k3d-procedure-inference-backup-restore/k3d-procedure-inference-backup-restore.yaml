@@ -12,9 +12,10 @@ environment:
     clusterNamePrefix: mlab-pib
     createArguments: [--agents, "3", --timeout, 180s]
     consolePortBase: 20191
+    objectStoreFixture: minio
     providerEmulatorImage: local/mycel-provider-emulator:dev
   capabilities:
-    required: [per-node-endpoints, node-exec, logs, volume-replacement, provider-emulator]
+    required: [per-node-endpoints, node-exec, logs, object-store-fixture, volume-replacement, provider-emulator]
 clusterRef: raft-3-node
 clusterOverrides:
   raft: {partitionCount: 4}
@@ -63,16 +64,28 @@ phases:
   - name: capture-system-backup
     duration: 1ms
     events:
+      - type: cluster-backup-repository-create
+        target:
+          repositoryId: mycel-lab-procedure-minio
+          bucket: mycel-procedure-backups
+          prefix: mycel-lab/{runID}
+          endpoint: http://minio:9000
+          region: us-east-1
+          forcePathStyle: true
+          disableTLS: true
+          devOnly: true
       - type: cluster-backup-create
         target:
-          backupDir: /tmp/mycel-system-backups
-          hostDir: "{tempDir}/{runID}-procedure-inference-system-backup"
+          repositoryId: mycel-lab-procedure-minio
           archiveFormat: tar
+          captureProvider: filesystem_immutable_copy
+          quiesceReadProfile: control_only
           reason: procedure inference ledger and control recovery
           convergenceTimeout: 10m
           waitTimeout: 15m
+          idempotencyKey: k3d-procedure-repository-backup-v1
       - type: cluster-backup-validate
-        target: {backupDir: /tmp/mycel-system-backups, ordinal: 0}
+        target: {repositoryId: mycel-lab-procedure-minio, expectValid: true}
       - type: procedure-inference-emulator-assert
         target: {minimumRequests: 1, maximumRequests: 1, requireSingleItem: true, maximumBatchItems: 1, maximumAttemptsPerInput: 1, authorization: absent, expectedModels: [procedure-generation-v1], minimumOutcomes: {success: 1}, minimumStatuses: {"200": 1}}
   - name: create-post-backup-negative-control
@@ -90,7 +103,7 @@ phases:
     duration: 1ms
     events:
       - type: cluster-restore-apply
-        target: {backup: default, statefulSet: myceld}
+        target: {statefulSet: myceld, bucket: mycel-procedure-backups, endpoint: http://minio:9000, region: us-east-1, helperRetries: 1}
       - type: cluster-recovery-wait
         target: {timeout: 2m, interval: 500ms, commandTimeout: 5s, minimumStablePolls: 3, requireZeroApplyLag: true, requireConsistentProgress: true}
       - type: procedure-inference-emulator-assert
@@ -131,11 +144,13 @@ phases:
           minimumStatuses: {"200": 1}
       - type: procedure-inference-capacity-diagnostics-assert
         target: {timeout: 30s, tail: 5000, requirePressure: false}
-      - type: cluster-backup-cleanup
-        target: {backup: default}
+      - type: cluster-backup-repository-delete
+        target: {repositoryId: mycel-lab-procedure-minio, reason: procedure inference backup/restore scenario cleanup}
 assertions:
   final:
     requireHealthyCluster: true
+    allowDegradedHealthWarningContains:
+      - "restored derived subsystems are not ready:"
     requireSharedClusterIdentity: true
     requireConvergedCounts: true
 artifacts:

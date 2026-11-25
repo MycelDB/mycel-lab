@@ -499,7 +499,7 @@ func TestK3DDriverRestoreBackupSetOrdinalToPVCProvesTargetEmpty(t *testing.T) {
 		t.Fatalf("RestoreBackupSetOrdinalToPVC() error=%v", err)
 	}
 	joined := strings.Join(runner.commands, "\n")
-	for _, want := range []string{"kubectl --context k3d-mycel-lab-test apply -f", "kubectl --context k3d-mycel-lab-test -n test-ns cp /tmp/backup-set.json", "test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\"", "admin backup cluster restore-local", "--ordinal 0 --data-dir /data/mycel"} {
+	for _, want := range []string{"kubectl --context k3d-mycel-lab-test apply -f", "kubectl --context k3d-mycel-lab-test -n test-ns cp /tmp/backup-set.json", "test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\"", "admin backup restore-local", "--ordinal 0 --data-dir /data/mycel"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("RestoreBackupSetOrdinalToPVC commands missing %q\n%s", want, joined)
 		}
@@ -537,7 +537,7 @@ func TestK3DDriverRestoreRepositoryBackupSetRetriesHelperFailure(t *testing.T) {
 	if strings.Count(joined, "delete pod restore-repo-data-myceld-0") != 2 {
 		t.Fatalf("each helper attempt should be cleaned up:\n%s", joined)
 	}
-	for _, want := range []string{"test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\"", "admin backup cluster restore-repository-local"} {
+	for _, want := range []string{"test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\"", "admin backup restore-repository-local"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("repository restore commands missing %q\n%s", want, joined)
 		}
