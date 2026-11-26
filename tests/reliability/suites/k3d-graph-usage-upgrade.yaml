@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: k3d-graph-usage-upgrade
+  description: Graph logical payload usage accounting across a three-member Raft upgrade and backfill.
+scenarios:
+  - path: ../scenarios/k3d-graph-usage-upgrade/k3d-graph-usage-upgrade.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true
