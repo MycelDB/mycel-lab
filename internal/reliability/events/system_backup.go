@@ -96,28 +96,55 @@ type SystemBackupArtifact struct {
 	LocalManifest  string `json:"localManifest,omitempty"`
 }
 
-type clusterBackupStatusResponse struct {
-	Status struct {
-		BackupSetID   string                       `json:"backup_set_id"`
-		State         string                       `json:"state"`
-		ExpectedNodes int                          `json:"expected_nodes"`
-		ManifestURI   string                       `json:"manifest_uri"`
-		Error         string                       `json:"error"`
-		FailedPhase   string                       `json:"failed_phase"`
-		RaftBarriers  map[string]uint64            `json:"raft_barriers"`
-		Blockers      []clusterBackupStatusBlocker `json:"blockers"`
-		RepositoryID  string                       `json:"repository_id"`
-		Nodes         []struct {
-			PodName        string            `json:"pod_name"`
-			Ordinal        int               `json:"ordinal"`
-			ArchiveName    string            `json:"archive_name"`
-			ArchiveURI     string            `json:"archive_uri"`
-			ManifestName   string            `json:"manifest_name"`
-			ManifestURI    string            `json:"manifest_uri"`
-			ChecksumSHA256 string            `json:"checksum_sha256"`
-			AppliedIndexes map[string]uint64 `json:"applied_indexes"`
-		} `json:"nodes"`
-	} `json:"status"`
+// clusterBackupStatus also decodes the legacy status envelope used by local-output fixtures.
+type clusterBackupStatus struct {
+	BackupSetID   string                            `json:"backup_set_id"`
+	State         string                            `json:"state"`
+	ExpectedNodes int                               `json:"expected_nodes"`
+	ManifestURI   string                            `json:"manifest_uri"`
+	Error         string                            `json:"error"`
+	FailedPhase   string                            `json:"failed_phase"`
+	RaftBarriers  map[string]uint64                 `json:"raft_barriers"`
+	Blockers      []*adminv1.BackupOperationBlocker `json:"blockers"`
+	RepositoryID  string                            `json:"repository_id"`
+	Nodes         []*adminv1.BackupNodeArtifact     `json:"nodes"`
+}
+
+func decodeClusterBackupStartResponse(raw []byte) (clusterBackupStatus, error) {
+	// The CLI uses encoding/json on the generated response: enum values are numeric.
+	var response struct {
+		Operation *adminv1.BackupOperation `json:"operation"`
+		Status    *clusterBackupStatus     `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return clusterBackupStatus{}, err
+	}
+	if op := response.Operation; op != nil {
+		state := op.GetState()
+		name, known := adminv1.BackupOperationState_name[int32(state)]
+		if !known || state == adminv1.BackupOperationState_BACKUP_OPERATION_STATE_UNSPECIFIED {
+			return clusterBackupStatus{}, fmt.Errorf("invalid operation state %d", state)
+		}
+		return clusterBackupStatus{
+			BackupSetID:   op.GetBackupSetId(),
+			State:         strings.ToLower(strings.TrimPrefix(name, "BACKUP_OPERATION_STATE_")),
+			ExpectedNodes: int(op.GetExpectedNodeCount()),
+			ManifestURI:   op.GetManifestUri(),
+			Error:         op.GetError(),
+			FailedPhase:   firstNonEmpty(op.GetFailedPhase(), op.GetPhase()),
+			RaftBarriers:  op.GetRaftBarriers(),
+			Blockers:      op.GetBlockers(),
+			RepositoryID:  op.GetRepositoryId(),
+			Nodes:         op.GetNodes(),
+		}, nil
+	}
+	if response.Status == nil {
+		return clusterBackupStatus{}, errors.New("missing operation or status")
+	}
+	if strings.TrimSpace(response.Status.State) == "" {
+		return clusterBackupStatus{}, errors.New("missing legacy status state")
+	}
+	return *response.Status, nil
 }
 
 type clusterBackupListResponse struct {
@@ -148,17 +175,6 @@ type clusterRestorePlanResponse struct {
 type repositoryObjectListItem struct {
 	Key  string `json:"key"`
 	Type string `json:"type,omitempty"`
-}
-
-type clusterBackupStatusBlocker struct {
-	NodeName     string `json:"node_name"`
-	NodeID       string `json:"node_id"`
-	RaftNodeID   uint64 `json:"raft_node_id"`
-	RaftGroup    string `json:"raft_group"`
-	Reason       string `json:"reason"`
-	AppliedIndex uint64 `json:"applied_index"`
-	CommitIndex  uint64 `json:"commit_index"`
-	Detail       string `json:"detail"`
 }
 
 type clusterBackupValidateResponse struct {
@@ -441,11 +457,10 @@ func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDrive
 		}
 		return result, err
 	}
-	var response clusterBackupStatusResponse
-	if err := json.Unmarshal([]byte(execResult.Stdout), &response); err != nil {
+	status, err := decodeClusterBackupStartResponse([]byte(execResult.Stdout))
+	if err != nil {
 		return result, fmt.Errorf("decode cluster backup status response: %w", err)
 	}
-	status := response.Status
 	result.BackupSetID = status.BackupSetID
 	result.ManifestURI = status.ManifestURI
 	if repositoryMode {
@@ -454,14 +469,18 @@ func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDrive
 			result.RepositoryBackupSetPrefix = backupSetPrefixFromManifestURI(result.ManifestURI, result.RepositoryBucket, result.BackupSetID)
 		}
 	}
-	if strings.ToLower(status.State) != "succeeded" {
-		if expectFailure && backupFailureMatchesExpectation(target, status.State, status.FailedPhase, status.Error, formatClusterBackupBlockers(status.Blockers), result.Stdout, result.Stderr) {
+	if state := strings.ToLower(status.State); state != "succeeded" {
+		blockers := formatClusterBackupBlockers(status.Blockers)
+		if expectFailure && (state == "failed" || state == "canceled") && backupFailureMatchesExpectation(target, status.State, status.FailedPhase, status.Error, blockers, result.Stdout, result.Stderr) {
 			return result, nil
 		}
-		return result, fmt.Errorf("cluster backup state %q phase=%s error=%s blockers=%s", status.State, status.FailedPhase, status.Error, formatClusterBackupBlockers(status.Blockers))
+		return result, fmt.Errorf("cluster backup state %q phase=%s error=%s blockers=%s", status.State, status.FailedPhase, status.Error, blockers)
 	}
 	if expectFailure {
 		return result, errors.New("cluster backup unexpectedly succeeded")
+	}
+	if strings.TrimSpace(status.BackupSetID) == "" {
+		return result, errors.New("cluster backup status missing backup_set_id")
 	}
 	if want := scenario.Cluster.Nodes; want > 0 && (status.ExpectedNodes != want || len(status.Nodes) != want) {
 		return result, fmt.Errorf("cluster backup expected %d nodes, status expected=%d artifacts=%d", want, status.ExpectedNodes, len(status.Nodes))
@@ -483,30 +502,32 @@ func executeClusterBackupCreate(ctx context.Context, driver env.EnvironmentDrive
 		byPod[node.Name] = node
 	}
 	for _, node := range status.Nodes {
-		pod := node.PodName
-		if pod == "" {
-			pod = fmt.Sprintf("myceld-%d", node.Ordinal)
+		if node == nil {
+			return result, errors.New("cluster backup status contains a null node artifact")
 		}
-		envNode, ok := byPod[pod]
-		if !ok {
-			envNode = env.Node{Name: pod, Ordinal: node.Ordinal}
-		}
-		artifact := SystemBackupArtifact{PodName: pod, Ordinal: node.Ordinal, ArchiveName: node.ArchiveName, ArchiveURI: node.ArchiveURI, ManifestName: node.ManifestName, ManifestURI: node.ManifestURI, ChecksumSHA256: node.ChecksumSHA256}
+		ordinal := int(node.GetOrdinal())
+		pod := firstNonEmpty(node.GetPodName(), fmt.Sprintf("myceld-%d", ordinal))
+		artifact := SystemBackupArtifact{PodName: pod, Ordinal: ordinal, ArchiveName: node.GetArchiveName(), ArchiveURI: node.GetArchiveUri(), ManifestName: node.GetManifestName(), ManifestURI: node.GetManifestUri(), ChecksumSHA256: node.GetChecksumSha256()}
 		if !repositoryMode {
+			envNode, ok := byPod[pod]
+			if !ok {
+				envNode = env.Node{Name: pod, Ordinal: ordinal}
+			}
+			nodeRef := env.NodeRef{Name: envNode.Name, Ordinal: envNode.Ordinal}
 			podDir := filepath.Join(result.HostDir, pod)
-			archivePath := filepath.Join(podDir, node.ArchiveName)
-			if _, err := stager.CopyFromNode(ctx, environment, env.NodeRef{Name: envNode.Name, Ordinal: envNode.Ordinal}, filepath.Join(result.BackupDir, node.ArchiveName), archivePath); err != nil {
+			archivePath := filepath.Join(podDir, artifact.ArchiveName)
+			if _, err := stager.CopyFromNode(ctx, environment, nodeRef, filepath.Join(result.BackupDir, artifact.ArchiveName), archivePath); err != nil {
 				return result, err
 			}
-			if node.ChecksumSHA256 != "" {
-				if err := verifyFileSHA256(archivePath, node.ChecksumSHA256); err != nil {
+			if artifact.ChecksumSHA256 != "" {
+				if err := verifyFileSHA256(archivePath, artifact.ChecksumSHA256); err != nil {
 					return result, err
 				}
 			}
 			artifact.LocalArchive = archivePath
-			if node.ManifestName != "" {
-				manifestPath := filepath.Join(podDir, node.ManifestName)
-				if _, err := stager.CopyFromNode(ctx, environment, env.NodeRef{Name: envNode.Name, Ordinal: envNode.Ordinal}, filepath.Join(result.BackupDir, node.ManifestName), manifestPath); err != nil {
+			if artifact.ManifestName != "" {
+				manifestPath := filepath.Join(podDir, artifact.ManifestName)
+				if _, err := stager.CopyFromNode(ctx, environment, nodeRef, filepath.Join(result.BackupDir, artifact.ManifestName), manifestPath); err != nil {
 					return result, err
 				}
 				artifact.LocalManifest = manifestPath
@@ -1527,18 +1548,18 @@ func durationTarget(target map[string]any, key string, fallback time.Duration) t
 	return fallback
 }
 
-func formatClusterBackupBlockers(blockers []clusterBackupStatusBlocker) string {
-	if len(blockers) == 0 {
-		return ""
-	}
+func formatClusterBackupBlockers(blockers []*adminv1.BackupOperationBlocker) string {
 	parts := make([]string, 0, len(blockers))
 	for _, blocker := range blockers {
-		label := firstNonEmpty(blocker.RaftGroup, blocker.NodeName, blocker.NodeID)
-		if blocker.Reason != "" && label != "" {
-			parts = append(parts, label+":"+blocker.Reason+":"+blocker.Detail)
+		if blocker == nil {
 			continue
 		}
-		parts = append(parts, firstNonEmpty(blocker.Detail, blocker.Reason, label))
+		label := firstNonEmpty(blocker.GetRaftGroup(), blocker.GetNodeName(), blocker.GetNodeId())
+		if blocker.GetReason() != "" && label != "" {
+			parts = append(parts, label+":"+blocker.GetReason()+":"+blocker.GetDetail())
+			continue
+		}
+		parts = append(parts, firstNonEmpty(blocker.GetDetail(), blocker.GetReason(), label))
 	}
 	return strings.Join(parts, "; ")
 }

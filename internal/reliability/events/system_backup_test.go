@@ -69,6 +69,53 @@ func TestClusterBackupCreateSupportsRepositoryBackedStart(t *testing.T) {
 	}
 }
 
+func TestClusterBackupCreateDecodesRepositoryOperationResponse(t *testing.T) {
+	// This fixture preserves the response shape and node order captured in the cluster gate.
+	raw, err := os.ReadFile("testdata/repository-backup-start-v025.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := &clusterBackupCreateDriver{backupStartStdout: string(raw)}
+	result, err := executeClusterBackupCreate(context.Background(), driver, env.Environment{Driver: "compose"}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3}}, map[string]any{"repositoryId": "repo-minio"}, SystemBackupOperationResult{RepositoryBucket: "mycel-compose-backups"})
+	if err != nil {
+		t.Fatalf("executeClusterBackupCreate() error=%v", err)
+	}
+	if result.BackupSetID != "backup-set-test" || result.RepositoryID != "repo-minio" || result.RepositoryBackupSetPrefix != "runs/test/backup-sets/backup-set-test" || len(result.Artifacts) != 3 {
+		t.Fatalf("result=%+v, want repository backup evidence for all three nodes", result)
+	}
+	for ordinal, pod := range []string{"myceld-a", "myceld-b", "myceld-c"} {
+		artifact := result.Artifacts[ordinal]
+		if artifact.Ordinal != ordinal || artifact.PodName != pod || artifact.ArchiveURI == "" || artifact.ManifestURI == "" {
+			t.Fatalf("artifact[%d]=%+v, want %s with archive and manifest URIs", ordinal, artifact, pod)
+		}
+	}
+}
+
+func TestClusterBackupCreateRejectsIncompleteOperationResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		stdout        string
+		want          string
+		expectFailure bool
+	}{
+		{name: "missing envelope", stdout: `{}`, want: "missing operation or status", expectFailure: true},
+		{name: "missing state", stdout: `{"operation":{"phase":"succeeded"}}`, want: "invalid operation state"},
+		{name: "unknown state", stdout: `{"operation":{"state":99}}`, want: "invalid operation state 99"},
+		{name: "pending even with success phase", stdout: `{"operation":{"state":1,"phase":"succeeded"}}`, want: `cluster backup state "pending"`, expectFailure: true},
+		{name: "missing backup set ID", stdout: `{"operation":{"state":7}}`, want: "missing backup_set_id"},
+		{name: "wrong node count", stdout: `{"operation":{"backup_set_id":"backup-set-test","state":7,"expected_node_count":3,"nodes":[{}],"raft_barriers":{"system":1}}}`, want: "expected 3 nodes, status expected=3 artifacts=1"},
+		{name: "missing barriers", stdout: `{"operation":{"backup_set_id":"backup-set-test","state":7,"expected_node_count":3,"nodes":[{},{},{}]}}`, want: "missing raft barrier evidence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			driver := &clusterBackupCreateDriver{backupStartStdout: tc.stdout}
+			_, err := executeClusterBackupCreate(context.Background(), driver, env.Environment{Driver: "compose"}, spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 3}}, map[string]any{"repositoryId": "repo-minio", "expectFailure": tc.expectFailure}, SystemBackupOperationResult{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("executeClusterBackupCreate() error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestClusterBackupValidateStagesHostArtifactsToValidationNode(t *testing.T) {
 	hostDir := t.TempDir()
 	writeFile(t, filepath.Join(hostDir, "backup-set.json"), `{"complete":true,"state":"succeeded","nodes":[{"applied_indexes":{"system":1}}]}`)
@@ -227,6 +274,22 @@ func TestClusterBackupCreateCanExpectRepositoryFailure(t *testing.T) {
 	}
 	if result.BackupSetID != "backup-set-denied" || result.RepositoryID != "repo-denied" || !strings.Contains(result.Stdout, "repository_permission_denied") {
 		t.Fatalf("result=%+v, want failed repository backup evidence", result)
+	}
+}
+
+func TestClusterBackupCreateReportsRepositoryOperationFailure(t *testing.T) {
+	driver := &clusterBackupCreateDriver{backupStartStdout: `{"operation":{"backup_set_id":"backup-set-denied","repository_id":"repo-denied","state":8,"failed_phase":"repository_validation","error":"permission denied","blockers":[{"node_name":"myceld-0","reason":"repository_permission_denied"}]}}`}
+	cluster := spec.ResolvedScenario{Cluster: spec.ClusterSpec{Nodes: 1}}
+	environment := env.Environment{Driver: "compose"}
+	target := map[string]any{"repositoryId": "repo-denied"}
+	result, err := executeClusterBackupCreate(context.Background(), driver, environment, cluster, target, SystemBackupOperationResult{})
+	if err == nil || !strings.Contains(err.Error(), `state "failed" phase=repository_validation error=permission denied blockers=myceld-0:repository_permission_denied`) || result.BackupSetID != "backup-set-denied" {
+		t.Fatalf("result backup_set_id=%q, error=%v, want failure details and backup-set identity", result.BackupSetID, err)
+	}
+	target["expectFailure"] = true
+	target["expectedFailureContains"] = "repository_permission_denied"
+	if _, err := executeClusterBackupCreate(context.Background(), driver, environment, cluster, target, SystemBackupOperationResult{}); err != nil {
+		t.Fatalf("expected repository failure rejected: %v", err)
 	}
 }
 
