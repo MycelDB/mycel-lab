@@ -1,0 +1,42 @@
+{
+  "operation": {
+    "backup_operation_id": "backup-set-test",
+    "backup_set_id": "backup-set-test",
+    "repository_id": "repo-minio",
+    "deployment_mode": 2,
+    "state": 7,
+    "phase": "succeeded",
+    "expected_node_count": 3,
+    "manifest_uri": "s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/backup-set.json",
+    "nodes": [
+      {
+        "pod_name": "myceld-c",
+        "ordinal": 2,
+        "archive_name": "node-c.tar",
+        "archive_uri": "s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-c/node-c.tar",
+        "manifest_name": "node-c.manifest.json",
+        "manifest_uri": "s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-c/node-c.manifest.json",
+        "applied_indexes": {"system": 34}
+      },
+      {
+        "pod_name": "myceld-a",
+        "ordinal": 0,
+        "archive_name": "node-a.tar",
+        "archive_uri": "s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-a/node-a.tar",
+        "manifest_name": "node-a.manifest.json",
+        "manifest_uri": "s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-a/node-a.manifest.json",
+        "applied_indexes": {"system": 34}
+      },
+      {
+        "pod_name": "myceld-b",
+        "ordinal": 1,
+        "archive_name": "node-b.tar",
+        "archive_uri": "s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-b/node-b.tar",
+        "manifest_name": "node-b.manifest.json",
+        "manifest_uri": "s3://mycel-compose-backups/runs/test/backup-sets/backup-set-test/nodes/myceld-b/node-b.manifest.json",
+        "applied_indexes": {"system": 34}
+      }
+    ],
+    "raft_barriers": {"system": 31}
+  }
+}

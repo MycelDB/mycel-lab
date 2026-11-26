@@ -24,6 +24,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Fixed repository-backed backup scenarios to decode the `operation` response from `mycel admin backup start --wait` on Mycel v0.25 and later. A successful backup no longer fails the cluster release gate with an empty state; node inventory and Raft barrier checks still apply.
+- Fixed repository backup-set presence checks to read only backup-set IDs from `mycel admin backup list`, so they work with both numeric and legacy string states.
 - Fixed the cluster release-gate execution-bundle draft to bind the standard Compose cluster port overlay so bundled Compose endpoints match the declared admin gRPC ports.
 
 ## [v0.23.0] - 2026-11-17
