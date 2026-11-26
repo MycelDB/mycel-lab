@@ -12,7 +12,7 @@ Mycel Lab SGT10 separates credential-free pull-request validation from explicitl
 
 Default CI runs unit, race, vet, documentation, workflow-policy, and build checks. It also dry-runs the credential-free semantic graph-index release-gate aggregate, protocol-emulator procedure control, recovery, backup/restore, and live-profile plans. Dry-run evidence is uploaded only after every retained run reports a clean redaction scan.
 
-The live and release-gate workflows share one non-cancelling concurrency group. They cannot overlap or be silently cancelled after destructive execution begins.
+The live and release-gate workflows share one non-cancelling concurrency group. They cannot overlap. The cluster gate's 360-minute job budget covers the suite preflight, all five scenario timeouts, all independently bounded finalization steps, and at least 20 minutes for job setup and artifact handling. The maintained draft totals 354 minutes including that reserve; changes to its bounds are checked against the job timeout in CI.
 
 ## Required repository configuration
 

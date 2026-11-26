@@ -67,17 +67,17 @@ scenarios:
       runtimeFiles:
         - {option: composeFiles, source: daemon, path: tests/compose/cluster/compose.yml}
         - {option: composeFiles, source: lab, path: tests/compose/ports.yml}
-    outerTimeout: 30m
+    outerTimeout: 20m
     finalization: &finalization
       actorStop: 2m
-      portForwardStop: 2m
-      providerObservation: 5m
+      portForwardStop: 1m
+      providerObservation: 1m
       clusterAssertions: 5m
-      finalOracle: 5m
-      sensitiveHostCleanup: 5m
-      scenarioCleanup: 5m
+      finalOracle: 2m
+      sensitiveHostCleanup: 1m
+      scenarioCleanup: 2m
       environmentDelete: 5m
-      deletionVerification: 5m
+      deletionVerification: 3m
   - name: compose-cluster-repository-backup
     source: lab
     scenarioPath: tests/reliability/scenarios/compose-cluster-repository-backup/compose-cluster-repository-backup.yaml
@@ -93,7 +93,7 @@ scenarios:
       runtimeFiles:
         - {option: composeFiles, source: daemon, path: tests/compose/cluster/compose.yml}
         - {option: composeFiles, source: lab, path: tests/compose/ports.yml}
-    outerTimeout: 45m
+    outerTimeout: 35m
     finalization: *finalization
   - name: k3d-cluster-validation
     source: lab
@@ -106,7 +106,7 @@ scenarios:
         clusterNamePrefix: draft
         digestPinnedImagePolicy: node-pull
         createArguments: [--agents, "3", --timeout, 180s]
-    outerTimeout: 45m
+    outerTimeout: 25m
     finalization: *finalization
   - name: k3d-system-backup-restore
     source: lab
@@ -121,7 +121,7 @@ scenarios:
         createArguments: [--agents, "3", --timeout, 180s]
         consolePortBase: 29191
         objectStoreFixture: minio
-    outerTimeout: 90m
+    outerTimeout: 48m
     finalization: *finalization
   - name: k3d-cluster-repository-restore
     source: lab
@@ -136,5 +136,5 @@ scenarios:
         createArguments: [--agents, "3", --timeout, 180s]
         consolePortBase: 39191
         objectStoreFixture: minio
-    outerTimeout: 90m
+    outerTimeout: 48m
     finalization: *finalization
