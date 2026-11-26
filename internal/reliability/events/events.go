@@ -141,6 +141,9 @@ func validateEvent(event spec.EventSpec) error {
 		}
 	case "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-reconciliation-start", "procedure-inference-reconciliation-await-terminal", "procedure-inference-emulator-assert", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "log-assert", "revision-fence-assert", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-work-assert", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile":
 		return nil
+	case "graph-usage-check":
+		_, err := spec.ParseGraphUsageTarget(event.Target)
+		return err
 	case "host-command":
 		if len(hostCommandTarget(event.Target)) == 0 {
 			return fmt.Errorf("%s requires target.command", event.Type)
@@ -179,7 +182,7 @@ func validateEvent(event spec.EventSpec) error {
 		if stringTarget(event.Target, "actorId") == "" && stringTarget(event.Target, "sourceActorId") == "" {
 			return fmt.Errorf("%s requires target.actorId or target.sourceActorId", event.Type)
 		}
-	case "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-backup-cleanup":
+	case "cluster-backup-repository-create", "cluster-backup-create", "cluster-backup-validate", "cluster-backup-repository-assert", "cluster-backup-repository-delete", "cluster-restore-plan", "cluster-restore-start", "cluster-restore-apply", "cluster-backup-cleanup":
 		return nil
 	case "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "identity-duplicate-principal-replay":
 		return nil

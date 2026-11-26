@@ -17,6 +17,8 @@
         "createdAt": {"type": "string", "format": "date-time"}
       }
     },
+    "lifecycle": {"$ref": "#/$defs/lifecycle"},
+    "approval": {"$ref": "#/$defs/approval"},
     "sourceRoot": {"type": "string", "minLength": 1},
     "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
     "harness": {"$ref": "#/$defs/harness"},
@@ -37,6 +39,36 @@
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "gitObject": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "duration": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"},
+    "lifecycle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phase", "candidateNumbering"],
+      "properties": {
+        "phase": {"enum": ["qualification", "candidate", "protected-acceptance", "publication"]},
+        "candidateNumbering": {"enum": ["unnumbered", "numbered"]},
+        "qualifiedBundleSHA256": {"$ref": "#/$defs/sha256"},
+        "failureDomain": {"enum": ["product-correctness", "release-harness", "execution-identity-provenance", "infrastructure", "protected-provider", "publication"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"phase": {"const": "qualification"}}, "required": ["phase"]},
+          "then": {"properties": {"candidateNumbering": {"const": "unnumbered"}}}
+        },
+        {
+          "if": {"properties": {"phase": {"enum": ["candidate", "protected-acceptance", "publication"]}}, "required": ["phase"]},
+          "then": {"required": ["qualifiedBundleSHA256"], "properties": {"candidateNumbering": {"const": "numbered"}}}
+        }
+      ]
+    },
+    "approval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requiredScopes", "consumption"],
+      "properties": {
+        "requiredScopes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["credential-free-qualification", "product-candidate-construction", "protected-release-gate", "protected-live-provider", "publication-git-tags", "publication-full", "risk-accepted-publication"]}},
+        "consumption": {"const": "one-shot"},
+        "externalApprovalId": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
     "source": {
       "type": "object", "additionalProperties": false,
       "required": ["name", "path", "revision", "tree"],

@@ -275,6 +275,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "log-assert":
 		result, err := executeLogAssertEvent(ctx, r.Environment, event.Target)
 		return map[string]any{"logAssert": result}, err
+	case "graph-usage-check":
+		result, err := executeGraphUsageCheck(ctx, r.Driver, r.Environment, r.Scenario, r.Resources, event.Target)
+		return map[string]any{"graphUsage": result}, err
 	case "revision-fence-assert":
 		result, err := executeRevisionFenceAssertion(ctx, r.Resources, event.Target)
 		return map[string]any{"revisionFence": result}, err
@@ -293,13 +296,13 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 			r.userBackups[userBackupKey(event.Target)] = result
 		}
 		return map[string]any{"userBackup": result}, err
-	case "system-backup-fixture", "cluster-backup-create", "cluster-backup-validate", "cluster-restore-apply", "cluster-restore-verify", "cluster-backup-cleanup":
+	case "system-backup-fixture", "cluster-backup-repository-create", "cluster-backup-create", "cluster-backup-validate", "cluster-backup-repository-assert", "cluster-backup-repository-delete", "cluster-restore-plan", "cluster-restore-start", "cluster-restore-apply", "cluster-restore-verify", "cluster-backup-cleanup":
 		var snapshots []env.EndpointForwardSnapshot
 		if event.Type == "cluster-restore-apply" {
 			snapshots = r.managedEndpointSnapshots()
 		}
 		result, err := executeSystemBackupEvent(ctx, r.Driver, r.Environment, r.Scenario, r.Resources, event.Type, event.Target, r.systemBackups)
-		if event.Type == "system-backup-fixture" || event.Type == "cluster-backup-create" || event.Type == "cluster-restore-apply" {
+		if event.Type == "system-backup-fixture" || event.Type == "cluster-backup-repository-create" || event.Type == "cluster-backup-create" || event.Type == "cluster-restore-start" || event.Type == "cluster-restore-apply" {
 			r.systemBackups[systemBackupKey(event.Target)] = result
 		}
 		payload := map[string]any{"systemBackup": result}

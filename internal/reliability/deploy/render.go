@@ -7,9 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
+)
+
+const (
+	DefaultMinIOImage   = "docker.io/myceldb/mycel-minio-test-helper@sha256:f33b406adb70891f722e0465ec085056b036f8f5494e4eff33317a9612cf24ff"
+	DefaultMinIOMCImage = "docker.io/myceldb/mycel-mc-test-helper@sha256:9646d8b5d019fd20e8f4e1d782b29a56581d51c5a367e7c43156c0faac1a69f0"
 )
 
 type ManifestSet struct {
@@ -58,7 +64,16 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	if err := renderProviderEmulator(&b, scenario, namespace); err != nil {
 		return ManifestSet{}, err
 	}
+	if err := renderObjectStoreCredentials(&b, scenario, namespace); err != nil {
+		return ManifestSet{}, err
+	}
+	if err := renderObjectStoreFixture(&b, scenario, namespace); err != nil {
+		return ManifestSet{}, err
+	}
 	fmt.Fprintf(&b, "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: myceld\n  namespace: %s\nspec:\n  serviceName: myceld\n  replicas: %d\n  selector:\n    matchLabels:\n      app: myceld\n  template:\n    metadata:\n      labels:\n        app: myceld\n    spec:\n      containers:\n        - name: myceld\n          image: %s\n          imagePullPolicy: IfNotPresent\n          command:\n            - /bin/sh\n            - -ec\n            - |\n              ordinal=\"${HOSTNAME##*-}\"\n              export MYCELD_NODE_NAME=\"$HOSTNAME\"\n              export MYCELD_CLUSTER_RAFT_LOCAL_NODE_ID=\"$((ordinal + 1))\"\n              export MYCELD_CLUSTER_BACKEND_ADVERTISE_ADDR=\"$HOSTNAME.myceld.%s.svc.cluster.local:9091\"\n              exec myceld\n          envFrom:\n            - configMapRef:\n                name: myceld-config\n", namespace, cluster.Nodes, cluster.Image, namespace)
+	if objectStoreFixture(scenario) == "minio" {
+		b.WriteString("            - secretRef:\n                name: mycel-object-store-credentials\n")
+	}
 	if len(cluster.Resources.Requests) > 0 || len(cluster.Resources.Limits) > 0 {
 		b.WriteString("          resources:\n")
 		if len(cluster.Resources.Requests) > 0 {
@@ -84,6 +99,39 @@ func RenderKubernetesManifests(scenario spec.ResolvedScenario) (ManifestSet, err
 	}
 	fmt.Fprintf(&b, "        resources:\n          requests:\n            storage: %s\n", storageSize)
 	return ManifestSet{Namespace: namespace, StatefulSet: "myceld", YAML: b.String()}, nil
+}
+
+func objectStoreFixture(scenario spec.ResolvedScenario) string {
+	return strings.TrimSpace(optionString(scenario.Environment.Options, "objectStoreFixture", ""))
+}
+
+func renderObjectStoreCredentials(b *bytes.Buffer, scenario spec.ResolvedScenario, namespace string) error {
+	fixture := objectStoreFixture(scenario)
+	if fixture == "" {
+		return nil
+	}
+	if fixture != "minio" {
+		return fmt.Errorf("objectStoreFixture %q is not supported", fixture)
+	}
+	fmt.Fprintf(b, "apiVersion: v1\nkind: Secret\nmetadata:\n  name: mycel-object-store-credentials\n  namespace: %s\ntype: Opaque\nstringData:\n  AWS_ACCESS_KEY_ID: %q\n  AWS_SECRET_ACCESS_KEY: %q\n---\n", namespace, "mycelminio", "mycelminiosecret")
+	return nil
+}
+
+func renderObjectStoreFixture(b *bytes.Buffer, scenario spec.ResolvedScenario, namespace string) error {
+	fixture := objectStoreFixture(scenario)
+	if fixture == "" {
+		return nil
+	}
+	if fixture != "minio" {
+		return fmt.Errorf("objectStoreFixture %q is not supported", fixture)
+	}
+	image := optionString(scenario.Environment.Options, "objectStoreImage", strings.TrimSpace(os.Getenv("MINIO_IMAGE")))
+	if image == "" {
+		image = DefaultMinIOImage
+	}
+	fmt.Fprintf(b, "apiVersion: v1\nkind: Service\nmetadata:\n  name: minio\n  namespace: %s\nspec:\n  selector:\n    app: minio\n  ports:\n    - name: api\n      port: 9000\n      targetPort: 9000\n---\n", namespace)
+	fmt.Fprintf(b, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: minio\n  namespace: %s\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: minio\n  template:\n    metadata:\n      labels:\n        app: minio\n    spec:\n      containers:\n        - name: minio\n          image: %s\n          imagePullPolicy: IfNotPresent\n          args: [\"server\", \"/data\", \"--address\", \":9000\", \"--console-address\", \":9001\"]\n          env:\n            - name: MINIO_ROOT_USER\n              value: \"mycelminio\"\n            - name: MINIO_ROOT_PASSWORD\n              value: \"mycelminiosecret\"\n          ports:\n            - name: api\n              containerPort: 9000\n          volumeMounts:\n            - name: data\n              mountPath: /data\n      volumes:\n        - name: data\n          emptyDir: {}\n---\n", namespace, image)
+	return nil
 }
 
 func renderProviderEmulator(b *bytes.Buffer, scenario spec.ResolvedScenario, namespace string) error {
@@ -114,6 +162,13 @@ func emulatorDimensions(configured int) int {
 		return configured
 	}
 	return 8
+}
+
+func optionString(options map[string]any, key, fallback string) string {
+	if value, ok := options[key].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return fallback
 }
 
 func sortedResourceKeys(m map[string]string) []string {

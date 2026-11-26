@@ -83,12 +83,26 @@ Live profiles resolve credentials only for non-dry-runs. Required provider-owned
 
 The resolved redacted profile and exact source SHA-256 are written under `provider/`. Finalization always writes `redaction-scan.json`; any prohibited-value finding or scan failure fails the run. See [Provider profiles, budgets, and artifact safety](design/provider-profiles.md).
 
-Release-candidate gates consume one hermetic bundle instead of independent image, profile, or environment overrides. Start from a maintained draft template located above the clean `mycel-lab` and `mycel` source directories, build the harness outside those checkouts, capture exact identities without provisioning, validate it before candidate numbering, then pass the same immutable file to the gate:
+Release-candidate gates consume one hermetic bundle instead of independent image, profile, or environment overrides. Start from a maintained draft template located above the clean `mycel-lab` and `mycel` source directories, build the harness outside those checkouts, capture exact identities without provisioning, validate an unnumbered credential-free qualification bundle before candidate numbering, then create the numbered protected-acceptance bundle from the unchanged inputs:
 
 ```sh
+mycel-lab release-bundle build /candidate/release-bundle-draft.yaml /candidate/qualification-bundle.yaml \
+  --daemon-image 'docker.io/myceldb/mycel@sha256:<64-hex-digest>' \
+  --candidate-id 'qual-<short-identity>' \
+  --lifecycle-phase qualification \
+  --approval-scope credential-free-qualification \
+  --approval-id '<operator-or-ticket-id>' \
+  --approval-reason '<non-secret approval reason>'
+mycel-lab release-bundle validate /candidate/qualification-bundle.yaml
+QUALIFICATION_BUNDLE_SHA256=$(sha256sum /candidate/qualification-bundle.yaml | awk '{print $1}')
 mycel-lab release-bundle build /candidate/release-bundle-draft.yaml /candidate/release-execution-bundle.yaml \
   --daemon-image 'docker.io/myceldb/mycel@sha256:<64-hex-digest>' \
-  --candidate-id '<approved-candidate-id>'
+  --candidate-id '<approved-candidate-id>' \
+  --lifecycle-phase protected-acceptance \
+  --qualified-bundle-sha256 "$QUALIFICATION_BUNDLE_SHA256" \
+  --approval-scope protected-release-gate \
+  --approval-id '<protected-run-id>' \
+  --approval-reason '<non-secret approval reason>'
 mycel-lab release-bundle validate /candidate/release-execution-bundle.yaml
 mycel-lab run suite k3d-procedure-inference-recovery \
   --release-bundle /candidate/release-execution-bundle.yaml \
@@ -96,7 +110,7 @@ mycel-lab run suite k3d-procedure-inference-recovery \
   --artifact-root /candidate/evidence/recovery
 ```
 
-The canonical schema, construction lifecycle, image rules, and fail-closed checks are documented in [Hermetic release execution bundles](design/release-execution-bundles.md). Canonical procedure-inference candidate suites reject their former `:dev` provider-emulator default before any environment use.
+The canonical schema, construction lifecycle, approval scopes, image rules, and fail-closed checks are documented in [Hermetic release execution bundles](design/release-execution-bundles.md). The coordinated candidate/publication state machine and release-manifest contract are documented in [Coordinated release candidate lifecycle](design/release-candidate-lifecycle.md). Canonical procedure-inference candidate suites reject their former `:dev` provider-emulator default before any environment use.
 
 Finalization is fail-closed and bounded. The runner records actor shutdown,
 provider-observation capture when enabled, cluster assertions, the final graph
@@ -210,7 +224,10 @@ mycel-lab run suite k3d-raft-sensitive-gate --dry-run
 mycel-lab run suite k3d-graph-commit-restart-qualification --dry-run
 mycel-lab run suite compose-user-backup-operations --dry-run
 mycel-lab run suite compose-user-backup-restore --dry-run
+mycel-lab run suite compose-cluster-repository-backup --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
+mycel-lab run suite k3d-cluster-repository-restore --dry-run
+mycel-lab run suite k3d-graph-usage-upgrade --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite k3d-semantic-graph-index-recovery --dry-run
@@ -224,17 +241,24 @@ mycel-lab run suite cluster-release-gate --dry-run
 ```
 
 Destructive/operator variants use the same suite names with
-`--confirm-destructive`. Before assigning a release-candidate number, freeze the
-reviewed Lab and daemon source identities and run
-`k3d-graph-commit-restart-qualification` three consecutive times against the
-same immutable daemon digest, supplied as a complete named `@sha256` reference,
-using separate artifact roots and fresh clusters. The suite rejects mutable or
-malformed image identities and requires clean daemon and harness provenance.
-Every member must have zero unresolved ambiguous graph commits and pass the
-authoritative final graph oracle, cleanup, and redaction checks. A source,
-workflow, image, or qualification-harness change
-resets all three members. Qualification is an entry criterion only: its results
-and approvals do not transfer to candidate acceptance gates.
+`--confirm-destructive`. For the v0.25-to-v0.26 graph usage upgrade, follow the
+[two-image scenario instructions](../tests/reliability/scenarios/k3d-graph-usage-upgrade/k3d-graph-usage-upgrade.md)
+and retain its evidence separately from the single-image cluster release gate.
+Before assigning a release-candidate number, freeze the
+reviewed Lab and daemon source identities and run the complete credential-free
+qualification bundle, including `k3d-graph-commit-restart-qualification` where
+required, against the same immutable daemon digest supplied as a complete named
+`@sha256` reference. Historical graph-commit release work required three
+consecutive approved destructive members with separate artifact roots and fresh
+clusters; the same no-transfer rule still applies to any repeated qualification
+sequence. The suite rejects mutable or malformed image identities and requires
+clean daemon and harness provenance. Every member must have zero unresolved
+ambiguous graph commits and pass the authoritative final graph oracle, cleanup,
+and redaction checks. A source, workflow, image, or qualification-harness change
+resets all qualification members. Qualification is an entry criterion only: its
+results and approvals do not transfer to candidate acceptance gates. Numbered
+candidate/protected bundles must record the qualifying bundle SHA-256 in
+`lifecycle.qualifiedBundleSHA256` and consume a fresh one-shot approval scope.
 
 Procedure-inference suites are credential-free but still modify disposable
 Compose/k3d state; issue #50 requires fresh approval before each real run.
@@ -294,9 +318,9 @@ is a native Compose smoke suite for `user-backup-export`,
 environment driver. `compose-user-backup-restore` is the full native Compose
 backup/restore suite with fixture creation, archive staging across a fresh reset,
 restored-data checks, and safety assertions. `k3d-system-backup-restore` is the
-native k3d full-system backup/restore suite with cluster backup metadata checks,
-offline `restore-plan` evidence, PVC replacement evidence, per-ordinal
-`restore-local` execution, and restored workload verification.
+native k3d repository-backed full-system backup/restore suite with external
+repository metadata checks, PVC replacement evidence, per-ordinal
+`restore-repository-local` helper execution, and restored workload verification.
 `k3d-raft-snapshot-pvc-rejoin` is the native k3d forced-snapshot
 same-raft-ID PVC replacement drill: it forces raft snapshots on active quorum
 nodes, deletes and recreates the highest ordinal PVC, validates graph/data-plane

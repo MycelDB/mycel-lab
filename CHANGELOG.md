@@ -6,6 +6,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Added `k3d-graph-usage-upgrade`, a three-member Raft gate for `graph.logical_bytes`: writes before backfill, fail-closed usage reads, exact domain and space totals after reconciliation, and update/delete/restart coverage with separate physical diagnostics (#133).
+- Added machine-readable release lifecycle and one-shot approval controls to release execution bundles, protected workflow bundle construction, and coordinated release-manifest documentation so pre-candidate qualification, candidate acceptance, risk acceptance, and publication remain distinct (MycelDB/mycel#286).
+- Added a Compose MinIO repository-backed cluster backup suite that creates a credential-reference-only S3-compatible backup repository, runs a repository-backed cluster backup, verifies repository-truth list/get/validate/delete/restore-plan flows, checks `backup-set.json` and `COMPLETE` in object storage, and exercises fail-closed missing-`COMPLETE`, corrupt `COMPLETE`, corrupt required-manifest, interrupted-publish-after-node-artifacts, partial-node-upload, denied repository credential-reference, and repository delete failure negative cases.
+- Extended the Compose MinIO repository backup scenario with a clean-target `NEW_CLUSTER_BOOTSTRAP` restore start, polling the asynchronous restore status API until all repository artifacts are staged, applied, and verified.
+- Hardened the k3d PVC restore helper to fail closed unless the freshly-created target PVC mount is empty before applying a repository-backed backup archive.
+- Added k3d MinIO object-store fixture rendering, repository-backed PVC restore helpers, and a `k3d-cluster-repository-restore` suite that captures a repository-backed backup, recreates fresh PVCs without deleting the MinIO repository, restores repository artifacts through helper pods with bounded retry support, boots the restored cluster, and verifies the workload.
+- Added the k3d repository-backed PVC restore scenario to `cluster-release-gate` and the draft release-execution bundle.
+- Added Phase 4 cluster backup validation harness support for expected-invalid backup-set fixtures, including normalized validation error capture for missing `COMPLETE`, manifest checksum mismatch, corrupt required artifact, unsupported required feature, topology mismatch, and raw-secret artifact evidence cases.
+- Staged `COMPLETE` markers alongside `backup-set.json` and node artifacts when validating host-captured cluster backup sets.
+
+### Changed
+
+- Updated Lab backup/restore scenarios for the Mycel v0.25 repository-only contract: `k3d-system-backup-restore`, `k3d-procedure-inference-backup-restore`, and the release gate now use MinIO-backed repository backup sets instead of daemon-local backup directories, and Lab builds against `mycel-go-sdk v0.25.0` deployment-wide backup/restore RPC names.
+- Switched repository-backed backup CLI usage from the hidden `admin backup cluster ...` compatibility alias to the public deployment-wide `admin backup ...` commands.
+
+### Fixed
+
+- Fixed repository-backed backup scenarios to decode the `operation` response from `mycel admin backup start --wait` on Mycel v0.25 and later. A successful backup no longer fails the cluster release gate with an empty state; node inventory and Raft barrier checks still apply.
+- Fixed repository backup-set presence checks to read only backup-set IDs from `mycel admin backup list`, so they work with both numeric and legacy string states.
+- Fixed the cluster release-gate execution-bundle draft to bind the standard Compose cluster port overlay so bundled Compose endpoints match the declared admin gRPC ports.
+
 ## [v0.23.0] - 2026-11-17
 
 ### Added

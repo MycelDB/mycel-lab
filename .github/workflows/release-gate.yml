@@ -15,6 +15,10 @@ on:
         description: Immutable candidate identity approved for this one-shot run
         required: true
         type: string
+      qualification_bundle_sha256:
+        description: SHA-256 of the credential-free qualification bundle that permitted candidate numbering
+        required: true
+        type: string
       reason:
         description: Approved release-gate reason
         required: true
@@ -49,12 +53,14 @@ jobs:
           DAEMON_REF: ${{ inputs.daemon_ref }}
           DAEMON_IMAGE: ${{ inputs.daemon_image }}
           CANDIDATE_ID: ${{ inputs.candidate_id }}
+          QUALIFICATION_BUNDLE_SHA256: ${{ inputs.qualification_bundle_sha256 }}
           RUN_REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
           [[ "$DAEMON_REF" =~ ^[0-9a-f]{40}$ ]]
           [[ "$DAEMON_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
           [[ "$CANDIDATE_ID" =~ ^([a-z0-9]|[a-z0-9][a-z0-9-]{0,30}[a-z0-9])$ ]]
+          [[ "$QUALIFICATION_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ -n "$RUN_REASON" ]]
       - name: Check out exact daemon scenario source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -123,12 +129,19 @@ jobs:
         env:
           DAEMON_IMAGE: ${{ inputs.daemon_image }}
           CANDIDATE_ID: ${{ inputs.candidate_id }}
+          QUALIFICATION_BUNDLE_SHA256: ${{ inputs.qualification_bundle_sha256 }}
+          RUN_REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
           cp mycel-lab/tests/reliability/release-bundles/cluster-release-gate.draft.yaml.tmpl release-bundle-draft.yaml
           "$RUNNER_TEMP/bin/mycel-lab" release-bundle build release-bundle-draft.yaml release-bundle.yaml \
             --daemon-image "$DAEMON_IMAGE" \
-            --candidate-id "$CANDIDATE_ID"
+            --candidate-id "$CANDIDATE_ID" \
+            --lifecycle-phase protected-acceptance \
+            --qualified-bundle-sha256 "$QUALIFICATION_BUNDLE_SHA256" \
+            --approval-scope protected-release-gate \
+            --approval-id "github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            --approval-reason "$RUN_REASON"
       - name: Run approved cluster release gate once
         id: release_run
         working-directory: mycel-lab

@@ -387,9 +387,58 @@ func applyCandidateAllocations(bundle *releasebundle.Bundle, candidateID string)
 	return nil
 }
 
+func applyReleaseLifecycleOptions(bundle *releasebundle.Bundle, args []string) error {
+	phase := strings.TrimSpace(flagValue(args, "--lifecycle-phase"))
+	numbering := strings.TrimSpace(flagValue(args, "--candidate-numbering"))
+	qualifiedBundle := strings.TrimSpace(flagValue(args, "--qualified-bundle-sha256"))
+	approvalID := strings.TrimSpace(flagValue(args, "--approval-id"))
+	approvalReason := strings.TrimSpace(flagValue(args, "--approval-reason"))
+	approvalScopes := flagValues(args, "--approval-scope")
+	for index := range approvalScopes {
+		approvalScopes[index] = strings.TrimSpace(approvalScopes[index])
+	}
+	if phase != "" && numbering == "" {
+		if phase == releasebundle.LifecyclePhaseQualification {
+			numbering = releasebundle.CandidateNumberingUnnumbered
+		} else {
+			numbering = releasebundle.CandidateNumberingNumbered
+		}
+	}
+	if phase != "" || numbering != "" || qualifiedBundle != "" {
+		if bundle.Lifecycle == nil {
+			bundle.Lifecycle = &releasebundle.LifecycleBinding{}
+		}
+		if phase != "" {
+			bundle.Lifecycle.Phase = phase
+		}
+		if numbering != "" {
+			bundle.Lifecycle.CandidateNumbering = numbering
+		}
+		if qualifiedBundle != "" {
+			bundle.Lifecycle.QualifiedBundleSHA256 = qualifiedBundle
+		}
+	}
+	if len(approvalScopes) > 0 || approvalID != "" || approvalReason != "" {
+		if bundle.Approval == nil {
+			bundle.Approval = &releasebundle.ApprovalBinding{}
+		}
+		if len(approvalScopes) > 0 {
+			bundle.Approval.RequiredScopes = approvalScopes
+		}
+		bundle.Approval.Consumption = releasebundle.ApprovalConsumptionOneShot
+		if approvalID != "" {
+			bundle.Approval.ExternalApprovalID = approvalID
+		}
+		if approvalReason != "" {
+			bundle.Approval.Reason = approvalReason
+		}
+	}
+	return nil
+}
+
 func runReleaseBundle(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelp(args[0]) {
-		fmt.Fprintln(stdout, "Usage: mycel-lab release-bundle <build <draft.yaml> <output.yaml>|validate <bundle.yaml>>")
+		fmt.Fprintln(stdout, "Usage: mycel-lab release-bundle <build <draft.yaml> <output.yaml> [--daemon-image <ref>] [--candidate-id <id>] [--lifecycle-phase <phase>] [--approval-scope <scope>]|validate <bundle.yaml>>")
 		return 0
 	}
 	if args[0] == "build" {
@@ -418,6 +467,10 @@ func runReleaseBundle(args []string, stdout, stderr io.Writer) int {
 		bundle.Metadata.Name = "release-execution-" + candidateID
 		bundle.Metadata.CandidateID = candidateID
 		bundle.Metadata.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := applyReleaseLifecycleOptions(bundle, args); err != nil {
+			fmt.Fprintf(stderr, "release-bundle build: %v\n", err)
+			return 2
+		}
 		if err := applyCandidateAllocations(bundle, candidateID); err != nil {
 			fmt.Fprintf(stderr, "release-bundle build: %v\n", err)
 			return 2
@@ -719,7 +772,7 @@ func flagTakesValue(arg string) bool {
 		return false
 	}
 	switch arg {
-	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base", "--image", "--provider-profile", "--release-bundle", "--environment-driver", "--environment-namespace", "--environment-option", "--daemon-image", "--candidate-id":
+	case "--database-url", "--artifact-root", "--profile-dir", "--output", "--version", "--console-port-base", "--image", "--provider-profile", "--release-bundle", "--environment-driver", "--environment-namespace", "--environment-option", "--daemon-image", "--candidate-id", "--lifecycle-phase", "--candidate-numbering", "--qualified-bundle-sha256", "--approval-scope", "--approval-id", "--approval-reason":
 		return true
 	default:
 		return false

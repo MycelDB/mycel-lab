@@ -819,8 +819,9 @@ func TestClusterReleaseGateDigestOverrideUsesNodePullForEveryK3DScenario(t *test
 		t.Fatalf("RunSuiteFile() error=%v", err)
 	}
 	remaining := map[string]struct{}{
-		"k3d-cluster-validation":    {},
-		"k3d-system-backup-restore": {},
+		"k3d-cluster-validation":         {},
+		"k3d-system-backup-restore":      {},
+		"k3d-cluster-repository-restore": {},
 	}
 	for _, scenarioResult := range result.Results {
 		if _, ok := remaining[scenarioResult.ScenarioName]; !ok {
@@ -1262,6 +1263,25 @@ func TestFinalClusterAssertionsWaitForHealthConvergence(t *testing.T) {
 	}
 	if !report.OK || report.Attempts < 2 {
 		t.Fatalf("report=%+v, want convergence after retries", report)
+	}
+}
+
+func TestFinalClusterAssertionsAllowListedDegradedHealthWarnings(t *testing.T) {
+	sink, err := artifacts.NewSink(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSink() error=%v", err)
+	}
+	scenario := spec.ResolvedScenario{
+		Cluster: spec.ClusterSpec{Nodes: 2},
+		Assertions: map[string]any{"final": map[string]any{
+			"requireHealthyCluster":              true,
+			"allowDegradedHealthWarningContains": []any{"raft groups without leaders"},
+		}},
+	}
+	nodes := []env.Node{{Name: "myceld-0", Ordinal: 0}, {Name: "myceld-1", Ordinal: 1}}
+	driver := &clusterAssertionDriver{healthStatuses: []string{"degraded", "degraded"}}
+	if err := runFinalClusterAssertions(context.Background(), sink, scenario, driver, env.Environment{Name: "test", Driver: "test"}, nodes, true); err != nil {
+		t.Fatalf("runFinalClusterAssertions() error=%v", err)
 	}
 }
 

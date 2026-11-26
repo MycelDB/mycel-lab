@@ -81,10 +81,10 @@ func TestProcedureInferenceBackupRestoreScenarioRecoveryFences(t *testing.T) {
 		t.Fatalf("post-restore recovery fence=%+v", recovery)
 	}
 	expectedSequences := map[string]string{
-		"capture-system-backup":                 "cluster-backup-create,cluster-backup-validate,procedure-inference-emulator-assert",
+		"capture-system-backup":                 "cluster-backup-repository-create,cluster-backup-create,cluster-backup-validate,procedure-inference-emulator-assert",
 		"create-post-backup-negative-control":   "procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert",
 		"restore-fresh-pvcs":                    "cluster-restore-apply,cluster-recovery-wait,procedure-inference-emulator-assert",
-		"verify-restored-ledger-and-watermarks": "cluster-restore-verify,procedure-inference-await-terminal,procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert,procedure-inference-control,procedure-inference-emulator-assert,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert,procedure-inference-capacity-diagnostics-assert,cluster-backup-cleanup",
+		"verify-restored-ledger-and-watermarks": "cluster-restore-verify,procedure-inference-await-terminal,procedure-inference-control,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert,procedure-inference-control,procedure-inference-emulator-assert,procedure-inference-node-create,procedure-inference-await-terminal,procedure-inference-emulator-assert,procedure-inference-capacity-diagnostics-assert,cluster-backup-repository-delete",
 	}
 	for phaseName, expected := range expectedSequences {
 		events := phases[phaseName].Events
@@ -109,7 +109,7 @@ func TestProcedureInferenceBackupRestoreScenarioRecoveryFences(t *testing.T) {
 			t.Fatalf("provider exclusion assertion at index %d is incomplete: %+v", index, final.Events[index])
 		}
 	}
-	if final.Events[10].Target["minimumRequests"] != 1 || final.Events[10].Target["maximumRequests"] != 1 || final.Events[12].Type != "cluster-backup-cleanup" {
+	if final.Events[10].Target["minimumRequests"] != 1 || final.Events[10].Target["maximumRequests"] != 1 || final.Events[12].Type != "cluster-backup-repository-delete" {
 		t.Fatalf("final provider and cleanup bounds are incomplete: %+v", final.Events[10:])
 	}
 	finalAssertions, _ := scenario.Assertions["final"].(map[string]any)

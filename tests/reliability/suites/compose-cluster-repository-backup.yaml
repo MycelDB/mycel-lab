@@ -1,0 +1,10 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: compose-cluster-repository-backup
+  description: Compose MinIO repository-backed cluster backup, validation, and restore planning suite.
+scenarios:
+  - path: ../scenarios/compose-cluster-repository-backup/compose-cluster-repository-backup.yaml
+execution:
+  mode: sequential
+  stopOnFailure: true

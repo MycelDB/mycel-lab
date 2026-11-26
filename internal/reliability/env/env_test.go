@@ -482,6 +482,68 @@ func TestK3DDriverWaitPVCsChecksEveryOrdinalPVC(t *testing.T) {
 	}
 }
 
+func TestK3DDriverRestoreBackupSetOrdinalToPVCProvesTargetEmpty(t *testing.T) {
+	runner := &fakeRunner{}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test"}
+	_, err := driver.RestoreBackupSetOrdinalToPVC(context.Background(), environment, RestoreBackupSetRequest{
+		PVCName:       "data-myceld-0",
+		BackupSetPath: "/tmp/backup-set.json",
+		Ordinal:       0,
+		Image:         "myceldb/mycel:test",
+		Artifacts: []RestoreArtifact{
+			{Ordinal: 0, ArchiveName: "node-0.tar", LocalArchive: "/tmp/node-0.tar", ManifestName: "node-0.manifest.json", LocalManifest: "/tmp/node-0.manifest.json"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RestoreBackupSetOrdinalToPVC() error=%v", err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, want := range []string{"kubectl --context k3d-mycel-lab-test apply -f", "kubectl --context k3d-mycel-lab-test -n test-ns cp /tmp/backup-set.json", "test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\"", "admin backup restore-local", "--ordinal 0 --data-dir /data/mycel"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("RestoreBackupSetOrdinalToPVC commands missing %q\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "find /data/mycel -mindepth 1 -maxdepth 1 -exec rm -rf") {
+		t.Fatalf("restore-local helper must not clear non-empty target PVCs before proof:\n%s", joined)
+	}
+}
+
+func TestK3DDriverRestoreRepositoryBackupSetRetriesHelperFailure(t *testing.T) {
+	runner := &repositoryRestoreRetryRunner{execFailures: 1}
+	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
+	environment := Environment{Name: "mycel-lab-test", Driver: "k3d", Namespace: "test-ns", Context: "k3d-mycel-lab-test"}
+	results, err := driver.RestoreRepositoryBackupSetToPVCs(context.Background(), environment, RestoreRepositoryBackupSetRequest{
+		StatefulSet:      "myceld",
+		Bucket:           "mycel-backups",
+		RepositoryPrefix: "runs/test",
+		BackupSetPrefix:  "runs/test/backup-sets/backup-set-test",
+		BackupSetID:      "backup-set-test",
+		EndpointURI:      "http://minio:9000",
+		Region:           "us-east-1",
+		AccessKeyValue:   "minio-access",
+		SecretKeyValue:   "minio-secret",
+		Artifacts:        []RestoreArtifact{{Ordinal: 0, PodName: "myceld-0"}},
+		Image:            "myceldb/mycel:test",
+		HelperRetries:    1,
+	})
+	if err != nil {
+		t.Fatalf("RestoreRepositoryBackupSetToPVCs() error=%v results=%+v", err, results)
+	}
+	if runner.execCalls != 2 || len(results) != 1 || strings.TrimSpace(results[0].Stderr) != "" {
+		t.Fatalf("execCalls=%d results=%+v, want one retry and clean final evidence", runner.execCalls, results)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if strings.Count(joined, "delete pod restore-repo-data-myceld-0") != 2 {
+		t.Fatalf("each helper attempt should be cleaned up:\n%s", joined)
+	}
+	for _, want := range []string{"test -z \"$(find /data/mycel -mindepth 1 -maxdepth 1 -print -quit)\"", "admin backup restore-repository-local"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("repository restore commands missing %q\n%s", want, joined)
+		}
+	}
+}
+
 func TestK3DDriverScaleStatefulSetWaitsOnlyDesiredOrdinals(t *testing.T) {
 	runner := &fakeRunner{}
 	driver := K3DDriver{Confirmed: true, Runner: runner, WaitTimeout: time.Second}
@@ -551,6 +613,12 @@ func TestK3DDriverUpdateStatefulSetImageDoesNotBypassMalformedDigestReference(t 
 }
 
 type fakeRunner struct{ commands []string }
+
+type repositoryRestoreRetryRunner struct {
+	commands     []string
+	execFailures int
+	execCalls    int
+}
 
 type k3dAPIReadinessRunner struct {
 	commands          []string
@@ -687,6 +755,20 @@ func (r *composeCaptureRunner) Run(_ context.Context, name string, args ...strin
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
 	cmd := executil.ShellCommand(name, args...)
 	r.commands = append(r.commands, cmd)
+	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
+}
+
+func (r *repositoryRestoreRetryRunner) Run(_ context.Context, name string, args ...string) (executil.Result, error) {
+	cmd := executil.ShellCommand(name, args...)
+	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, " exec restore-repo-data-myceld-0 ") && strings.Contains(cmd, "restore-repository-local") {
+		r.execCalls++
+		if r.execFailures > 0 {
+			r.execFailures--
+			return executil.Result{Command: cmd, Stderr: "transient helper failure"}, errors.New("transient helper failure")
+		}
+		return executil.Result{Command: cmd, Stdout: `{"state":"restored"}`}, nil
+	}
 	return executil.Result{Command: cmd, Stdout: "ok\n"}, nil
 }
 

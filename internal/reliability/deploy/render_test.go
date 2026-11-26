@@ -22,6 +22,28 @@ func TestRenderKubernetesManifestsIncludesClusterEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestRenderKubernetesManifestsIncludesObjectStoreCredentialsForMinIOFixture(t *testing.T) {
+	scenario, err := catalog.ResolveScenarioFile("../../../tests/reliability/scenarios/k3d-cluster-repository-restore/k3d-cluster-repository-restore.yaml", catalog.ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveScenarioFile() error = %v", err)
+	}
+	manifests, err := RenderKubernetesManifests(scenario)
+	if err != nil {
+		t.Fatalf("RenderKubernetesManifests() error = %v", err)
+	}
+	checks := []string{
+		"name: mycel-object-store-credentials",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"secretRef:",
+	}
+	for _, check := range checks {
+		if !strings.Contains(manifests.YAML, check) {
+			t.Fatalf("manifest missing %q\n%s", check, manifests.YAML)
+		}
+	}
+}
+
 func TestRenderKubernetesManifestsReflectClusterProfile(t *testing.T) {
 	scenario, err := catalog.ResolveScenarioFile("../../../tests/reliability/scenarios/raft-3-node-short-outage/raft-3-node-short-outage.yaml", catalog.ResolveOptions{})
 	if err != nil {
