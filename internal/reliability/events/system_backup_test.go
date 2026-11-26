@@ -308,6 +308,27 @@ func TestRepositoryValidationBlockersUseSanitizedReasons(t *testing.T) {
 	}
 }
 
+func TestRepositoryBackupSetListedAcceptsCurrentAndLegacyListResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stdout string
+		listed bool
+	}{
+		{name: "v0.25 numeric state", stdout: `{"backup_sets":[{"backup_set_id":"backup-set-good","state":7,"expected_node_count":3}]}`, listed: true},
+		{name: "legacy string state", stdout: `{"backup_sets":[{"backup_set_id":"backup-set-good","state":"succeeded"}]}`, listed: true},
+		{name: "different backup set", stdout: `{"backup_sets":[{"backup_set_id":"backup-set-other","state":7}]}`},
+		{name: "empty repository", stdout: `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			driver := &repositoryNegativeDriver{listStdout: tc.stdout}
+			listed, stdout, err := repositoryBackupSetListed(context.Background(), driver, env.Environment{Driver: "compose"}, "repo-minio", "backup-set-good", 0)
+			if err != nil || listed != tc.listed || stdout != tc.stdout {
+				t.Fatalf("repositoryBackupSetListed() = (%t, %q, %v), want (%t, %q, nil)", listed, stdout, err, tc.listed, tc.stdout)
+			}
+		})
+	}
+}
+
 func TestClusterBackupRepositoryDeleteVerifiesRepositoryTruth(t *testing.T) {
 	driver := &repositoryNegativeDriver{}
 	backup := SystemBackupOperationResult{BackupSetID: "backup-set-good", RepositoryID: "repo-minio", RepositoryBucket: "mycel-backups", RepositoryBackupSetPrefix: "runs/test/backup-sets/backup-set-good"}
@@ -737,6 +758,7 @@ type repositoryNegativeDriver struct {
 	objectCommands []string
 	execCommands   []string
 	listCalls      int
+	listStdout     string
 	validateCalls  int
 	deleteCalls    int
 	deleteErr      error
@@ -768,7 +790,7 @@ func (d *repositoryNegativeDriver) Exec(_ context.Context, _ env.Environment, _ 
 	}
 	if strings.Contains(cmd, "admin backup list") {
 		d.listCalls++
-		return env.ExecResult{Command: cmd, Stdout: `{"backup_sets":[]}`}, nil
+		return env.ExecResult{Command: cmd, Stdout: firstNonEmpty(d.listStdout, `{"backup_sets":[]}`)}, nil
 	}
 	if strings.Contains(cmd, "admin backup validate") {
 		d.validateCalls++

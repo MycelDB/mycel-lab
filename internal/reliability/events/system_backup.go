@@ -147,18 +147,6 @@ func decodeClusterBackupStartResponse(raw []byte) (clusterBackupStatus, error) {
 	return *response.Status, nil
 }
 
-type clusterBackupListResponse struct {
-	BackupSets []struct {
-		BackupSetID  string `json:"backup_set_id"`
-		RepositoryID string `json:"repository_id"`
-		State        string `json:"state"`
-		ManifestURI  string `json:"manifest_uri"`
-		Manifest     struct {
-			CompleteMarkerURI string `json:"complete_marker_uri"`
-		} `json:"manifest"`
-	} `json:"backup_sets"`
-}
-
 type clusterRestorePlanResponse struct {
 	Plan struct {
 		RestorePlanID string `json:"restore_plan_id"`
@@ -821,7 +809,12 @@ func repositoryBackupSetListed(ctx context.Context, driver env.EnvironmentDriver
 	if err != nil {
 		return false, execResult.Stdout, err
 	}
-	var response clusterBackupListResponse
+	// Only the backup-set IDs matter here; the CLI's state encoding differs across versions.
+	var response struct {
+		BackupSets []struct {
+			BackupSetID string `json:"backup_set_id"`
+		} `json:"backup_sets"`
+	}
 	if err := json.Unmarshal([]byte(execResult.Stdout), &response); err != nil {
 		return false, execResult.Stdout, fmt.Errorf("decode repository backup-set list response: %w", err)
 	}
