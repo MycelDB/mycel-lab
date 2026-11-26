@@ -227,6 +227,7 @@ mycel-lab run suite compose-user-backup-restore --dry-run
 mycel-lab run suite compose-cluster-repository-backup --dry-run
 mycel-lab run suite k3d-system-backup-restore --dry-run
 mycel-lab run suite k3d-cluster-repository-restore --dry-run
+mycel-lab run suite k3d-graph-usage-upgrade --dry-run
 mycel-lab run suite k3d-raft-snapshot-pvc-rejoin --dry-run
 mycel-lab run suite k3d-commonfolio-stale-replay-recovery --dry-run
 mycel-lab run suite k3d-semantic-graph-index-recovery --dry-run
@@ -240,7 +241,10 @@ mycel-lab run suite cluster-release-gate --dry-run
 ```
 
 Destructive/operator variants use the same suite names with
-`--confirm-destructive`. Before assigning a release-candidate number, freeze the
+`--confirm-destructive`. For the v0.25-to-v0.26 graph usage upgrade, follow the
+[two-image scenario instructions](../tests/reliability/scenarios/k3d-graph-usage-upgrade/k3d-graph-usage-upgrade.md)
+and retain its evidence separately from the single-image cluster release gate.
+Before assigning a release-candidate number, freeze the
 reviewed Lab and daemon source identities and run the complete credential-free
 qualification bundle, including `k3d-graph-commit-restart-qualification` where
 required, against the same immutable daemon digest supplied as a complete named

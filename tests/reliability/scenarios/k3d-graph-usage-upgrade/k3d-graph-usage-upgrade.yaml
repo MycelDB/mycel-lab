@@ -1,0 +1,119 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: k3d-graph-usage-upgrade
+  description: Qualify graph.logical_bytes on three Raft members after a v0.25 upgrade with graph writes before explicit backfill.
+seed: 260133
+environment:
+  driver: k3d
+  namespace: mycel-graph-usage-upgrade
+  options:
+    clusterNamePrefix: mlab-usage-upgrade
+    createArguments: [--agents, "3", --timeout, 180s]
+    consolePortBase: 39401
+    digestPinnedImagePolicy: node-pull
+  capabilities:
+    required: [per-node-endpoints, node-exec, image-upgrade, node-restart]
+clusterRef: raft-3-node
+clusterOverrides:
+  # Official Mycel v0.25.0 multi-platform image index.
+  image: docker.io/myceldb/mycel@sha256:db7070b931e9e639c0cae44441e5846c5ddbadc2ca16fceef22b66f0fa9826da
+  raft:
+    partitionCount: 8
+actorGroups:
+  - name: usage-fixture
+    profileRef: semantic-controller
+    count: 1
+    # semantic-control is provisioned but does not run a background workload.
+    rate: {mode: per-actor, commitsPerSecond: 1}
+phases:
+  - name: seed-v025-and-verify-legacy-counters
+    duration: 1s
+    events:
+      - type: semantic-node-create
+        target:
+          actorGroup: usage-fixture
+          nodeId: 00000000-0000-4000-8000-000000000133
+          text: abcdef
+      - type: semantic-node-create
+        target:
+          actorGroup: usage-fixture
+          nodeId: 00000000-0000-4000-8000-000000000134
+          text: 世界
+          properties:
+            ignored_key: ["é", {ignored_boolean_key: true, ignored_number_key: 42, ignored_null_key: null}]
+      - type: graph-usage-check
+        target: {actorGroup: usage-fixture, mode: legacy, expectedPayloadBytes: [6, 14]}
+  - name: upgrade-with-legacy-data-in-place
+    duration: 1s
+    events:
+      - type: statefulset-image-upgrade
+        target:
+          image: docker.io/myceldb/mycel:v0.26.0
+          rolloutTimeout: 10m
+      - type: cluster-recovery-wait
+        target: {timeout: 3m, interval: 2s, requireZeroApplyLag: true}
+    outcome:
+      availability: expected-degradation
+  - name: write-before-backfill-and-check-fail-closed
+    duration: 1s
+    events:
+      - type: semantic-node-create
+        target:
+          actorGroup: usage-fixture
+          nodeId: 00000000-0000-4000-8000-000000000135
+          text: new
+      - type: semantic-node-update
+        target:
+          actorGroup: usage-fixture
+          nodeId: 00000000-0000-4000-8000-000000000133
+          text: x
+      - type: cluster-recovery-wait
+        target: {timeout: 3m, interval: 2s, requireZeroApplyLag: true}
+      - type: graph-usage-check
+        target: {actorGroup: usage-fixture, mode: pending, expectedPayloadBytes: [1, 14, 3]}
+  - name: reconcile-and-verify-exact
+    duration: 1s
+    events:
+      - type: graph-usage-check
+        target: {actorGroup: usage-fixture, mode: backfill, expectedPayloadBytes: [1, 14, 3]}
+  - name: verify-post-backfill-update
+    duration: 1s
+    events:
+      - type: semantic-node-update
+        target:
+          actorGroup: usage-fixture
+          nodeId: 00000000-0000-4000-8000-000000000133
+          text: rené
+      - type: graph-usage-check
+        target: {actorGroup: usage-fixture, mode: exact, expectedPayloadBytes: [5, 14, 3]}
+  - name: restart-and-verify-persisted-bytes
+    duration: 1s
+    events:
+      - type: rolling-restart
+        target: {statefulSet: myceld}
+      - type: cluster-recovery-wait
+        target: {timeout: 3m, interval: 2s, requireZeroApplyLag: true}
+      - type: graph-usage-check
+        target: {actorGroup: usage-fixture, mode: exact, expectedPayloadBytes: [5, 14, 3]}
+    outcome:
+      availability: expected-degradation
+  - name: verify-post-restart-delete-and-separate-diagnostics
+    duration: 1s
+    events:
+      - type: semantic-node-delete
+        target:
+          actorGroup: usage-fixture
+          nodeId: 00000000-0000-4000-8000-000000000135
+      - type: graph-usage-check
+        target: {actorGroup: usage-fixture, mode: exact, expectedPayloadBytes: [5, 14], diagnostic: true}
+assertions:
+  final:
+    requireHealthyCluster: true
+    requireSharedClusterIdentity: true
+    healthConvergenceTimeout: 3m
+    healthConvergenceInterval: 2s
+artifacts:
+  collectScenarioSpec: true
+  collectActorEvents: true
+  collectKubernetesState: true

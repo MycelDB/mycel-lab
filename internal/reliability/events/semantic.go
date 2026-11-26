@@ -139,6 +139,14 @@ type SemanticReliabilityEvidence struct {
 
 func executeSemanticEvent(ctx context.Context, resources *provision.ScenarioResources, eventType string, target map[string]any) (any, error) {
 	if resources == nil || resources.Semantic == nil {
+		// Finite graph-only scenarios can reuse these mutations with an
+		// explicitly provisioned actor, but cannot use semantic scopes or captures.
+		switch eventType {
+		case "semantic-node-create", "semantic-node-update", "semantic-node-delete":
+			if resources != nil && targetString(target, "actorGroup") != "" && targetString(target, "scope") == "" && targetString(target, "captureRevisionAs") == "" {
+				return executeSemanticGraphMutation(ctx, resources, eventType, target)
+			}
+		}
 		return nil, errors.New("semantic resources are not provisioned")
 	}
 	var scopeErr error

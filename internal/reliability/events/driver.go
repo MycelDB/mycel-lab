@@ -275,6 +275,9 @@ func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (m
 	case "log-assert":
 		result, err := executeLogAssertEvent(ctx, r.Environment, event.Target)
 		return map[string]any{"logAssert": result}, err
+	case "graph-usage-check":
+		result, err := executeGraphUsageCheck(ctx, r.Driver, r.Environment, r.Scenario, r.Resources, event.Target)
+		return map[string]any{"graphUsage": result}, err
 	case "revision-fence-assert":
 		result, err := executeRevisionFenceAssertion(ctx, r.Resources, event.Target)
 		return map[string]any{"revisionFence": result}, err
