@@ -375,40 +375,63 @@ func callScalingSearch(ctx context.Context, client *mycel.Client, req *clientv1.
 	cancel()
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded:
-		sample.Outcome = semanticbench.Timeout
+		sample.Outcome, sample.Reason = semanticbench.Timeout, "rpc-DeadlineExceeded"
 	case err != nil:
-		sample.Outcome = semanticbench.RPCError
-	case !validScalingHits(response, req, axis, generation, candidates):
-		sample.Outcome = semanticbench.UnexpectedResponse
+		sample.Outcome, sample.Reason = semanticbench.RPCError, "rpc-"+status.Code(err).String()
+	default:
+		if reason := scalingResponseMismatch(response, req, axis, generation, candidates); reason != "" {
+			sample.Outcome, sample.Reason = semanticbench.UnexpectedResponse, reason
+		}
 	}
 	return sample
 }
 
-func validScalingHits(response *clientv1.SemanticSearchResponse, req *clientv1.SemanticSearchRequest, axis int, generation uint64, candidates int) bool {
-	if len(response.GetResults()) != spec.ScalingTopK || len(response.GetWarnings()) != 0 || int(response.GetExaminedSemanticCandidates()) != candidates || int(response.GetEligibleSemanticCandidates()) != candidates || (response.GetNextPageToken() != "") != (candidates > spec.ScalingTopK) {
-		return false
+func scalingResponseMismatch(response *clientv1.SemanticSearchResponse, req *clientv1.SemanticSearchRequest, axis int, generation uint64, candidates int) string {
+	switch {
+	case response == nil:
+		return "missing-search-response"
+	case len(response.GetWarnings()) != 0:
+		return "search-response-warning"
+	case len(response.GetResults()) != spec.ScalingTopK:
+		return "unexpected-result-count"
+	case int(response.GetExaminedSemanticCandidates()) != candidates || int(response.GetEligibleSemanticCandidates()) != candidates:
+		return "unexpected-candidate-count"
+	case (response.GetNextPageToken() != "") != (candidates > spec.ScalingTopK):
+		return "unexpected-page-continuation"
 	}
 	for i, hit := range response.GetResults() {
 		want := scalingNodeID(axis*spec.ScalingTopK + i)
 		p := hit.GetProvenance()
-		if hit.GetNodeId() != want || hit.GetNode().GetNodeId() != want || hit.GetNode().GetDomainId() != req.GetDomainId() || hit.GetSemanticRuleId() != req.GetSemanticRuleId() || hit.GetEmbeddingBindingKey() != req.GetEmbeddingBindingKey() || hit.GetRecordId() == "" || p.GetDimensions() != scalingDimensions || p.GetSemanticGeneration() != generation || math.IsNaN(hit.GetScore()) || math.Abs(hit.GetScore()-1) > 1e-9 || hit.GetNode().GetPayload().GetFields()["text"].GetStringValue() != req.GetQuery()+" "+req.GetQuery() {
-			return false
+		switch {
+		case hit.GetNodeId() != want || hit.GetNode().GetNodeId() != want:
+			return "unexpected-result-identity-or-order"
+		case hit.GetNode().GetDomainId() != req.GetDomainId() || hit.GetSemanticRuleId() != req.GetSemanticRuleId() || hit.GetEmbeddingBindingKey() != req.GetEmbeddingBindingKey():
+			return "unexpected-result-scope"
+		case hit.GetRecordId() == "" || p.GetDimensions() != scalingDimensions || p.GetSemanticGeneration() != generation:
+			return "unexpected-result-provenance"
+		case math.IsNaN(hit.GetScore()) || math.Abs(hit.GetScore()-1) > 1e-9:
+			return "unexpected-result-score"
+		case hit.GetNode().GetPayload().GetFields()["text"].GetStringValue() != req.GetQuery()+" "+req.GetQuery():
+			return "unexpected-result-payload"
 		}
 	}
-	return true
+	return ""
 }
 
 func measureScalingWorkload(ctx context.Context, clients, goal int, requestTimeout time.Duration, query func(context.Context, int, int) semanticbench.Sample) semanticbench.Workload {
 	// Warm up each connection with the entire mix before opening the timed
 	// window. A warm-up error isn't a timed sample or a successful benchmark.
-	warm := runScalingQueries(ctx, clients, semanticbench.WarmupsPerClient, requestTimeout, query)
+	warm := semanticbench.SummarizeWarmup(runScalingQueries(ctx, clients, semanticbench.WarmupsPerClient, requestTimeout, query))
+	warmupReason := ""
 	if ctx.Err() != nil {
-		return semanticbench.Summarize(clients, goal, 0, nil, "warmup-budget-expired")
+		warmupReason = "warmup-budget-expired"
+	} else if len(warm.Failures) != 0 {
+		warmupReason = "warmup-response-unverified"
 	}
-	for _, sample := range warm {
-		if sample.Outcome != semanticbench.Success {
-			return semanticbench.Summarize(clients, goal, 0, nil, "warmup-response-unverified")
-		}
+	if warmupReason != "" {
+		w := semanticbench.Summarize(clients, goal, 0, nil, warmupReason)
+		w.Warmup = warm
+		return w
 	}
 	started := time.Now()
 	samples := runScalingQueries(ctx, clients, goal/clients, requestTimeout, query)
@@ -416,7 +439,9 @@ func measureScalingWorkload(ctx context.Context, clients, goal int, requestTimeo
 	if ctx.Err() != nil {
 		reason = "measurement-budget-expired"
 	}
-	return semanticbench.Summarize(clients, goal, time.Since(started), samples, reason)
+	w := semanticbench.Summarize(clients, goal, time.Since(started), samples, reason)
+	w.Warmup = warm
+	return w
 }
 
 func runScalingQueries(ctx context.Context, clients, perClient int, requestTimeout time.Duration, query func(context.Context, int, int) semanticbench.Sample) []semanticbench.Sample {

@@ -52,22 +52,22 @@ func TestScalingProbeRequiresExactResponse(t *testing.T) {
 		}
 		return r
 	}
-	if !validScalingHits(response(), requests[0], 0, 2, 250) {
-		t.Fatal("expected response was rejected")
+	if reason := scalingResponseMismatch(response(), requests[0], 0, 2, 250); reason != "" {
+		t.Fatalf("expected response was rejected: %s", reason)
 	}
-	for name, corrupt := range map[string]func(*clientv1.SemanticSearchResponse){
-		"warning":           func(r *clientv1.SemanticSearchResponse) { r.Warnings = []string{"index unavailable"} },
-		"wrong order":       func(r *clientv1.SemanticSearchResponse) { r.Results[0], r.Results[1] = r.Results[1], r.Results[0] },
-		"missing candidate": func(r *clientv1.SemanticSearchResponse) { r.ExaminedSemanticCandidates-- },
-		"short page":        func(r *clientv1.SemanticSearchResponse) { r.Results = r.Results[:1] },
-		"wrong domain":      func(r *clientv1.SemanticSearchResponse) { r.Results[0].Node.DomainId = "other" },
-		"stale generation":  func(r *clientv1.SemanticSearchResponse) { r.Results[0].Provenance.SemanticGeneration = 1 },
+	for want, corrupt := range map[string]func(*clientv1.SemanticSearchResponse){
+		"search-response-warning":             func(r *clientv1.SemanticSearchResponse) { r.Warnings = []string{"must-not-appear-in-evidence"} },
+		"unexpected-result-identity-or-order": func(r *clientv1.SemanticSearchResponse) { r.Results[0], r.Results[1] = r.Results[1], r.Results[0] },
+		"unexpected-candidate-count":          func(r *clientv1.SemanticSearchResponse) { r.ExaminedSemanticCandidates-- },
+		"unexpected-result-count":             func(r *clientv1.SemanticSearchResponse) { r.Results = r.Results[:1] },
+		"unexpected-result-scope":             func(r *clientv1.SemanticSearchResponse) { r.Results[0].Node.DomainId = "other" },
+		"unexpected-result-provenance":        func(r *clientv1.SemanticSearchResponse) { r.Results[0].Provenance.SemanticGeneration = 1 },
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(want, func(t *testing.T) {
 			r := response()
 			corrupt(r)
-			if validScalingHits(r, requests[0], 0, 2, 250) {
-				t.Fatal("invalid or incomplete response counted as successful")
+			if got := scalingResponseMismatch(r, requests[0], 0, 2, 250); got != want {
+				t.Fatalf("expected %s, got %s", want, got)
 			}
 		})
 	}
@@ -98,9 +98,9 @@ func TestScalingLoadBalancesQueriesAndExcludesWarmup(t *testing.T) {
 
 func TestScalingWarmupFailureDoesNotProduceTimedResults(t *testing.T) {
 	w := measureScalingWorkload(context.Background(), 1, 128, time.Second, func(context.Context, int, int) semanticbench.Sample {
-		return semanticbench.Sample{Outcome: semanticbench.UnexpectedResponse}
+		return semanticbench.Sample{Outcome: semanticbench.UnexpectedResponse, Reason: "unexpected-candidate-count"}
 	})
-	if w.Status != semanticbench.Inconclusive || w.Reason != "warmup-response-unverified" || w.Attempts != 0 || w.P50 != nil {
+	if w.Status != semanticbench.Inconclusive || w.Reason != "warmup-response-unverified" || w.Attempts != 0 || w.P50 != nil || w.Warmup.Attempts != 8 || w.Warmup.Failures["unexpected-candidate-count"] != 8 {
 		t.Fatalf("invalid warmup opened the timed window: %+v", w)
 	}
 }

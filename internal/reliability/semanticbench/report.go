@@ -80,19 +80,30 @@ type Point struct {
 }
 
 type Workload struct {
-	Clients    int      `json:"clients"`
-	Status     string   `json:"status"`
-	Reason     string   `json:"reason,omitempty"`
-	Attempts   int      `json:"attempts"`
-	Successes  int      `json:"successes"`
-	Errors     int      `json:"errors"`
-	Timeouts   int      `json:"timeouts"`
-	WrongHits  int      `json:"unexpectedResponses"`
-	DurationMS float64  `json:"durationMs"`
-	QPS        float64  `json:"successfulQueriesPerSecond"`
-	P50        *float64 `json:"p50Ms,omitempty"`
-	P95        *float64 `json:"p95Ms,omitempty"`
-	P99        *float64 `json:"p99Ms,omitempty"`
+	Clients    int            `json:"clients"`
+	Status     string         `json:"status"`
+	Reason     string         `json:"reason,omitempty"`
+	Attempts   int            `json:"attempts"`
+	Successes  int            `json:"successes"`
+	Errors     int            `json:"errors"`
+	Timeouts   int            `json:"timeouts"`
+	WrongHits  int            `json:"unexpectedResponses"`
+	DurationMS float64        `json:"durationMs"`
+	QPS        float64        `json:"successfulQueriesPerSecond"`
+	P50        *float64       `json:"p50Ms,omitempty"`
+	P95        *float64       `json:"p95Ms,omitempty"`
+	P99        *float64       `json:"p99Ms,omitempty"`
+	Failures   map[string]int `json:"failureReasons,omitempty"`
+	Warmup     *WarmupSummary `json:"warmup,omitempty"`
+}
+
+type WarmupSummary struct {
+	Attempts int            `json:"attempts"`
+	Failures map[string]int `json:"failureReasons,omitempty"`
+}
+
+func SummarizeWarmup(samples []Sample) *WarmupSummary {
+	return &WarmupSummary{Attempts: len(samples), Failures: failureReasons(samples)}
 }
 
 type Outcome uint8
@@ -107,6 +118,26 @@ const (
 type Sample struct {
 	Elapsed time.Duration
 	Outcome Outcome
+	// Reason is a fixed validation category or gRPC code, never an RPC
+	// message, warning text, query, or response field.
+	Reason string
+}
+
+func failureReasons(samples []Sample) map[string]int {
+	var counts map[string]int
+	for _, sample := range samples {
+		if sample.Outcome != Success {
+			if counts == nil {
+				counts = make(map[string]int)
+			}
+			reason := sample.Reason
+			if reason == "" {
+				reason = "unspecified"
+			}
+			counts[reason]++
+		}
+	}
+	return counts
 }
 
 func Milliseconds(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
@@ -157,6 +188,7 @@ func Summarize(clients, goal int, elapsed time.Duration, samples []Sample, inter
 		}
 	}
 	w.Successes = len(latencies)
+	w.Failures = failureReasons(samples)
 	if elapsed > 0 {
 		w.QPS = float64(w.Successes) / elapsed.Seconds()
 	}
@@ -205,11 +237,23 @@ func (r Report) Markdown() string {
 			} else if w.Reason != "" {
 				state += ": " + w.Reason
 			}
+			if w.Warmup != nil && len(w.Warmup.Failures) > 0 {
+				state += " (warm-up: " + formatFailureReasons(w.Warmup.Failures) + ")"
+			}
 			fmt.Fprintf(&b, "| %d | %s | %s | %d | %d / %d | %s | %s | %s | %.2f | %d | %d | %s |\n", p.Size, graph, index, w.Clients, w.Attempts, w.Successes, value(w.P50), value(w.P95), value(w.P99), w.QPS, w.Errors, w.Timeouts, state)
 		}
 	}
 	fmt.Fprintf(&b, "\nPercentiles use successful queries only (nearest rank); p95/p99 require at least %d/%d successes. Errors include unexpected responses, but not timeouts. See JSON for setup time, load duration, and the workload identity.\n", MinimumP95, MinimumP99)
 	return b.String()
+}
+
+func formatFailureReasons(reasons map[string]int) string {
+	entries := make([]string, 0, len(reasons))
+	for category, n := range reasons {
+		entries = append(entries, fmt.Sprintf("%s ×%d", category, n))
+	}
+	slices.Sort(entries)
+	return strings.Join(entries, ", ")
 }
 
 func value(n *float64) string {
