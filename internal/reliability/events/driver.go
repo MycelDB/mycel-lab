@@ -203,6 +203,9 @@ func (r *DriverRuntime) executeOne(ctx context.Context, phase spec.PhaseSpec, ev
 
 func (r *DriverRuntime) applyEvent(ctx context.Context, event spec.EventSpec) (map[string]any, error) {
 	switch event.Type {
+	case spec.SemanticScalingEvent:
+		report, err := r.executeSemanticScaling(ctx, event.Target)
+		return map[string]any{"semanticSearchScaling": report}, err
 	case "pod-stop", "pod-restart", "pod-delete", "node-stop", "node-restart":
 		return r.restartNodeAndRecoverEndpoint(ctx, event.Target)
 	case "rolling-restart":

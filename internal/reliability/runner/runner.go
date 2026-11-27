@@ -28,6 +28,7 @@ import (
 	"github.com/MycelDB/mycel-lab/internal/reliability/provision"
 	"github.com/MycelDB/mycel-lab/internal/reliability/releasebundle"
 	"github.com/MycelDB/mycel-lab/internal/reliability/report"
+	"github.com/MycelDB/mycel-lab/internal/reliability/semanticbench"
 	"github.com/MycelDB/mycel-lab/internal/reliability/spec"
 	"github.com/MycelDB/mycel-lab/internal/reliability/store"
 	mycel "github.com/myceldb/mycel-go-sdk"
@@ -411,6 +412,9 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if imageOverride != "" {
 		scenario.Cluster.Image = imageOverride
 	}
+	if err := validateSemanticScalingScenario(scenario, scenario.Cluster.Image, opts.ReleaseBundle != nil); err != nil {
+		return finish(RunFailed, err)
+	}
 	if !opts.DryRun && graphCommitRestartQualificationScenario(scenario) && !env.IsDigestPinnedImageReference(scenario.Cluster.Image) {
 		return finish(RunFailed, errors.New("graph commit restart qualification requires --image with a named digest-pinned daemon image or an authoritative release bundle image"))
 	}
@@ -735,7 +739,7 @@ func RunScenario(ctx context.Context, scenario spec.ResolvedScenario, opts Optio
 	if _, err := sink.WriteJSON("actors/assignments.json", resources.Assignments); err != nil {
 		return failAfterEnvironmentCreate(RunFailed, err)
 	}
-	recorder := &runRecorder{store: opts.Store, sink: sink.Scoped(), runID: runID, budget: budgetLedger, budgetCancel: budgetCancel}
+	recorder := &runRecorder{store: opts.Store, sink: sink.Scoped(), runID: runID, budget: budgetLedger, budgetCancel: budgetCancel, harnessIdentity: buildIdentity}
 	finalizationStages := []finalizationStageEvidence{}
 	persistFinalizationStages := func() error {
 		_, err := sink.WriteJSON("environment/finalization-stages.json", finalizationStages)
@@ -1223,6 +1227,13 @@ func RunSuiteFile(ctx context.Context, path string, opts Options) (SuiteResult, 
 			return out, err
 		}
 		if err := validateOperationTimeoutBudget(candidate); err != nil {
+			return out, err
+		}
+		image := candidate.Cluster.Image
+		if strings.TrimSpace(opts.ImageOverride) != "" {
+			image = strings.TrimSpace(opts.ImageOverride)
+		}
+		if err := validateSemanticScalingScenario(candidate, image, opts.ReleaseBundle != nil); err != nil {
 			return out, err
 		}
 	}
@@ -1971,11 +1982,12 @@ func assertPhaseOracleProgress(assertions map[string]any, before, after phaseOra
 }
 
 type runRecorder struct {
-	store        store.Store
-	sink         *artifacts.Sink
-	runID        string
-	budget       *provider.Ledger
-	budgetCancel context.CancelFunc
+	store           store.Store
+	sink            *artifacts.Sink
+	runID           string
+	budget          *provider.Ledger
+	budgetCancel    context.CancelFunc
+	harnessIdentity harnessBuildIdentity
 
 	recordingGate sync.RWMutex
 	disabled      bool
@@ -2165,6 +2177,16 @@ func (r *runRecorder) RecordRuntimeEvent(ctx context.Context, record events.Reco
 		return errors.New("run recorder is disabled")
 	}
 	defer r.endRecording()
+	if record.EventType == spec.SemanticScalingEvent {
+		if report, ok := record.Payload["semanticSearchScaling"].(semanticbench.Report); ok && report.RunID != "" {
+			if err := r.writeSemanticScalingReport(report); err != nil {
+				return err
+			}
+			delete(record.Payload, "semanticSearchScaling")
+			record.Payload["measurementStatus"] = report.Status
+			record.Payload["measurementReason"] = report.Reason
+		}
+	}
 	if err := appendEvent(ctx, r.store, r.sink, r.runID, events.ArtifactEvent(record)); err != nil {
 		return err
 	}

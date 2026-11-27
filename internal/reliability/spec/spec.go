@@ -590,6 +590,15 @@ func (s Scenario) Validate() error {
 					return fmt.Errorf("phase %q: graph usage actor group %q is not defined", phase.Name, target.ActorGroup)
 				}
 			}
+			if event.Type == SemanticScalingEvent {
+				if _, err := ParseSemanticScalingTarget(event.Target); err != nil {
+					return fmt.Errorf("phase %q: %w", phase.Name, err)
+				}
+				if len(s.Phases) != 1 || len(phase.Events) != 1 || event.Repeat > 1 || event.Duration.Duration != 0 || event.Interval.Duration != 0 || s.Semantic == nil || s.ProcedureInference != nil || len(s.ActorGroups) != 1 || s.ActorGroups[0].Count != 1 || s.ActorGroups[0].ProfileRef != "semantic-controller" {
+					return fmt.Errorf("phase %q: scaling requires a dedicated scenario with one semantic-controller and one event", phase.Name)
+				}
+				continue
+			}
 			if strings.HasPrefix(event.Type, "semantic-") {
 				if err := ValidateSemanticEventTarget(event.Type, event.Target); err != nil {
 					return fmt.Errorf("phase %q: %w", phase.Name, err)
@@ -621,7 +630,7 @@ func validateEnvironmentSpec(environment EnvironmentSpec) error {
 
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case "graph-usage-check":
+	case "graph-usage-check", SemanticScalingEvent:
 		return true
 	case "pod-stop", "pod-restart", "pod-delete", "node-restart", "node-stop", "rolling-restart", "statefulset-image-upgrade", "commonfolio-automation-seed", "commonfolio-automation-await-terminal", "commonfolio-automation-diagnostics", "cluster-recovery-wait", "log-assert-absent", "log-assert", "revision-fence-assert", "lexical-local-artifact-loss", "graph-change-notification-fault", "graph-change-notification-restore", "graph-raft-apply-storage-fault", "graph-raft-apply-storage-restore", "environment-reset", "host-command", "user-backup-fixture", "user-backup-export", "user-backup-validate", "user-backup-import", "user-backup-verify-restored", "user-backup-assert-safety", "system-backup-fixture", "cluster-backup-repository-create", "cluster-backup-create", "cluster-backup-validate", "cluster-backup-repository-assert", "cluster-backup-repository-delete", "cluster-restore-plan", "cluster-restore-start", "cluster-restore-apply", "cluster-restore-verify", "cluster-backup-cleanup", "raft-snapshot-create", "raft-pvc-replace-node", "raft-snapshot-verify-rejoined", "blob-snapshot-recovery", "identity-duplicate-principal-replay", "procedure-inference-setup", "procedure-inference-node-create", "procedure-inference-await-terminal", "procedure-inference-control", "procedure-inference-capacity-diagnostics-assert", "procedure-inference-reconciliation-start", "procedure-inference-reconciliation-await-terminal", "procedure-inference-emulator-assert", "semantic-node-create", "semantic-node-update", "semantic-node-delete", "semantic-transaction-negative", "semantic-rule-create", "semantic-backfill", "semantic-maintenance-await", "semantic-work-assert", "semantic-domain-peer-create", "semantic-domain-isolation-assert", "semantic-route-create", "semantic-route-bind", "semantic-model-config-update", "semantic-ordering-assert", "semantic-fault-assert", "semantic-search-assert", "semantic-unauthorized-search", "semantic-rule-enable", "semantic-rule-projection-update", "semantic-reliability-assert", "semantic-rebuild", "semantic-provider-budget-reconcile", "semantic-provider-emulator-assert", "semantic-local-baseline-loss":
 		return true

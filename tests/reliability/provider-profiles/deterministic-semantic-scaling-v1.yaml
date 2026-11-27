@@ -1,0 +1,26 @@
+apiVersion: reliability.mycel.io/v1alpha1
+kind: ProviderProfile
+metadata:
+  name: deterministic-semantic-scaling-v1
+  description: Local token-basis vectors for the report-only semantic search size sweeps.
+mode: deterministic
+capabilities:
+  embedding:
+    connectorType: fake
+    endpointKey: mycel-fixture
+    modelKey: mycel/token-basis-v1-8
+    dimensions: 8
+    vectorSpaceKey: mycel/token-basis-v1/8
+    fixtureStrategy: token-basis-v1
+    batching:
+      mode: single
+      maxItems: 1
+budgets:
+  enforcement: required
+  maxOperations: 4096
+  maxConcurrentOperations: 16
+  requestTimeout: 76m
+  totalTimeout: 90m
+artifacts:
+  captureBodies: false
+  captureHeaders: false

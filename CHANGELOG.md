@@ -8,6 +8,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Added the report-only `semantic-search-scaling` benchmark. It independently grows the indexed corpus and the graph with a fixed index, emits Markdown/JSON latency and throughput reports, and compares independent repetitions without a performance threshold (#138).
 - Added `k3d-graph-usage-upgrade`, a three-member Raft gate for `graph.logical_bytes`: writes before backfill, fail-closed usage reads, exact domain and space totals after reconciliation, and update/delete/restart coverage with separate physical diagnostics (#133).
 - Added machine-readable release lifecycle and one-shot approval controls to release execution bundles, protected workflow bundle construction, and coordinated release-manifest documentation so pre-candidate qualification, candidate acceptance, risk acceptance, and publication remain distinct (MycelDB/mycel#286).
 - Added a Compose MinIO repository-backed cluster backup suite that creates a credential-reference-only S3-compatible backup repository, runs a repository-backed cluster backup, verifies repository-truth list/get/validate/delete/restore-plan flows, checks `backup-set.json` and `COMPLETE` in object storage, and exercises fail-closed missing-`COMPLETE`, corrupt `COMPLETE`, corrupt required-manifest, interrupted-publish-after-node-artifacts, partial-node-upload, denied repository credential-reference, and repository delete failure negative cases.
