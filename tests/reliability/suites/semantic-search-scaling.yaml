@@ -1,0 +1,12 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Suite
+metadata:
+  name: semantic-search-scaling
+  description: Independent report-only indexed and graph-only growth sweeps for direct SemanticSearch.
+scenarios:
+  - path: ../scenarios/compose-semantic-search-scaling-indexed/compose-semantic-search-scaling-indexed.yaml
+  - path: ../scenarios/compose-semantic-search-scaling-graph-only/compose-semantic-search-scaling-graph-only.yaml
+execution:
+  mode: sequential
+  parallelism: 1
+  stopOnFailure: true

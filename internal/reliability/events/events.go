@@ -113,6 +113,10 @@ func evidenceSafeEventTarget(event spec.EventSpec) map[string]any {
 }
 
 func validateEvent(event spec.EventSpec) error {
+	if event.Type == spec.SemanticScalingEvent {
+		_, err := spec.ParseSemanticScalingTarget(event.Target)
+		return err
+	}
 	if strings.HasPrefix(event.Type, "semantic-") {
 		return spec.ValidateSemanticEventTarget(event.Type, event.Target)
 	}

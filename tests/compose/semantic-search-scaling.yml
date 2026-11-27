@@ -1,0 +1,21 @@
+# Dedicated host ports and no background semantic jobs during measurement.
+# Lab explicitly analyzes and drains dirty work before warming each size point.
+services:
+  myceld-a:
+    pull_policy: missing
+    ports:
+      - "127.0.0.1:29491:9091"
+    environment:
+      MYCELD_SEMANTIC_MAINTENANCE_ENABLED: "false"
+  myceld-b:
+    pull_policy: missing
+    ports:
+      - "127.0.0.1:29492:9091"
+    environment:
+      MYCELD_SEMANTIC_MAINTENANCE_ENABLED: "false"
+  myceld-c:
+    pull_policy: missing
+    ports:
+      - "127.0.0.1:29493:9091"
+    environment:
+      MYCELD_SEMANTIC_MAINTENANCE_ENABLED: "false"

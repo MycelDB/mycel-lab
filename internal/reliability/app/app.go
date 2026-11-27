@@ -51,6 +51,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runRun(args[1:], stdout, stderr)
 	case "runs":
 		return runRuns(args[1:], stdout, stderr)
+	case "benchmark":
+		return runBenchmark(args[1:], stdout, stderr)
 	case "release-bundle":
 		return runReleaseBundle(args[1:], stdout, stderr)
 	case "version":
@@ -738,6 +740,7 @@ Commands:
   delete   Delete one unused catalog definition version
   run      Run scenarios or suites
   runs     List, show, and compare persisted runs
+  benchmark  Compare report-only benchmark repetitions
   release-bundle  Validate a hermetic release execution bundle
   version  Print version information
 

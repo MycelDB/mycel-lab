@@ -1,0 +1,65 @@
+apiVersion: myceldb.io/reliability/v1
+kind: Scenario
+metadata:
+  name: compose-semantic-search-scaling-indexed
+  description: Report-only semantic search size sweep (indexed); no latency threshold.
+seed: 138
+providerProfileRef: deterministic-semantic-scaling-v1
+environment:
+  driver: compose
+  namespace: mycel-lab
+  options:
+    composeFiles:
+      - ../mycel/tests/compose/cluster/compose.yml
+      - tests/compose/semantic-search-scaling.yml
+    projectNamePrefix: mycel-lab-semantic-scaling
+    imageOverride: &image docker.io/myceldb/mycel@sha256:16cf5ff9c65227e9e0d3fe645b7cadc8b03aa66d1078df17e156a08502d0e110
+    serviceNames: [myceld-a, myceld-b, myceld-c]
+    grpcPorts: [29491, 29492, 29493]
+  capabilities:
+    required: [per-node-endpoints, logs]
+clusterRef: raft-3-node
+clusterOverrides:
+  image: *image
+  raft:
+    partitionCount: 16
+actorGroups:
+  - name: semantic-controller
+    profileRef: semantic-controller
+    count: 1
+    rate:
+      mode: per-actor
+      commitsPerSecond: 1
+semantic:
+  targetActorGroup: semantic-controller
+  rule:
+    deferProvisioning: true
+    key: semantic-scaling-v1
+    targetLabels: [Document]
+    bindingKey: search
+    purpose: semantic_search
+    sourceMode: self
+    includeProperties: [text]
+    minimumTextLength: 1
+    physicalIndex: exact
+    dirtyCooldown: 1ms
+    maxBatchSize: 32
+    workerConcurrency: 1
+  maintenance:
+    timeout: 12m
+    pollInterval: 100ms
+    analyzeLimit: 256
+    processLimit: 256
+phases:
+  - name: measure-scaling
+    duration: 1ms
+    events:
+      - type: semantic-search-scaling
+        target:
+          sweep: indexed
+          sizes: [1000, 3000, 10000, 30000]
+          samples: 1024
+          timeout: 75m
+          setupTimeout: 12m
+          workloadTimeout: 3m
+          requestTimeout: 10s

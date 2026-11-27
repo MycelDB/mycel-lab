@@ -13,6 +13,7 @@ running, observing, and comparing long-running MycelDB cluster experiments.
 - [Environment driver abstraction design](docs/design/environment-drivers.md)
 - [Provider profiles, budgets, and artifact safety](docs/design/provider-profiles.md)
 - [Semantic graph-index reliability suites](docs/design/semantic-graph-index-reliability-suites.md)
+- [Report-only semantic search scaling benchmark](docs/semantic-search-scaling.md)
 - [Semantic suite implementation and validation](docs/implementation/semantic-graph-index-reliability-suites-plan.md)
 - [Hermetic release execution bundles](docs/design/release-execution-bundles.md)
 - [Structured reliability harness implementation plan](docs/implementation/reliability-harness-implementation-plan.md)
