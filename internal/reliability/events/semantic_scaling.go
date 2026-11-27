@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,8 +91,6 @@ func (r *DriverRuntime) executeSemanticScaling(ctx context.Context, target map[s
 
 	var revision int64
 	var seeded, fixedIndex int
-	semantic := resources.Semantic
-	requests := scalingQueries(semantic)
 	for i := range report.Points {
 		p := &report.Points[i]
 		if ctx.Err() != nil {
@@ -113,6 +112,13 @@ func (r *DriverRuntime) executeSemanticScaling(ctx context.Context, target map[s
 		if reason != "" {
 			// No later point is valid after a failed mutation (which may have
 			// committed) or unverified setup. Keep its plan and prior samples.
+			break
+		}
+		// First-point setup creates the deferred rule. Build the requests only
+		// after its ID and selected binding have been confirmed by the index read.
+		requests, err := scalingQueries(resources.Semantic)
+		if err != nil {
+			p.Reason = "unbound-search-route"
 			break
 		}
 		seeded, fixedIndex = p.Size, wantIndexed
@@ -359,12 +365,15 @@ func readScalingCounts(ctx context.Context, client *mycel.Client, a provision.Ac
 	return counts, nil
 }
 
-func scalingQueries(semantic *provision.SemanticResources) [spec.ScalingAxes]*clientv1.SemanticSearchRequest {
+func scalingQueries(semantic *provision.SemanticResources) ([spec.ScalingAxes]*clientv1.SemanticSearchRequest, error) {
 	var requests [spec.ScalingAxes]*clientv1.SemanticSearchRequest
+	if semantic == nil || strings.TrimSpace(semantic.SpaceID) == "" || strings.TrimSpace(semantic.DomainID) == "" || strings.TrimSpace(semantic.SemanticRuleID) == "" || strings.TrimSpace(semantic.EmbeddingBindingKey) == "" {
+		return requests, errors.New("semantic scaling requires an exact scope, created rule ID, and binding key")
+	}
 	for axis := range requests {
 		requests[axis] = &clientv1.SemanticSearchRequest{SpaceId: semantic.SpaceID, DomainId: semantic.DomainID, SemanticRuleId: proto.String(semantic.SemanticRuleID), EmbeddingBindingKey: proto.String(semantic.EmbeddingBindingKey), Query: fmt.Sprintf("axis-%d", axis), Limit: spec.ScalingTopK, MinScore: proto.Float64(spec.ScalingMinScore)}
 	}
-	return requests
+	return requests, nil
 }
 
 func callScalingSearch(ctx context.Context, client *mycel.Client, req *clientv1.SemanticSearchRequest, axis int, generation uint64, candidates int) semanticbench.Sample {

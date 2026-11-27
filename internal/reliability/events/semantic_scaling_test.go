@@ -13,8 +13,28 @@ import (
 	clientv1 "github.com/myceldb/mycel-go-sdk/gen/go/mycel/client/v1"
 )
 
+func TestScalingQueriesRequireCreatedRule(t *testing.T) {
+	scope := &provision.SemanticResources{SpaceID: "space", DomainID: "domain", EmbeddingBindingKey: "binding"}
+	// Provision deliberately defers creation until after the first seed. A
+	// binding-only request is rejected with InvalidArgument by the daemon.
+	unbound, err := scalingQueries(scope)
+	if err == nil || unbound[0] != nil {
+		t.Fatalf("accepted a binding without a created rule: %v, %v", unbound, err)
+	}
+	scope.SemanticRuleID = "created-rule"
+	bound, err := scalingQueries(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, req := range bound {
+		if req.GetSemanticRuleId() != "created-rule" || req.GetEmbeddingBindingKey() != "binding" || req.GetSpaceId() != "space" || req.GetDomainId() != "domain" {
+			t.Fatal("query lost its exact created route")
+		}
+	}
+}
+
 func TestScalingFixtureCandidateCounts(t *testing.T) {
-	queries := scalingQueries(&provision.SemanticResources{})
+	queries := fixtureScalingQueries(t)
 	for _, indexed := range []int{40, 43, 1000, 10000, 30000} {
 		var counts [spec.ScalingAxes]int
 		for i := 0; i < indexed+64; i++ {
@@ -42,8 +62,17 @@ func TestScalingFixtureCandidateCounts(t *testing.T) {
 	}
 }
 
+func fixtureScalingQueries(t *testing.T) [spec.ScalingAxes]*clientv1.SemanticSearchRequest {
+	t.Helper()
+	requests, err := scalingQueries(&provision.SemanticResources{SpaceID: "space", DomainID: "domain", SemanticRuleID: "rule", EmbeddingBindingKey: "binding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return requests
+}
+
 func TestScalingProbeRequiresExactResponse(t *testing.T) {
-	requests := scalingQueries(&provision.SemanticResources{SpaceID: "space", DomainID: "domain", SemanticRuleID: "rule", EmbeddingBindingKey: "binding"})
+	requests := fixtureScalingQueries(t)
 	response := func() *clientv1.SemanticSearchResponse {
 		r := &clientv1.SemanticSearchResponse{ExaminedSemanticCandidates: 250, EligibleSemanticCandidates: 250, NextPageToken: "opaque"}
 		for i := 0; i < spec.ScalingTopK; i++ {
